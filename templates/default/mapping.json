@@ -1,0 +1,28 @@
+{
+  "testcase": {
+    "sheet": "2. FUNCTIONAL TESTCASE",
+    "firstDataRow": 12,
+    "columns": { "id": "A", "purpose": "B", "data": "C", "steps": "D", "expected": "E", "real": "F", "pre1": "I", "pre2": "J", "prod1": "K", "prod2": "L", "evidence": "M", "comment": "N" },
+    "summary": { "pass": "I3", "fail": "I4", "pending": "I5", "total": "I6" }
+  },
+  "ulnl": {
+    "title": { "cell": "A2", "sourceSheet": "TOTAL EFFORT", "sourceCell": "A3" },
+    "function": {
+      "sheet": "EFFORT_FUNCTION",
+      "firstDataRow": 9,
+      "totalsRow": 8,
+      "minLastRow": 20,
+      "columns": { "no": "A", "code": "B", "name": "C", "desc": "D", "sol": "E", "dev": "F", "ut": "G", "test": "H", "total": "I", "typeCode": "K", "typeName": "L", "utFlag": "M", "note": "X" },
+      "unitTestRatio": 0.3,
+      "typeLookup": { "sheet": "DEFINE TYPE OF FUNCTION", "codeCol": "B", "nameCol": "C", "firstRow": 5 },
+      "effortLookup": { "sheet": "DATA BASE_FUNCTION", "typeCol": "B", "workCol": "C", "mhCol": "E", "firstRow": 4 }
+    },
+    "nonFunction": {
+      "sheet": "EFFORT NON-FUNCTION",
+      "firstDataRow": 10,
+      "minRows": 5,
+      "columns": { "no": "A", "code": "B", "name": "C", "desc": "D", "effort": "E" },
+      "lookup": { "sheet": "DATA BASE_NON - FUNCTION", "codeCol": "B", "nameCol": "C", "mhCol": "G", "firstRow": 4 }
+    }
+  }
+}
