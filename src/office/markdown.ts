@@ -63,7 +63,7 @@ export function parseMarkdown(md: string): Block[] {
   while (i < lines.length) {
     const line = lines[i]!;
     let m: RegExpMatchArray | null;
-    if ((m = line.match(/^\s*(```|~~~)\s*([\w+-]*)\s*$/))) {
+    if ((m = line.match(/^\s*(```|~~~)\s*([^\s`]*)[^`]*$/))) {
       flushPara();
       const fence = m[1]!;
       const lang = m[2] || undefined;

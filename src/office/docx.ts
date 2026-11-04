@@ -1,35 +1,57 @@
 import JSZip from 'jszip';
 import { readFile, writeFile } from 'node:fs/promises';
-import { parseMarkdown, type Block, type Inline } from './markdown.js';
+import { parseInlines, parseMarkdown, type Block, type Inline } from './markdown.js';
 
 const esc = (s: string) =>
   s
     // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+    .replace(
+      /[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+      '',
+    )
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
 
+const NUM_PREFIX = /^\s*\d+(\.\d+)+\.?\s+|^\s*\d+\.\s+/;
+
 interface Styles {
   byName: Map<string, string>; // lower-case style name -> styleId
   table?: string;
+  numbered: Set<string>; // style ids with numPr (directly or via basedOn): headings auto-number
 }
 
 function readStyles(xml: string): Styles {
   const byName = new Map<string, string>();
   let table: string | undefined;
+  const info = new Map<string, { basedOn?: string; num: boolean }>();
   for (const m of xml.matchAll(/<w:style\b([^>]*)>([\s\S]*?)<\/w:style>/g)) {
     const id = m[1]!.match(/w:styleId="([^"]+)"/)?.[1];
     const name = m[2]!.match(/<w:name w:val="([^"]+)"/)?.[1];
     const type = m[1]!.match(/w:type="([^"]+)"/)?.[1];
     if (!id || !name) continue;
+    info.set(id, {
+      basedOn: m[2]!.match(/<w:basedOn w:val="([^"]+)"/)?.[1],
+      num: /<w:pPr>[\s\S]*?<w:numPr>/.test(m[2]!),
+    });
     const key = name.toLowerCase();
     if (!byName.has(key)) byName.set(key, id);
     if (type === 'table' && !table && id !== 'TableNormal' && key !== 'normal table') table = id;
   }
-  return { byName, ...(table ? { table } : {}) };
+  const numbered = new Set<string>();
+  for (const id of info.keys()) {
+    const seen = new Set<string>();
+    for (let c: string | undefined = id; c && !seen.has(c); c = info.get(c)?.basedOn) {
+      seen.add(c);
+      if (info.get(c)?.num) {
+        numbered.add(id);
+        break;
+      }
+    }
+  }
+  return { byName, numbered, ...(table ? { table } : {}) };
 }
 
 /** Split the children of <w:body> into top-level XML chunks. */
@@ -83,7 +105,7 @@ function renderTable(rows: Inline[][][], styles: Styles): string {
   const pr =
     `<w:tblPr>${styles.table ? `<w:tblStyle w:val="${styles.table}"/>` : ''}<w:tblW w:w="5000" w:type="pct"/>` +
     `${styles.table ? '' : BORDERS}</w:tblPr>`;
-  const grid = `<w:tblGrid>${'<w:gridCol/>'.repeat(cols)}</w:tblGrid>`;
+  const grid = `<w:tblGrid>${`<w:gridCol w:w="${Math.floor(9000 / cols)}"/>`.repeat(cols)}</w:tblGrid>`;
   const trs = rows
     .map((r, ri) => {
       const cells = Array.from({ length: cols }, (_, ci) => r[ci] ?? []);
@@ -103,7 +125,9 @@ function renderBlock(b: Block, styles: Styles): string {
     case 'heading': {
       const lvl = Math.min(Math.max(b.level, 1), 4);
       const id = sid(`heading ${lvl}`);
-      return id ? para(run(b.text), id) : para(run(b.text, { b: true, sz: 32 - lvl * 2 }));
+      const text = id && styles.numbered.has(id) ? b.text.replace(NUM_PREFIX, '') : b.text;
+      const inl = parseInlines(text);
+      return id ? para(inlineRuns(inl), id) : para(inlineRuns(inl, true));
     }
     case 'para':
       return para(inlineRuns(b.inlines));

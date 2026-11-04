@@ -57,3 +57,10 @@ describe('parseMarkdown', () => {
     ]);
   });
 });
+
+describe('fences', () => {
+  it('accepts info strings and unclosed fence', () => {
+    expect(parseMarkdown('```c#\nint x;\n```')).toEqual([{ type: 'code', text: 'int x;', lang: 'c#' }]);
+    expect(parseMarkdown('```json title="a"\n{}')).toEqual([{ type: 'code', text: '{}', lang: 'json' }]);
+  });
+});

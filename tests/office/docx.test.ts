@@ -79,3 +79,27 @@ describe('renderDocx', () => {
     expect(xml.trimEnd().endsWith('</w:sectPr></w:body></w:document>')).toBe(true);
   });
 });
+
+describe('renderDocx fixes', () => {
+  it('strips numeric heading prefixes only for auto-numbered styles, parses inline in headings', async () => {
+    const out = join(dir, 'f.docx');
+    await renderDocx(TKCT, '# 1.1 Foo\n\n## 2024 roadmap\n\n### **Đậm** `x`\n\n#### 3. Bar', out);
+    const { xml } = await open(out);
+    const gen = xml.slice(xml.indexOf('>Foo<') - 300);
+    expect(gen).toContain('>Foo<');
+    expect(gen).not.toContain('1.1 Foo');
+    expect(gen).toContain('2024 roadmap');
+    expect(gen).toContain('>Bar<');
+    expect(gen).toContain('Courier New');
+  });
+
+  it('strips lone surrogates, sets gridCol widths, accepts fence info strings and unclosed fences', async () => {
+    const out = join(dir, 'g.docx');
+    await renderDocx(TKCT, '# A\n\nx\uD800y\uFFFE\n\n| a | b |\n|--|--|\n| 1 | 2 |\n\n```json title="t"\n{"k": 1}', out);
+    const { xml } = await open(out);
+    expect(xml).toContain('xy');
+    expect(xml).toContain('<w:gridCol w:w="4500"/>');
+    expect(xml).toContain('{&quot;k&quot;: 1}');
+    expect(xml).toContain('Courier New');
+  });
+});
