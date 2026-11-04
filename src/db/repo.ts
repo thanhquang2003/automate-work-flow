@@ -196,7 +196,7 @@ export class Repo {
   listJobs(requestId?: string): JobRow[] {
     return (requestId ? this.all('select * from jobs where request_id=? order by id', requestId) : this.all('select * from jobs order by id')).map(toJob);
   }
-  /** Atomically claim the oldest due job (queued or paused with run_after <= now). */
+  /** Atomically claim the oldest due job. Paused jobs whose run_after has passed are reclaimable (intended: pauseJob sets run_after). */
   claimNextJob(now: number): JobRow | undefined {
     return this.tx(() => {
       const r = this.one("select * from jobs where status in ('queued','paused') and run_after<=? order by run_after, id limit 1", now);

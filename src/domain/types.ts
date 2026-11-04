@@ -14,9 +14,11 @@ export type UserRole = 'admin' | 'member';
 
 // ---- Zod schemas for Claude outputs (spec section 8/9) ----
 
+export const QUESTION_CATEGORIES = ['Chức năng', 'Phi chức năng', 'Hiệu năng', 'Dữ liệu', 'Tích hợp', 'Giao diện', 'Khác'] as const;
+
 export const QuestionSchema = z.object({
   id: z.string(),
-  category: z.enum(['Chức năng', 'Phi chức năng', 'Hiệu năng', 'Dữ liệu', 'Tích hợp', 'Giao diện', 'Khác']),
+  category: z.string(),
   question: z.string(),
   why: z.string(),
   type: z.enum(['single', 'multi', 'text']),
@@ -69,14 +71,13 @@ export const TestResultSchema = z.object({
 export const TestResultsOut = z.object({ results: z.array(TestResultSchema) });
 
 export const ReviewOut = z.object({
-  verdict: z.enum(['approve', 'reject']),
-  summary: z.string().default(''),
+  approved: z.boolean(),
   comments: z.array(z.object({
-    file: z.string().optional(),
+    file: z.string(),
     line: z.number().optional(),
-    severity: z.enum(['blocker', 'major', 'minor']).default('major'),
-    comment: z.string(),
-  })).default([]),
+    severity: z.string(),
+    body: z.string(),
+  })),
 });
 
 // ---- DB row types ----
