@@ -14,7 +14,7 @@
       "minLastRow": 20,
       "columns": { "no": "A", "code": "B", "name": "C", "desc": "D", "sol": "E", "dev": "F", "ut": "G", "test": "H", "total": "I", "typeCode": "K", "typeName": "L", "utFlag": "M", "note": "X" },
       "unitTestRatio": 0.3,
-      "typeLookup": { "sheet": "DEFINE TYPE OF FUNCTION", "codeCol": "B", "nameCol": "C", "firstRow": 5 },
+      "typeLookup": { "sheet": "DEFINE TYPE OF FUNCTION", "codeCol": "B", "nameCol": "C", "groupCol": "D", "explainCol": "E", "firstRow": 5 },
       "effortLookup": { "sheet": "DATA BASE_FUNCTION", "typeCol": "B", "workCol": "C", "mhCol": "E", "firstRow": 4 }
     },
     "nonFunction": {
@@ -22,7 +22,7 @@
       "firstDataRow": 10,
       "minRows": 5,
       "columns": { "no": "A", "code": "B", "name": "C", "desc": "D", "effort": "E" },
-      "lookup": { "sheet": "DATA BASE_NON - FUNCTION", "codeCol": "B", "nameCol": "C", "mhCol": "G", "firstRow": 4 }
+      "lookup": { "sheet": "DATA BASE_NON - FUNCTION", "codeCol": "B", "nameCol": "C", "scopeCol": "D", "mhCol": "G", "firstRow": 4 }
     }
   }
 }

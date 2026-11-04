@@ -225,6 +225,13 @@ export class Repo {
     );
     this.tx(() => { for (const f of fs) st.run(reqId, f.id, f.code, f.name, f.description, f.typeCode, f.unitTest ? 1 : 0, f.note, f.kind); });
   }
+  /** Replaces the whole feature list of a request (a re-run of BREAKDOWN may drop features). */
+  replaceFeatures(reqId: string, fs: FeatureRow[]): void {
+    this.tx(() => {
+      this.run('delete from features where request_id=?', reqId);
+      this.upsertFeatures(reqId, fs);
+    });
+  }
   listFeatures(reqId: string): FeatureRow[] {
     return this.all('select * from features where request_id=? order by id', reqId).map(toFeature);
   }
@@ -341,8 +348,17 @@ export class Repo {
     return this.all('select kind, path from templates order by kind').map(r => ({ kind: r.kind, path: r.path }));
   }
 
-  /** Run fn inside a transaction. */
+  private txDepth = 0;
+  /** Runs fn in a transaction; nested calls join the outer transaction. */
   tx<T>(fn: () => T): T {
+    if (this.txDepth > 0) {
+      this.txDepth++;
+      try { return fn(); } finally { this.txDepth--; }
+    }
+    this.txDepth = 1;
+    try { return this.txOuter(fn); } finally { this.txDepth = 0; }
+  }
+  private txOuter<T>(fn: () => T): T {
     this.db.exec('begin immediate');
     try { const v = fn(); this.db.exec('commit'); return v; } catch (e) { this.db.exec('rollback'); throw e; }
   }

@@ -56,6 +56,12 @@ export class Git {
     await this.exec(['clone', '--', url, dir], { cwd: process.cwd(), env: this.authEnv(token || undefined) });
   }
 
+  /** `git init` in the working directory with the given initial branch. */
+  async init(initialBranch: string): Promise<void> {
+    this.checkRef(initialBranch);
+    await this.exec(['init', '-b', initialBranch]);
+  }
+
   async checkout(branch: string, create = false, from?: string): Promise<void> {
     this.checkRef(branch);
     if (from) this.checkRef(from);

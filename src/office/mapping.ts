@@ -17,7 +17,7 @@ export interface UlnlFunctionMapping {
   minLastRow: number;
   columns: Record<'no' | 'code' | 'name' | 'desc' | 'sol' | 'dev' | 'ut' | 'test' | 'total' | 'typeCode' | 'typeName' | 'utFlag' | 'note', string>;
   unitTestRatio: number;
-  typeLookup: { sheet: string; codeCol: string; nameCol: string; firstRow: number };
+  typeLookup: { sheet: string; codeCol: string; nameCol: string; groupCol?: string; explainCol?: string; firstRow: number };
   effortLookup: { sheet: string; typeCol: string; workCol: string; mhCol: string; firstRow: number };
 }
 
@@ -26,7 +26,7 @@ export interface UlnlNonFunctionMapping {
   firstDataRow: number;
   minRows: number;
   columns: Record<'no' | 'code' | 'name' | 'desc' | 'effort', string>;
-  lookup: { sheet: string; codeCol: string; nameCol: string; mhCol: string; firstRow: number };
+  lookup: { sheet: string; codeCol: string; nameCol: string; scopeCol?: string; mhCol: string; firstRow: number };
 }
 
 export interface UlnlMapping {
