@@ -17,6 +17,8 @@ export interface StageContext {
   req: RequestRow;
   ws: Workspace;
   feedback?: string;
+  /** True when this run follows the customer's answers (resumeAfterCustomer). */
+  resume: boolean;
   /** Aborted when the request is cancelled. */
   signal: AbortSignal;
   log(msg: string, level?: 'info' | 'warn' | 'error'): void;
@@ -43,6 +45,13 @@ export class RateLimitError extends Error {
   }
 }
 
+export class PipelineBusyError extends Error {
+  constructor(reqId: string) {
+    super(`Request ${reqId} has a stage running`);
+    this.name = 'PipelineBusyError';
+  }
+}
+
 const registry = new Map<Stage, { handler: StageHandler; gate: boolean }>();
 export function registerStage(stage: Stage, handler: StageHandler, opts: { gate: boolean }): void {
   registry.set(stage, { handler, gate: opts.gate });
@@ -56,7 +65,7 @@ export interface PipelineDeps {
 }
 
 const FAR_FUTURE = 8_640_000_000_000_000; // max JS date; paused-by-user jobs never come due
-const MAX_ATTEMPTS = 2; // one retry after an exception
+const MAX_EXCEPTION_RETRIES = 1; // one retry after an exception
 const MAX_LOG_LINE = 500;
 
 /**
@@ -75,8 +84,27 @@ export function nextStage(stage: Stage, req: Pick<RequestRow, 'projectKind'>): S
   return undefined;
 }
 
+/** Reduce a stream-json line to something worth showing: assistant text, tool names, results. Non-JSON lines pass through. */
+export function summarizeEvent(line: string): string | undefined {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let o: any;
+  try { o = JSON.parse(line); } catch { return line; }
+  if (!o || typeof o !== 'object') return line;
+  if (o.type === 'assistant' && Array.isArray(o.message?.content)) {
+    const parts: string[] = [];
+    for (const c of o.message.content) {
+      if (c?.type === 'text' && typeof c.text === 'string' && c.text.trim()) parts.push(c.text.trim());
+      else if (c?.type === 'tool_use') parts.push(`[tool] ${c.name}`);
+    }
+    return parts.length ? parts.join(' | ') : undefined;
+  }
+  if (o.type === 'result') return `[result] ${typeof o.result === 'string' ? o.result : ''}`.trim();
+  return undefined;
+}
+
 export class Pipeline {
   private controllers = new Map<string, AbortController>();
+  private gens = new Map<string, number>();
 
   constructor(private cfg: Config, private repo: Repo, private deps: PipelineDeps = {}) {}
 
@@ -86,6 +114,7 @@ export class Pipeline {
 
   start(reqId: string): void {
     this.mustGet(reqId);
+    this.bump(reqId);
     this.setStatus(reqId, 'INTAKE', 'running');
     this.enqueue(reqId, 'INTAKE');
   }
@@ -106,15 +135,15 @@ export class Pipeline {
   }
 
   resumeAfterCustomer(reqId: string): void {
-    const req = this.expectStatus(reqId, 'awaiting_customer');
-    // After the customer answers, ANALYSIS re-evaluates the answers (it may goto BREAKDOWN when clear).
-    this.setStatus(reqId, 'ANALYSIS', 'running');
-    void req;
-    this.enqueue(reqId, 'ANALYSIS');
+    this.expectStatus(reqId, 'awaiting_customer');
+    // CLARIFY reruns with ctx.resume=true and decides where to go next (e.g. goto ANALYSIS).
+    this.setStatus(reqId, 'CLARIFY', 'running');
+    this.enqueue(reqId, 'CLARIFY', undefined, true);
   }
 
   cancel(reqId: string): void {
     const req = this.mustGet(reqId);
+    this.bump(reqId);
     this.setStatus(reqId, req.stage, 'cancelled');
     for (const j of this.repo.listJobs(reqId)) if (j.status === 'queued' || j.status === 'paused') this.repo.failJob(j.id, 'cancelled');
     this.controllers.get(reqId)?.abort();
@@ -130,12 +159,16 @@ export class Pipeline {
 
   resume(reqId: string): void {
     const req = this.expectStatus(reqId, 'paused');
+    if (this.controllers.has(reqId)) throw new PipelineBusyError(reqId);
     this.setStatus(reqId, req.stage, 'running');
-    for (const j of this.repo.listJobs(reqId)) if (j.status === 'paused') this.repo.pauseJob(j.id, this.now());
+    const now = this.now();
+    for (const j of this.repo.listJobs(reqId)) if (j.status === 'paused') this.repo.pauseJob(j.id, j.runAfter >= FAR_FUTURE ? now : Math.max(j.runAfter, now));
   }
 
   rerunStage(reqId: string, stage: Stage): void {
     this.mustGet(reqId);
+    if (this.controllers.has(reqId)) throw new PipelineBusyError(reqId);
+    this.bump(reqId);
     for (const j of this.repo.listJobs(reqId)) if (j.status === 'queued' || j.status === 'paused') this.repo.failJob(j.id, 'superseded by rerun');
     this.setStatus(reqId, stage, 'running');
     this.enqueue(reqId, stage);
@@ -144,61 +177,64 @@ export class Pipeline {
   // ---- job execution (called by Worker) ----
 
   async runJob(job: JobRow): Promise<void> {
-    const payload = job.payload as { stage?: Stage; feedback?: string };
+    const payload = job.payload as { stage?: Stage; feedback?: string; resume?: boolean; gen?: number; errRetries?: number };
     const stage = payload.stage;
     const req0 = job.requestId ? this.repo.getRequest(job.requestId) : undefined;
     if (job.kind !== 'run_stage' || !stage || !req0) { this.repo.failJob(job.id, `Unsupported job ${job.kind}`); return; }
-    if (req0.status === 'cancelled') { this.repo.failJob(job.id, 'cancelled'); return; }
     const reqId = req0.id;
+    const stale = (): boolean => payload.gen !== undefined && payload.gen < (this.gens.get(reqId) ?? 0);
+    if (req0.status === 'cancelled') { this.repo.failJob(job.id, 'cancelled'); return; }
+    if (stale()) { this.repo.failJob(job.id, 'superseded'); return; }
 
-    // A stage_run still marked running belongs to a crashed process.
-    const prev = this.repo.latestStageRun(reqId, stage);
-    if (prev?.status === 'running') this.repo.finishStageRun(prev.id, 'failed', { error: 'interrupted' });
-
-    const userPaused = req0.status === 'paused';
-    this.setStatus(reqId, stage, userPaused ? 'paused' : 'running');
-    const req = this.mustGet(reqId);
-    const run = this.repo.createStageRun(reqId, stage, payload.feedback ?? null);
-    const ws = Workspace.for(this.cfg, reqId).ensure();
+    let run: StageRunRow | undefined;
     const controller = new AbortController();
     this.controllers.set(reqId, controller);
-    this.log(reqId, 'info', `Bắt đầu giai đoạn ${stage} (lần ${run.attempt})`);
-
-    let outcome: StageOutcome;
+    let outcome: StageOutcome | undefined;
     let thrown: unknown;
     try {
+      // A stage_run still marked running belongs to a crashed process.
+      const prev = this.repo.latestStageRun(reqId, stage);
+      if (prev?.status === 'running') this.repo.finishStageRun(prev.id, 'failed', { error: 'interrupted' });
+      // A claimed job always runs; a user pause is detected only after the handler returns.
+      this.setStatus(reqId, stage, 'running');
+      const req = this.repo.getRequest(reqId)!;
+      run = this.repo.createStageRun(reqId, stage, payload.feedback ?? null);
+      const ws = Workspace.for(this.cfg, reqId).ensure();
+      this.log(reqId, 'info', `Bắt đầu giai đoạn ${stage} (lần ${run.attempt})`);
       const reg = registry.get(stage);
-      if (reg) outcome = await reg.handler(this.makeContext(req, ws, run, payload.feedback, controller.signal));
+      if (reg) outcome = await reg.handler(this.makeContext(req, ws, run, payload.feedback, !!payload.resume, controller.signal));
       else if (stage === 'INTAKE' || stage === 'DONE') outcome = { kind: 'next' };
       else outcome = { kind: 'fail', error: `Chưa đăng ký xử lý cho giai đoạn ${stage}` };
     } catch (e) {
       if (e instanceof RateLimitError) outcome = { kind: 'retry_later', until: e.until };
-      else { thrown = e; outcome = { kind: 'fail', error: '' }; }
+      else thrown = e;
     } finally {
       if (this.controllers.get(reqId) === controller) this.controllers.delete(reqId);
     }
 
-    if (this.repo.getRequest(reqId)?.status === 'cancelled') {
-      this.repo.finishStageRun(run.id, 'cancelled');
-      this.repo.failJob(job.id, 'cancelled');
+    if (this.repo.getRequest(reqId)?.status === 'cancelled' || stale()) {
+      if (run) this.repo.finishStageRun(run.id, 'cancelled');
+      this.repo.failJob(job.id, stale() ? 'superseded' : 'cancelled');
       return;
     }
 
     if (thrown !== undefined) {
       const msg = thrown instanceof Error ? thrown.message : String(thrown);
-      this.repo.finishStageRun(run.id, 'failed', { error: msg });
+      if (run) this.repo.finishStageRun(run.id, 'failed', { error: msg });
       this.log(reqId, 'error', `Giai đoạn ${stage} lỗi: ${msg}`);
-      if (job.attempts < MAX_ATTEMPTS) {
-        this.log(reqId, 'warn', 'Thử lại giai đoạn một lần nữa');
-        this.repo.pauseJob(job.id, this.now());
-      } else {
+      this.repo.tx(() => {
         this.repo.failJob(job.id, msg);
-        this.setStatus(reqId, stage, 'failed');
-      }
+        if ((payload.errRetries ?? 0) < MAX_EXCEPTION_RETRIES) {
+          this.log(reqId, 'warn', 'Thử lại giai đoạn một lần nữa');
+          this.repo.enqueueJob(reqId, 'run_stage', { ...payload, errRetries: (payload.errRetries ?? 0) + 1 }, this.now());
+        } else this.setStatus(reqId, stage, 'failed');
+      });
       return;
     }
 
-    this.applyOutcome(job, req, run, outcome!, this.repo.getRequest(reqId)?.status === 'paused');
+    const req = this.repo.getRequest(reqId)!;
+    const userPaused = req.status === 'paused';
+    this.repo.tx(() => this.applyOutcome(job, req, run!, outcome!, userPaused));
   }
 
   // ---- internals ----
@@ -253,7 +289,7 @@ export class Pipeline {
     }
   }
 
-  private makeContext(req: RequestRow, ws: Workspace, run: StageRunRow, feedback: string | undefined, signal: AbortSignal): StageContext {
+  private makeContext(req: RequestRow, ws: Workspace, run: StageRunRow, feedback: string | undefined, resume: boolean, signal: AbortSignal): StageContext {
     const reqId = req.id;
     const log = (msg: string, level: 'info' | 'warn' | 'error' = 'info'): void => this.log(reqId, level, msg);
     const gitlab = this.deps.makeGitLab
@@ -261,14 +297,14 @@ export class Pipeline {
       : this.cfg.gitlab.url && this.cfg.gitlab.token ? new GitLabClient(this.cfg.gitlab.url, this.cfg.gitlab.token) : undefined;
     const git = this.deps.makeGit ? this.deps.makeGit(req, ws) : new Git(ws.repoDir, { token: this.cfg.gitlab.token || undefined });
     return {
-      cfg: this.cfg, repo: this.repo, req, ws, feedback: feedback || undefined, signal, log, gitlab, git,
+      cfg: this.cfg, repo: this.repo, req, ws, feedback: feedback || undefined, resume, signal, log, gitlab, git,
       claude: async (prompt, extra = {}) => {
         const res = await runClaude(this.cfg, {
           cwd: ws.repoDir,
           addDirs: [ws.root],
           logFile: join(ws.logsDir, `${run.stage}-${run.attempt}.log`),
           signal,
-          onEvent: line => log(line.length > MAX_LOG_LINE ? `${line.slice(0, MAX_LOG_LINE)}…` : line),
+          onEvent: line => { const t = summarizeEvent(line); if (t) log(t.length > MAX_LOG_LINE ? `${t.slice(0, MAX_LOG_LINE)}…` : t); },
           prompt,
           ...extra,
         });
@@ -279,8 +315,13 @@ export class Pipeline {
     };
   }
 
-  private enqueue(reqId: string, stage: Stage, feedback?: string): void {
-    const job = this.repo.enqueueJob(reqId, 'run_stage', feedback ? { stage, feedback } : { stage });
+  private bump(reqId: string): void { this.gens.set(reqId, (this.gens.get(reqId) ?? 0) + 1); }
+
+  private enqueue(reqId: string, stage: Stage, feedback?: string, resume = false): void {
+    const payload: Record<string, unknown> = { stage, gen: this.gens.get(reqId) ?? 0 };
+    if (feedback) payload.feedback = feedback;
+    if (resume) payload.resume = true;
+    const job = this.repo.enqueueJob(reqId, 'run_stage', payload);
     if (this.repo.getRequest(reqId)?.status === 'paused') this.repo.pauseJob(job.id, FAR_FUTURE);
   }
 

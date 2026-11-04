@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { setMockHandler, clearMockHandler } from '../../src/claude/mock.js';
 import type { RunOpts } from '../../src/claude/runner.js';
-import { bus, clearStages, registerStage, type StageHandler } from '../../src/engine/pipeline.js';
+import { PipelineBusyError, summarizeEvent, bus, clearStages, registerStage, type StageHandler } from '../../src/engine/pipeline.js';
 import { Worker } from '../../src/engine/worker.js';
 import { STAGES, type Stage } from '../../src/domain/types.js';
 import { setup, mkReq } from './helpers.js';
@@ -58,7 +58,7 @@ describe('pipeline', () => {
   });
 
   it('await_customer then resumeAfterCustomer continues to ANALYSIS', async () => {
-    registerAll({ CLARIFY: async () => ({ kind: 'await_customer' }) });
+    registerAll({ CLARIFY: async ctx => (ctx.resume ? { kind: 'goto', stage: 'ANALYSIS' } : { kind: 'await_customer' }) });
     const { repo, pipeline, worker } = setup();
     const r = mkReq(repo);
     pipeline.start(r.id);
@@ -68,7 +68,8 @@ describe('pipeline', () => {
     const n = calls.length;
     pipeline.resumeAfterCustomer(r.id);
     await worker.drain();
-    expect(calls[n].stage).toBe('ANALYSIS');
+    expect(calls[n].stage).toBe('CLARIFY');
+    expect(calls[n + 1].stage).toBe('ANALYSIS');
   });
 
   it('retry_later pauses job', async () => {
@@ -222,5 +223,63 @@ describe('pipeline', () => {
     clearMockHandler();
     expect(repo.getRequest(r.id)!.status).toBe('paused');
     expect(repo.listJobs(r.id)[0]).toMatchObject({ status: 'paused', runAfter: until.getTime() });
+  });
+  it('rate-limit pause in auto mode continues to DONE without manual resume', async () => {
+    let t = 1_000_000; let first = true;
+    registerAll({ INTAKE: async () => { if (first) { first = false; return { kind: 'retry_later', until: new Date(t + 60_000) }; } return { kind: 'next' }; } });
+    const { repo, pipeline, worker } = setup({}, () => t);
+    const r = mkReq(repo);
+    pipeline.start(r.id); await worker.drain();
+    expect(repo.getRequest(r.id)!.status).toBe('paused');
+    t += 61_000;
+    await worker.drain();
+    expect(repo.getRequest(r.id)!.status).toBe('done');
+  });
+
+  it('rerunStage and resume throw PipelineBusyError while a stage runs; stale outcome ignored', async () => {
+    let release!: () => void; let started!: () => void;
+    const gate = new Promise<void>(r => { release = r; }); const s = new Promise<void>(r => { started = r; });
+    registerAll({ INTAKE: async () => { started(); await gate; return { kind: 'next' }; } });
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo);
+    pipeline.start(r.id); await worker.tick(); await s;
+    expect(() => pipeline.rerunStage(r.id, 'ANALYSIS')).toThrow(PipelineBusyError);
+    pipeline.pause(r.id);
+    expect(() => pipeline.resume(r.id)).toThrow(PipelineBusyError);
+    release(); await worker.idle();
+    expect(repo.getRequest(r.id)!.status).toBe('paused');
+    expect(repo.listJobs(r.id).filter(j => j.status === 'paused')).toHaveLength(1);
+  });
+
+  it('errors before the handler (workspace/makeGit) fail the request and finish stage_run', async () => {
+    registerAll();
+    const { cfg, repo } = setup();
+    const { Pipeline } = await import('../../src/engine/pipeline.js');
+    const pipeline = new Pipeline(cfg, repo, { makeGit: () => { throw new Error('git broke'); } });
+    const worker = new Worker(cfg, repo, pipeline);
+    const r = mkReq(repo);
+    pipeline.start(r.id); await worker.drain();
+    expect(repo.getRequest(r.id)!.status).toBe('failed');
+    expect(repo.listStageRuns(r.id).every(x => x.status === 'failed' && x.error === 'git broke')).toBe(true);
+    expect(repo.listStageRuns(r.id)).toHaveLength(2);
+  });
+
+  it('resume keeps a later runAfter for non-parked jobs', async () => {
+    registerAll();
+    const t = 1_000_000;
+    const { repo, pipeline } = setup({}, () => t);
+    const r = mkReq(repo);
+    const j = repo.enqueueJob(r.id, 'run_stage', { stage: 'INTAKE' });
+    repo.pauseJob(j.id, t + 5_000);
+    repo.updateRequest(r.id, { status: 'paused' });
+    pipeline.resume(r.id);
+    expect(repo.getJob(j.id)!.runAfter).toBe(t + 5_000);
+  });
+
+  it('summarizeEvent keeps assistant text/tool/result and drops noise', () => {
+    expect(summarizeEvent(JSON.stringify({ type: 'system', subtype: 'init' }))).toBeUndefined();
+    expect(summarizeEvent(JSON.stringify({ type: 'user', message: {} }))).toBeUndefined();
+    expect(summarizeEvent(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'hi' }, { type: 'tool_use', name: 'Read' }] } }))).toBe('hi | [tool] Read');
+    expect(summarizeEvent(JSON.stringify({ type: 'result', result: 'done' }))).toBe('[result] done');
   });
 });
