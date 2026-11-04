@@ -282,4 +282,23 @@ describe('pipeline', () => {
     expect(summarizeEvent(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'hi' }, { type: 'tool_use', name: 'Read' }] } }))).toBe('hi | [tool] Read');
     expect(summarizeEvent(JSON.stringify({ type: 'result', result: 'done' }))).toBe('[result] done');
   });
+
+  it('pause during a throwing handler parks the retry job until resume', async () => {
+    let started!: () => void; let release!: () => void; let n = 0;
+    const s1 = new Promise<void>(r => { started = r; }); const gate = new Promise<void>(r => { release = r; });
+    registerAll({ INTAKE: async () => { if (n++ === 0) { started(); await gate; throw new Error('boom'); } return { kind: 'next' }; } });
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo, { runMode: 'review' });
+    pipeline.start(r.id); await worker.tick(); await s1;
+    pipeline.pause(r.id);
+    release(); await worker.idle();
+    await worker.drain();
+    expect(repo.getRequest(r.id)!.status).toBe('paused');
+    expect(n).toBe(1);
+    expect(repo.listJobs(r.id).filter(j => j.status === 'paused')).toHaveLength(1);
+    pipeline.resume(r.id);
+    await worker.drain();
+    expect(n).toBe(2);
+    expect(repo.getRequest(r.id)!.status).toBe('awaiting_approval');
+  });
 });

@@ -226,7 +226,8 @@ export class Pipeline {
         this.repo.failJob(job.id, msg);
         if ((payload.errRetries ?? 0) < MAX_EXCEPTION_RETRIES) {
           this.log(reqId, 'warn', 'Thử lại giai đoạn một lần nữa');
-          this.repo.enqueueJob(reqId, 'run_stage', { ...payload, errRetries: (payload.errRetries ?? 0) + 1 }, this.now());
+          const retry = this.repo.enqueueJob(reqId, 'run_stage', { ...payload, errRetries: (payload.errRetries ?? 0) + 1 }, this.now());
+          this.parkIfPaused(reqId, retry.id);
         } else this.setStatus(reqId, stage, 'failed');
       });
       return;
@@ -322,7 +323,12 @@ export class Pipeline {
     if (feedback) payload.feedback = feedback;
     if (resume) payload.resume = true;
     const job = this.repo.enqueueJob(reqId, 'run_stage', payload);
-    if (this.repo.getRequest(reqId)?.status === 'paused') this.repo.pauseJob(job.id, FAR_FUTURE);
+    this.parkIfPaused(reqId, job.id);
+  }
+
+  /** A user-paused request never gets new work claimed until resume(). */
+  private parkIfPaused(reqId: string, jobId: number): void {
+    if (this.repo.getRequest(reqId)?.status === 'paused') this.repo.pauseJob(jobId, FAR_FUTURE);
   }
 
   private setStatus(reqId: string, stage: Stage, status: RequestStatus): void {
