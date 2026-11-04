@@ -17,6 +17,7 @@ import { Git } from '../../src/gitlab/git.js';
 import type { GitLabClient } from '../../src/gitlab/client.js';
 import type { Config } from '../../src/config.js';
 import type { Question, Stage } from '../../src/domain/types.js';
+import { safeFileName } from '../../src/engine/stages/intake.js';
 import { setup, mkReq } from './helpers.js';
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -45,8 +46,10 @@ const q = (id: string, priority: 'must' | 'should', extra: Partial<Question> = {
   id, category: 'Chức năng', question: `Câu hỏi ${id}?`, why: 'vì cần', type: 'single', options: ['Có', 'Không'], suggested_answer: 'Có', priority, ...extra,
 });
 
+const ANALYSIS_MD = '# Tổng quan yêu cầu\n\nNội dung phân tích.\n\n# Chỗ hổng đã phát hiện\n\nKhông.\n\n# Câu hỏi mở và giả định\n\nKhông.\n';
+
 const writeAnalysis = (qs: Question[]) => (dir: string) => {
-  writeFileSync(join(dir, 'analysis.md'), '# Tổng quan yêu cầu\n\nNội dung phân tích.\n');
+  writeFileSync(join(dir, 'analysis.md'), ANALYSIS_MD);
   writeFileSync(join(dir, 'questions.json'), JSON.stringify({ questions: qs }));
 };
 
@@ -116,7 +119,7 @@ Không.
 const TKDB_MD = `# GIỚI THIỆU
 ## Mục tiêu tài liệu
 Mô tả CSDL.
-## Định nghĩa thuật ngữ
+## Định nghĩa thuật ngữ và các từ viết tắt
 Không.
 ## Tài liệu tham khảo
 TKCT.
@@ -125,13 +128,13 @@ PostgreSQL.
 # CƠ SỞ DỮ LIỆU
 ## Các mô hình quan hệ dữ liệu
 Sơ đồ: ERD
-## Danh sách bảng
+### Danh sách bảng
 | Bảng | Mô tả |
 |---|---|
 | USERS | Người dùng |
-## Danh sách mã lỗi
+### Danh sách mã lỗi
 Không.
-## USERS
+## Bảng USERS
 ### Mô tả cột
 | Cột | Kiểu |
 |---|---|
@@ -148,7 +151,7 @@ Không.
 \`\`\`sql
 CREATE TABLE USERS(ID BIGINT PRIMARY KEY);
 \`\`\`
-# Script rollback
+## Script rollback
 \`\`\`sql
 DROP TABLE USERS;
 \`\`\`
@@ -517,5 +520,149 @@ describe('stages part 1', () => {
     expect(git(bare, 'log', '--oneline', '-1', `devflow/${r.id}`)).toMatch(/REQ-001/);
     expect(git(bare, 'log', '--oneline', '-1', 'main')).toMatch(/readme/);
     expect(JSON.parse(readFileSync(join(ws.root, 'project.json'), 'utf8'))).toMatchObject({ projectId: 7, defaultBranch: 'main', branch: `devflow/${r.id}` });
+  });
+});
+
+const featureRows = (fs: typeof FEATURES.features) => fs.map(f => ({ id: f.id, code: f.code, name: f.name, description: f.description, typeCode: f.type_code, unitTest: f.unit_test, note: f.note, kind: f.kind as 'function' | 'nonfunction' }));
+
+describe('stages part 1 — review fixes', () => {
+  it('round-2 questions reusing an unanswered ID leave exactly one open question (I1)', async () => {
+    register();
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo, { projectKind: 'new' });
+    repo.upsertQuestions(r.id, 1, [q('Q-01', 'must'), q('Q-02', 'must')]);
+    repo.saveAnswer(r.id, 'Q-02', 'Có', 'excel');
+    repo.updateRequest(r.id, { clarifyRound: 1 });
+    mockClaude({ analyst: writeAnalysis([q('Q-01', 'must', { question: 'Diễn đạt lại Q-01?' })]) });
+    startAt(pipeline, r.id, 'ANALYSIS');
+    await worker.drain();
+    expect(calls[0]!.prompt).toMatch(/đúng ID cũ/);
+    const qs = repo.listQuestions(r.id);
+    expect(qs.map(x => [x.id, x.round])).toEqual([['Q-02', 1], ['Q-01', 2]]);
+    const open = qs.filter(x => !repo.latestAnswers(r.id).get(x.id));
+    expect(open.map(x => x.id)).toEqual(['Q-01']);
+    expect(open[0]!.question).toBe('Diễn đạt lại Q-01?');
+    expect(repo.getRequest(r.id)!.stage).toBe('CLARIFY');
+  });
+
+  it('analysis requires the gap and open-question sections (M2)', async () => {
+    register();
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo, { projectKind: 'new' });
+    let n = 0;
+    mockClaude({
+      analyst: dir => {
+        writeFileSync(join(dir, 'analysis.md'), n++ === 0 ? '# Tổng quan yêu cầu\n\nThiếu mục.\n' : ANALYSIS_MD);
+        writeFileSync(join(dir, 'questions.json'), JSON.stringify({ questions: [q('Q-01', 'must')] }));
+      },
+    });
+    startAt(pipeline, r.id, 'ANALYSIS');
+    await worker.drain();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.prompt).toContain('# Chỗ hổng đã phát hiện');
+    expect(calls[1]!.prompt).toContain('# Câu hỏi mở và giả định');
+    expect(repo.getRequest(r.id)!.status).toBe('awaiting_customer');
+  });
+
+  it('design commits only docs/devflow, not build outputs (I2)', async () => {
+    register(['PLANNING']);
+    const { repo, pipeline, worker, cfg } = setup();
+    const r = mkReq(repo, { projectKind: 'new' });
+    const ws = Workspace.for(cfg, r.id).ensure();
+    initRepo(ws.repoDir, `devflow/${r.id}`);
+    mkdirSync(join(ws.repoDir, 'dist'), { recursive: true });
+    writeFileSync(join(ws.repoDir, 'dist', 'bundle.js'), 'built');
+    repo.upsertFeatures(r.id, featureRows(FEATURES.features));
+    mockClaude({ architect: writeDesign });
+    startAt(pipeline, r.id, 'DESIGN');
+    await worker.drain();
+    const files = git(ws.repoDir, 'ls-files');
+    expect(files).toContain('docs/devflow/design/tkct.md');
+    expect(files).not.toContain('dist/bundle.js');
+    expect(git(ws.repoDir, 'status', '--porcelain')).toContain('dist/');
+  });
+
+  it('design checks every template heading and cleans stale outputs (M3)', async () => {
+    register(['PLANNING']);
+    const { repo, pipeline, worker, cfg } = setup();
+    const r = mkReq(repo, { projectKind: 'new' });
+    const ws = Workspace.for(cfg, r.id).ensure();
+    initRepo(ws.repoDir, `devflow/${r.id}`);
+    const designDir = join(ws.devflowDir, 'design');
+    mkdirSync(designDir, { recursive: true });
+    writeFileSync(join(designDir, 'cu.mmd'), 'graph TD; X-->Y\n');
+    repo.upsertFeatures(r.id, featureRows(FEATURES.features));
+    let n = 0;
+    mockClaude({
+      architect: dir => {
+        writeDesign(dir);
+        if (n++ === 0) {
+          writeFileSync(join(dir, 'design', 'tkct.md'), TKCT_MD.replace('## Yêu cầu khác\n', ''));
+          writeFileSync(join(dir, 'design', 'tkdb.md'), TKDB_MD.replace('## Định nghĩa thuật ngữ và các từ viết tắt', '## Định nghĩa thuật ngữ'));
+        }
+      },
+    });
+    startAt(pipeline, r.id, 'DESIGN');
+    await worker.drain();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.prompt).toContain('## Yêu cầu khác');
+    expect(calls[1]!.prompt).toContain('## Định nghĩa thuật ngữ và các từ viết tắt');
+    expect(existsSync(join(designDir, 'cu.mmd'))).toBe(false);
+    expect(repo.getRequest(r.id)!.stage).toBe('PLANNING');
+  });
+
+  it('intake kind=new on a GitLab project that already has code fails (M4)', async () => {
+    register();
+    const fakeGitLab = {
+      getProject: async () => ({ id: 9, path_with_namespace: 'grp/app', default_branch: 'main', http_url_to_repo: 'x', empty_repo: false }),
+    } as unknown as GitLabClient;
+    const s = setup();
+    const pipeline = new Pipeline(s.cfg, s.repo, { makeGit: (_r, ws) => new Git(ws.repoDir), makeGitLab: () => fakeGitLab });
+    const worker = new Worker(s.cfg, s.repo, pipeline);
+    const r = mkReq(s.repo, { projectKind: 'new', gitlabProject: 'grp/app' });
+    pipeline.start(r.id);
+    await worker.drain();
+    expect(s.repo.getRequest(r.id)!.status).toBe('failed');
+    expect(s.repo.latestStageRun(r.id, 'INTAKE')!.error).toContain("Dự án đã có mã nguồn, hãy chọn loại 'Dự án có sẵn'");
+  });
+
+  it('attachment names are sanitised and de-duplicated (M5)', async () => {
+    expect(safeFileName('..')).toBe('file');
+    expect(safeFileName('.')).toBe('file');
+    expect(safeFileName('')).toBe('file');
+    expect(safeFileName('a/b\\..\\c.txt')).toBe('c.txt');
+    expect(safeFileName('x<y>.txt')).toBe('x_y_.txt');
+    register(['ANALYSIS']);
+    const { repo, pipeline, worker, cfg } = setup();
+    const r = mkReq(repo, { projectKind: 'new' });
+    const src = mkdtempSync(join(tmpdir(), 'devflow-att-'));
+    for (const [i, name] of ['a.txt', 'b.txt', 'c.txt', 'd'].entries()) writeFileSync(join(src, name), String(i));
+    repo.addAttachment(r.id, 'yeu-cau.txt', join(src, 'a.txt'), 1);
+    repo.addAttachment(r.id, 'yeu-cau.txt', join(src, 'b.txt'), 1);
+    repo.addAttachment(r.id, 'YEU-CAU.txt', join(src, 'c.txt'), 1);
+    repo.addAttachment(r.id, '..', join(src, 'd'), 1);
+    pipeline.start(r.id);
+    await worker.drain();
+    const inputs = Workspace.for(cfg, r.id).inputsDir;
+    expect(readdirSync(inputs).sort()).toEqual(['YEU-CAU-3.txt', 'file', 'yeu-cau-2.txt', 'yeu-cau.txt']);
+    expect(readFileSync(join(inputs, 'yeu-cau-2.txt'), 'utf8')).toBe('1');
+  });
+
+  it('clarify exports and waits even when only should questions are open; continue turns them into assumptions (M6)', async () => {
+    register(['ANALYSIS']);
+    const { repo, pipeline, worker, cfg } = setup();
+    const r = mkReq(repo, { projectKind: 'new' });
+    repo.upsertQuestions(r.id, 1, [q('Q-01', 'should', { suggested_answer: 'Không' })]);
+    startAt(pipeline, r.id, 'CLARIFY');
+    await worker.drain();
+    const ws = Workspace.for(cfg, r.id);
+    expect(existsSync(join(ws.artifactsDir, 'questions', `Questions_${r.id}_round1.xlsx`))).toBe(true);
+    expect(repo.getRequest(r.id)!.status).toBe('awaiting_customer');
+    pipeline.resumeAfterCustomer(r.id); // staff: "Tiếp tục với giả định", nothing answered
+    await worker.drain();
+    expect(repo.getRequest(r.id)!.stage).toBe('ANALYSIS');
+    expect(repo.getRequest(r.id)!.clarifyRound).toBe(1);
+    const assumptions = JSON.parse(readFileSync(join(ws.devflowDir, 'assumptions.json'), 'utf8'));
+    expect(assumptions).toEqual([expect.objectContaining({ id: 'Q-01', assumption: 'Không', priority: 'should' })]);
   });
 });

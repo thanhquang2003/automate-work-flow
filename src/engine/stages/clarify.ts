@@ -15,10 +15,10 @@ export function questionsFileName(reqId: string, round: number): string {
 async function ask(ctx: StageContext): Promise<StageOutcome> {
   const { req, repo, ws, cfg } = ctx;
   const round = req.clarifyRound + 1;
+  // The customer always receives the full list of open questions (must + should).
   const open = openQuestions(repo, req.id);
-  if (!open.some(q => q.priority === 'must')) {
-    const assumed = writeAssumptions(ctx);
-    ctx.log(`Không còn câu hỏi bắt buộc nào chưa trả lời${assumed.length ? `; ${assumed.length} câu còn lại được ghi thành giả định` : ''}. Chuyển sang bóc tách chức năng.`);
+  if (!open.length) {
+    ctx.log('Không còn câu hỏi nào chưa trả lời. Chuyển sang bóc tách chức năng.');
     return { kind: 'goto', stage: 'BREAKDOWN' };
   }
   const dir = join(ws.artifactsDir, 'questions');
@@ -35,19 +35,30 @@ async function ask(ctx: StageContext): Promise<StageOutcome> {
   return { kind: 'await_customer' };
 }
 
-/** After the customer answered (resumeAfterCustomer): record answers, then re-analyse or force assumptions. */
+/**
+ * After the customer answered, or staff pressed "Tiếp tục với giả định" (resumeAfterCustomer): record answers,
+ * then re-analyse, or force assumptions at the last round. Only "must" questions block: when none is open,
+ * the unanswered "should" questions are written as assumptions for the Analyst.
+ * clarify_round is bumped last so a crash before it re-runs this step identically (files are rewritten).
+ */
 function collect(ctx: StageContext): StageOutcome {
   const { req, repo } = ctx;
-  const answers = writeAnswers(ctx);
   const round = req.clarifyRound + 1;
-  repo.updateRequest(req.id, { clarifyRound: round });
+  const answers = writeAnswers(ctx);
   ctx.log(`Đã nhận câu trả lời vòng ${round}: tổng cộng ${answers.length} câu đã trả lời (answers.json)`);
-  if (round >= MAX_CLARIFY_ROUNDS) {
+  const open = openQuestions(repo, req.id);
+  const last = round >= MAX_CLARIFY_ROUNDS;
+  let outcome: StageOutcome = { kind: 'goto', stage: 'ANALYSIS' };
+  if (last) {
     const assumed = writeAssumptions(ctx);
     ctx.log(`Đã hết ${MAX_CLARIFY_ROUNDS} vòng hỏi: ${assumed.length} câu chưa trả lời được chuyển thành giả định (assumptions.json), cần khách hàng xác nhận sau`, 'warn');
-    return { kind: 'goto', stage: 'BREAKDOWN' };
+    outcome = { kind: 'goto', stage: 'BREAKDOWN' };
+  } else if (open.length && !open.some(q => q.priority === 'must')) {
+    const assumed = writeAssumptions(ctx);
+    ctx.log(`${assumed.length} câu hỏi không bắt buộc chưa trả lời được ghi thành giả định (assumptions.json)`);
   }
-  return { kind: 'goto', stage: 'ANALYSIS' };
+  repo.updateRequest(req.id, { clarifyRound: round });
+  return outcome;
 }
 
 export async function clarify(ctx: StageContext): Promise<StageOutcome> {

@@ -152,3 +152,27 @@ export function contextFileVars(ctx: StageContext): Record<string, string> {
     assumptions_file: fileRef(assumptionsPath(ws), '(không có)'),
   };
 }
+
+// ---- markdown heading checks ----
+
+const normHeading = (s: string): string => s.normalize('NFC').toLocaleLowerCase('vi').replace(/\s+/g, ' ').trim();
+
+/** Heading texts of a level, normalised (numbering prefix stripped, case/space folded). */
+export function headings(md: string, level: number): string[] {
+  const re = new RegExp(`^#{${level}}[ \\t]+(.+?)[ \\t]*#*[ \\t]*$`, 'gm');
+  return [...md.replace(/\r\n?/g, '\n').matchAll(re)].map(m => normHeading(m[1]!.replace(/^\d+(\.\d+)*\.?\s+/, '')));
+}
+
+/** Required [level, text] headings that are missing from the markdown, rendered as "## text". */
+export function missingHeadings(md: string, wanted: [number, string][]): string[] {
+  return wanted.filter(([lvl, text]) => !headings(md, lvl).includes(normHeading(text))).map(([lvl, text]) => `${'#'.repeat(lvl)} ${text}`);
+}
+
+/** True when a heading (already normalised) starts with the code followed by a separator or nothing. */
+export function headingHasCode(h: string, code: string): boolean {
+  const c = normHeading(code);
+  return h === c || (h.startsWith(c) && /^[\s:\-–—]/.test(h.slice(c.length)));
+}
+
+/** Repo-relative pathspec of the DevFlow docs folder (the only thing stages commit). */
+export const DOCS_PATHSPEC = 'docs/devflow';

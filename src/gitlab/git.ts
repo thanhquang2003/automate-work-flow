@@ -83,6 +83,20 @@ export class Git {
     return true;
   }
 
+  /**
+   * Stages only the given repo-relative paths (additions, changes, deletions) and commits them alone.
+   * Returns false when nothing under those paths changed.
+   */
+  async commitPaths(paths: string[], msg: string): Promise<boolean> {
+    if (!paths.length) return false;
+    for (const p of paths) if (!p || p.startsWith('-')) throw new Error(`Invalid path: ${JSON.stringify(p)}`);
+    await this.run(['add', '-A', '--', ...paths]);
+    const staged = await this.exec(['diff', '--cached', '--quiet', '--', ...paths], { allowFail: true });
+    if (staged.code === 0) return false;
+    await this.run([...(await this.identityArgs()), 'commit', '-m', msg, '--', ...paths]);
+    return true;
+  }
+
   async push(branch: string): Promise<void> {
     this.checkRef(branch);
     const norm = branch.replace(/^refs\/heads\//, '');

@@ -1,14 +1,31 @@
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { extname, join, resolve } from 'node:path';
 import { GitLabError, type GlProject } from '../../gitlab/client.js';
 import type { StageContext, StageOutcome } from '../pipeline.js';
 import { ensureOnBranch, integrationBranch, writeProjectInfo } from './common.js';
 
+/** Safe file name for inputs/: no directories, no reserved characters, never "." / ".." / empty. */
+export function safeFileName(name: string): string {
+  const base = name.replace(/^.*[\\/]/, '').replace(/[\u0000-\u001f<>:"|?*]/g, '_').trim().replace(/[. ]+$/, '');
+  return !base || base === '.' || base === '..' ? 'file' : base;
+}
+
+/** "a.txt" → "a-2.txt", "a-3.txt"… until the (case-insensitive) name is unused. */
+function uniqueName(name: string, used: Set<string>): string {
+  const ext = extname(name);
+  const stem = ext ? name.slice(0, -ext.length) : name;
+  let out = name;
+  for (let i = 2; used.has(out.toLowerCase()); i++) out = `${stem}-${i}${ext}`;
+  used.add(out.toLowerCase());
+  return out;
+}
+
 function copyAttachments(ctx: StageContext): number {
   mkdirSync(ctx.ws.inputsDir, { recursive: true });
   let n = 0;
+  const used = new Set<string>();
   for (const a of ctx.repo.listAttachments(ctx.req.id)) {
-    const name = basename(a.filename) || `file-${a.id}`;
+    const name = uniqueName(safeFileName(a.filename), used);
     const dest = join(ctx.ws.inputsDir, name);
     if (resolve(a.path) === resolve(dest)) { n++; continue; }
     if (!existsSync(a.path)) { ctx.log(`Không tìm thấy file đính kèm ${a.filename}`, 'warn'); continue; }
@@ -29,7 +46,7 @@ async function initLocal(ctx: StageContext, branch: string, why: string): Promis
   // One initial commit so HEAD, task branches and the scan cache have a base.
   const readme = join(ctx.ws.repoDir, 'README.md');
   if (!existsSync(readme)) writeFileSync(readme, `# ${ctx.req.title}\n`, 'utf8');
-  await ctx.git.commitAll('chore: khởi tạo dự án');
+  await ctx.git.commitPaths(['README.md'], 'chore: khởi tạo dự án');
   writeProjectInfo(ctx.ws, { gitlab: false, branch });
   ctx.log(`${why} Khởi tạo repo git cục bộ trên nhánh ${branch}; tài liệu và code sẽ chỉ nằm trên máy này.`, 'warn');
   return { kind: 'next' };
@@ -48,7 +65,7 @@ async function cloneProject(ctx: StageContext, p: GlProject, branch: string): Pr
     const def = p.default_branch || 'main';
     await ctx.git.checkout(def, true);
     writeFileSync(join(ctx.ws.repoDir, 'README.md'), `# ${ctx.req.title}\n`, 'utf8');
-    await ctx.git.commitAll('chore: khởi tạo dự án');
+    await ctx.git.commitPaths(['README.md'], 'chore: khởi tạo dự án');
     await ctx.git.push(def);
     p = { ...p, default_branch: def };
     await ctx.git.checkout(branch, true);
@@ -106,6 +123,8 @@ export async function intake(ctx: StageContext): Promise<StageOutcome> {
     if (group && ns === undefined) return { kind: 'fail', error: `Không tìm thấy GitLab group "${group}" để tạo project mới.` };
     p = await gitlab.createProject(name, ns);
     ctx.log(`Đã tạo GitLab project ${p.path_with_namespace}`);
+  } else if (p.default_branch && !(p as GlProject & { empty_repo?: boolean }).empty_repo) {
+    return { kind: 'fail', error: `GitLab project "${p.path_with_namespace}": Dự án đã có mã nguồn, hãy chọn loại 'Dự án có sẵn'.` };
   }
   await cloneProject(ctx, p, branch);
   ctx.log(`Repo ${p.path_with_namespace} sẵn sàng trên nhánh ${branch}`);

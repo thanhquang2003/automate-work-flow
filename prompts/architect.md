@@ -86,19 +86,19 @@ Các chức năng phải có phần thiết kế chi tiết riêng trong TKCT (t
 ```
 # GIỚI THIỆU
 ## Mục tiêu tài liệu
-## Định nghĩa thuật ngữ
-(bảng: Thuật ngữ | Giải thích)
+## Định nghĩa thuật ngữ và các từ viết tắt
+(bảng: Thuật ngữ / Từ viết tắt | Giải thích)
 ## Tài liệu tham khảo
 ## Mô tả chung
 (hệ quản trị CSDL, phiên bản, quy ước đặt tên, schema)
 # CƠ SỞ DỮ LIỆU
 ## Các mô hình quan hệ dữ liệu
 (sơ đồ ERD mermaid "Sơ đồ: Mô hình quan hệ dữ liệu")
-## Danh sách bảng
+### Danh sách bảng
 (bảng: STT | Tên bảng | Mô tả | Thêm mới/Sửa)
-## Danh sách mã lỗi
+### Danh sách mã lỗi
 (bảng: Mã lỗi | Mô tả | Thông báo hiển thị)
-## <TÊN_BẢNG>                         ← lặp lại cho TỪNG bảng thêm mới hoặc sửa
+## Bảng <TÊN_BẢNG>                    ← lặp lại cho TỪNG bảng thêm mới hoặc sửa
 ### Mô tả cột
 (bảng: STT | Tên cột | Kiểu dữ liệu | Null | Mặc định | Mô tả)
 ### Constraint
@@ -107,7 +107,7 @@ Các chức năng phải có phần thiết kế chi tiết riêng trong TKCT (t
 ### Partitions
 ### Script thay đổi
 (khối ```sql chạy được: CREATE/ALTER theo đúng hệ quản trị đã chọn)
-# Script rollback
+## Script rollback
 (khối ```sql đảo ngược toàn bộ thay đổi ở trên, theo thứ tự ngược lại)
 ```
 

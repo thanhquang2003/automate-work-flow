@@ -5,24 +5,21 @@ import { templatePath } from '../../office/templates.js';
 import { buildPrompt } from '../prompt.js';
 import type { StageContext, StageOutcome } from '../pipeline.js';
 import { OutputError, readTextOutput, runClaudeStep } from './claude-json.js';
-import { contextFileVars, ensureOnBranch, integrationBranch, pushIfRemote, promptExtras } from './common.js';
+import {
+  DOCS_PATHSPEC, contextFileVars, ensureOnBranch, headingHasCode, headings, integrationBranch, missingHeadings, promptExtras, pushIfRemote,
+} from './common.js';
 
-const TKCT_H1 = ['TỔNG QUAN', 'THIẾT KẾ TỔNG THỂ', 'THIẾT KẾ CHI TIẾT', 'PHỤ LỤC'];
-const TKCT_H2 = ['Tổng quan dự án', 'Yêu cầu chức năng', 'Yêu cầu phi chức năng', 'Yêu cầu hiệu năng', 'Mô hình tổng thể', 'Danh sách kết nối', 'Thiết kế giao tiếp', 'Cơ sở dữ liệu', 'Sơ đồ luồng dữ liệu nghiệp vụ', 'Câu hỏi mở và giả định'];
-const TKDB_H1 = ['GIỚI THIỆU', 'CƠ SỞ DỮ LIỆU', 'Script rollback'];
-const TKDB_H2 = ['Mục tiêu tài liệu', 'Mô tả chung', 'Các mô hình quan hệ dữ liệu', 'Danh sách bảng'];
-
-/** Heading texts of a level, normalised (numbering prefix stripped, case/space folded). */
-function headings(md: string, level: number): string[] {
-  const re = new RegExp(`^#{${level}}\\s+(.+?)\\s*#*\\s*$`, 'gm');
-  return [...md.matchAll(re)].map(m => norm(m[1]!.replace(/^\d+(\.\d+)*\.?\s+/, '')));
-}
-const norm = (s: string): string => s.normalize('NFC').toLocaleLowerCase('vi').replace(/\s+/g, ' ').trim();
-
-function missingHeadings(md: string, level: number, wanted: string[]): string[] {
-  const have = headings(md, level);
-  return wanted.filter(w => !have.includes(norm(w)));
-}
+/** Required headings of the company templates (spec §7, templates/default/*.docx). */
+const TKCT_HEADINGS: [number, string][] = [
+  [1, 'TỔNG QUAN'], [2, 'Tổng quan dự án'], [2, 'Yêu cầu chức năng'], [2, 'Yêu cầu phi chức năng'], [2, 'Yêu cầu hiệu năng'], [2, 'Yêu cầu khác'],
+  [1, 'THIẾT KẾ TỔNG THỂ'], [2, 'Mô hình tổng thể'], [2, 'Danh sách kết nối'],
+  [1, 'THIẾT KẾ CHI TIẾT'], [2, 'Thiết kế giao tiếp'], [2, 'Cơ sở dữ liệu'],
+  [1, 'PHỤ LỤC'], [2, 'Sơ đồ luồng dữ liệu nghiệp vụ'], [2, 'Câu hỏi mở và giả định'],
+];
+const TKDB_HEADINGS: [number, string][] = [
+  [1, 'GIỚI THIỆU'], [2, 'Mục tiêu tài liệu'], [2, 'Định nghĩa thuật ngữ và các từ viết tắt'], [2, 'Tài liệu tham khảo'], [2, 'Mô tả chung'],
+  [1, 'CƠ SỞ DỮ LIỆU'], [2, 'Các mô hình quan hệ dữ liệu'], [3, 'Danh sách bảng'], [3, 'Danh sách mã lỗi'], [2, 'Script rollback'],
+];
 
 export async function design(ctx: StageContext): Promise<StageOutcome> {
   const { ws, req, repo } = ctx;
@@ -40,21 +37,21 @@ export async function design(ctx: StageContext): Promise<StageOutcome> {
     { path: join(dir, '<ten-so-do>.mmd'), description: 'Mỗi sơ đồ mermaid một file .mmd (tối thiểu: mô hình tổng thể, luồng dữ liệu nghiệp vụ, mô hình quan hệ dữ liệu).' },
   ]));
 
+  // A fresh run starts from empty outputs; a rejected run (feedback) lets Claude revise the existing ones.
+  const clean = ctx.feedback ? [] : [...Object.values(files), ...readdirSync(dir).filter(n => n.endsWith('.mmd')).map(n => join(dir, n))];
   const r = await runClaudeStep(ctx, {
     prompt,
+    clean,
     validate: async () => {
       await readTextOutput(files.stack, 10);
       const tkct = await readTextOutput(files.tkct, 50);
       const tkdb = await readTextOutput(files.tkdb, 50);
       const errs: string[] = [];
-      for (const h of missingHeadings(tkct, 1, TKCT_H1)) errs.push(`tkct.md thiếu tiêu đề cấp 1 "# ${h}"`);
-      for (const h of missingHeadings(tkct, 2, TKCT_H2)) errs.push(`tkct.md thiếu tiêu đề cấp 2 "## ${h}"`);
-      for (const h of missingHeadings(tkdb, 1, TKDB_H1)) errs.push(`tkdb.md thiếu tiêu đề cấp 1 "# ${h}"`);
-      for (const h of missingHeadings(tkdb, 2, TKDB_H2)) errs.push(`tkdb.md thiếu tiêu đề cấp 2 "## ${h}"`);
+      for (const h of missingHeadings(tkct, TKCT_HEADINGS)) errs.push(`tkct.md thiếu tiêu đề "${h}"`);
+      for (const h of missingHeadings(tkdb, TKDB_HEADINGS)) errs.push(`tkdb.md thiếu tiêu đề "${h}"`);
       const h2 = headings(tkct, 2);
       for (const f of fns) {
-        const code = norm(f.code);
-        if (!h2.some(h => h === code || (h.startsWith(code) && /^[\s:\-–—]/.test(h.slice(code.length))))) errs.push(`tkct.md thiếu phần thiết kế chi tiết "## ${f.code} - ${f.name}"`);
+        if (!h2.some(h => headingHasCode(h, f.code))) errs.push(`tkct.md thiếu phần thiết kế chi tiết "## ${f.code} - ${f.name}"`);
       }
       if (!readdirSync(dir).some(n => n.endsWith('.mmd'))) errs.push(`chưa có file sơ đồ .mmd nào trong ${dir}`);
       if (errs.length) throw new OutputError(`Tài liệu thiết kế chưa đạt:\n- ${errs.join('\n- ')}`);
@@ -72,7 +69,8 @@ export async function design(ctx: StageContext): Promise<StageOutcome> {
   if (existsSync(join(ws.repoDir, '.git'))) {
     const branch = integrationBranch(req.id);
     await ensureOnBranch(ctx, branch);
-    const committed = await ctx.git.commitAll(`docs(devflow): ${req.id} phân tích, bóc tách và thiết kế`);
+    // Only docs/devflow is committed: build outputs left by the scan must not land on the branch.
+    const committed = await ctx.git.commitPaths([DOCS_PATHSPEC], `docs(devflow): ${req.id} phân tích, bóc tách và thiết kế`);
     const pushed = committed && (await pushIfRemote(ctx, branch));
     ctx.log(committed ? `Đã commit tài liệu lên nhánh ${branch}${pushed ? ' và push lên GitLab' : ' (chưa có remote, không push)'}` : 'Tài liệu không thay đổi, không cần commit');
   } else {

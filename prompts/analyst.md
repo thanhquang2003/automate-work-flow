@@ -30,7 +30,7 @@ Các câu hỏi đã có trong hệ thống (không được hỏi lại câu đ
 2. Viết danh sách chức năng và use case theo hiểu biết hiện tại.
 3. Rà **từng mục trong danh sách kiểm tra chỗ hổng** dưới đây cho **từng chức năng**. Mỗi mục chưa rõ → một câu hỏi hoặc một giả định có lý do.
 4. Rà mâu thuẫn: giữa mô tả và file đính kèm, giữa các câu trả lời của khách, giữa yêu cầu mới và hệ thống hiện tại. Mâu thuẫn luôn là câu hỏi `must`.
-5. Ở vòng sau vòng 1: đọc `answers.json`, đưa câu trả lời vào bản phân tích (mục "Lịch sử làm rõ" và các mục liên quan), chỉ hỏi tiếp khi câu trả lời làm phát sinh chỗ hổng mới, còn mơ hồ, hoặc mâu thuẫn. Câu `must` khách bỏ trống ở vòng trước thì hỏi lại dưới dạng dễ trả lời hơn (ID mới, ghi rõ "hỏi lại Q-xx" trong `why`).
+5. Ở vòng sau vòng 1: đọc `answers.json`, đưa câu trả lời vào bản phân tích (mục "Lịch sử làm rõ" và các mục liên quan), chỉ hỏi tiếp khi câu trả lời làm phát sinh chỗ hổng mới, còn mơ hồ, hoặc mâu thuẫn. Câu khách bỏ trống ở vòng trước mà vẫn cần hỏi thì đưa lại vào `questions.json` **với đúng ID cũ** (ví dụ vẫn là `Q-03`), có thể diễn đạt lại cho dễ trả lời hơn — DevFlow sẽ chuyển câu đó sang vòng hiện tại. **Không** tạo ID mới cho câu hỏi cũ (câu cũ sẽ còn mở mãi). Câu chưa trả lời nào không còn chặn thiết kế thì vẫn đưa lại với cùng ID nhưng hạ `priority` xuống `should` và ghi lý do trong `why` (DevFlow coi mọi câu chưa trả lời có `priority` = `must` là đang chặn).
 6. Tự kiểm tra trước khi ghi file: mỗi chỗ hổng trong mục "Chỗ hổng đã phát hiện" phải trỏ tới một câu hỏi (Q-xx) hoặc một giả định; mỗi chức năng phải có tiêu chí chấp nhận; mọi con số hiệu năng phải là số cụ thể hoặc là câu hỏi.
 
 ## Danh sách kiểm tra chỗ hổng (áp dụng cho từng chức năng)
@@ -57,7 +57,7 @@ Các câu hỏi đã có trong hệ thống (không được hỏi lại câu đ
 - `why`: vì sao cần hỏi, ảnh hưởng nếu không rõ (ví dụ: "Quyết định cấu trúc bảng và màn hình duyệt; sai sẽ phải làm lại cả luồng duyệt").
 - `priority`: `must` = chặn thiết kế/ước lượng, hoặc trả lời sai sẽ gây làm lại lớn; `should` = có đề xuất mặc định hợp lý, có thể chuyển thành giả định.
 - `category`: một trong `Chức năng`, `Phi chức năng`, `Hiệu năng`, `Dữ liệu`, `Tích hợp`, `Giao diện`, `Khác`.
-- `id`: dạng `Q-NN`, đánh số tiếp từ `Q-{{next_question_no}}` (ví dụ `Q-01`, `Q-02`…), không trùng ID đã có.
+- `id`: câu hỏi mới dạng `Q-NN`, đánh số tiếp từ `Q-{{next_question_no}}` (ví dụ `Q-01`, `Q-02`…), không trùng ID đã có; câu hỏi lại một câu CHƯA TRẢ LỜI thì giữ nguyên ID cũ của nó; tuyệt đối không dùng ID của câu đã trả lời.
 - Không hỏi điều đã có câu trả lời rõ trong đầu vào. Không hỏi chung chung kiểu "Anh/chị còn yêu cầu gì khác không?".
 - Số lượng: tối đa khoảng 25 câu mỗi vòng, sắp xếp `must` trước. Nếu nhiều hơn, gộp các câu nhỏ cùng chủ đề hoặc dồn các câu `should` ít quan trọng thành giả định.
 - Nếu không còn gì cần hỏi thì ghi `{"questions": []}`.
