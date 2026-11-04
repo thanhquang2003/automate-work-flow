@@ -14,11 +14,23 @@ const DEFAULT_EMAIL = 'devflow@localhost';
 export class Git {
   constructor(private cwd: string, private opts: GitOpts = {}) {}
 
-  private authArgs(token?: string): string[] {
+  /** Token goes via env (not argv, so it is not visible in process listings). */
+  private authEnv(token?: string): Record<string, string> {
     const t = token ?? this.opts.token;
-    if (!t) return [];
+    if (!t) return {};
     const b64 = Buffer.from(`oauth2:${t}`).toString('base64');
-    return ['-c', `http.extraHeader=Authorization: Basic ${b64}`];
+    const n = Number.parseInt(process.env.GIT_CONFIG_COUNT ?? '0', 10) || 0;
+    return {
+      GIT_CONFIG_COUNT: String(n + 1),
+      [`GIT_CONFIG_KEY_${n}`]: 'http.extraHeader',
+      [`GIT_CONFIG_VALUE_${n}`]: `Authorization: Basic ${b64}`,
+    };
+  }
+
+  private checkRef(name: string): void {
+    if (!name || name.startsWith('-') || name.startsWith('+') || name.includes(':') || name === 'HEAD' || /[\s\0]/.test(name)) {
+      throw new Error(`Invalid branch/ref name: ${JSON.stringify(name)}`);
+    }
   }
 
   private exec(args: string[], o: { cwd?: string; env?: Record<string, string>; allowFail?: boolean } = {}): Promise<{ code: number; stdout: string }> {
@@ -31,20 +43,22 @@ export class Git {
         if (o.allowFail) return resolve({ code: typeof (err as any).code === 'number' ? (err as any).code : 1, stdout: String(stdout) });
         // Never leak the token in error text.
         const safe = (s: string) => s.replace(/Basic [A-Za-z0-9+/=]+/g, 'Basic ***');
-        reject(new Error(`git ${safe(args.filter(a => !a.startsWith('http.extraHeader')).join(' '))} failed: ${safe(String(stderr || err.message)).trim()}`));
+        reject(new Error(`git ${safe(args.join(' '))} failed: ${safe(String(stderr || err.message)).trim()}`));
       });
     });
   }
 
   private async run(args: string[], token?: string): Promise<string> {
-    return (await this.exec([...this.authArgs(token), ...args])).stdout;
+    return (await this.exec(args, { env: this.authEnv(token) })).stdout;
   }
 
   async clone(url: string, token: string, dir: string): Promise<void> {
-    await this.exec([...this.authArgs(token || undefined), 'clone', url, dir], { cwd: process.cwd() });
+    await this.exec(['clone', '--', url, dir], { cwd: process.cwd(), env: this.authEnv(token || undefined) });
   }
 
   async checkout(branch: string, create = false, from?: string): Promise<void> {
+    this.checkRef(branch);
+    if (from) this.checkRef(from);
     if (create) await this.run(['checkout', '-b', branch, ...(from ? [from] : [])]);
     else await this.run(['checkout', branch]);
   }
@@ -64,13 +78,16 @@ export class Git {
   }
 
   async push(branch: string): Promise<void> {
-    if (this.opts.protectedBranch && branch === this.opts.protectedBranch) {
+    this.checkRef(branch);
+    const norm = branch.replace(/^refs\/heads\//, '');
+    if (this.opts.protectedBranch && norm === this.opts.protectedBranch.replace(/^refs\/heads\//, '')) {
       throw new Error(`Refusing to push to protected branch "${branch}"`);
     }
-    await this.run(['push', '-u', 'origin', branch]);
+    await this.run(['push', '-u', 'origin', '--', branch]);
   }
 
   async pull(branch: string): Promise<void> {
+    this.checkRef(branch);
     await this.run(['pull', '--no-rebase', 'origin', branch]);
   }
 

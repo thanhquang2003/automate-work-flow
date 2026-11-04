@@ -63,14 +63,29 @@ describe('Git', () => {
     await git.commitAll('b');
     expect(g(dir, 'log', '-1', '--format=%an <%ae> %cn')).toBe('Ann <ann@x.io> Ann');
   });
+  it('rejects tricky push refs', async () => {
+    const dir = join(root, 'work7');
+    const git = new Git(dir, { protectedBranch: 'main' });
+    await git.clone(remote, '', dir);
+    for (const b of ['HEAD', 'refs/heads/main', '+main', 'x:main', '--force', '']) {
+      await expect(git.push(b)).rejects.toThrow(/protected|invalid/i);
+    }
+  });
   it('defaults committer to DevFlow Bot when none configured', async () => {
     const dir = join(root, 'work6');
-    const git = new Git(dir);
-    await git.clone(remote, '', dir);
-    writeFileSync(join(dir, 'c.txt'), 'c');
-    await git.commitAll('c');
-    const who = g(dir, 'log', '-1', '--format=%an');
-    // Either the machine's configured identity or the bot default; never a failure.
-    expect(who.length).toBeGreaterThan(0);
+    const empty = join(root, 'empty.gitconfig');
+    writeFileSync(empty, '');
+    const saved = { g: process.env.GIT_CONFIG_GLOBAL, n: process.env.GIT_CONFIG_NOSYSTEM };
+    process.env.GIT_CONFIG_GLOBAL = empty; process.env.GIT_CONFIG_NOSYSTEM = '1';
+    try {
+      const git = new Git(dir);
+      await git.clone(remote, '', dir);
+      writeFileSync(join(dir, 'c.txt'), 'c');
+      await git.commitAll('c');
+      expect(g(dir, 'log', '-1', '--format=%an <%ae> %cn')).toBe('DevFlow Bot <devflow@localhost> DevFlow Bot');
+    } finally {
+      if (saved.g === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = saved.g;
+      if (saved.n === undefined) delete process.env.GIT_CONFIG_NOSYSTEM; else process.env.GIT_CONFIG_NOSYSTEM = saved.n;
+    }
   });
 });

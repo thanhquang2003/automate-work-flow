@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runClaude, detectRateLimit } from '../../src/claude/runner.js';
+import { runClaude, detectRateLimit, validateShellArgs } from '../../src/claude/runner.js';
 import { setMockHandler, clearMockHandler } from '../../src/claude/mock.js';
 import type { Config } from '../../src/config.js';
 
@@ -69,6 +69,37 @@ describe('runClaude', () => {
   });
   it('throws when claudeMock without handler', async () => {
     await expect(runClaude(cfg('ok', { claudeMock: true }), { cwd: '.', prompt: 'p' })).rejects.toThrow(/mock/i);
+  });
+});
+
+describe('runner robustness', () => {
+  it('ignores stderr rate-limit text on a successful result', async () => {
+    const r = await runClaude(cfg('ok-stderr-limit'), { cwd: process.cwd(), prompt: 'hi' });
+    expect(r.ok).toBe(true);
+    expect(r.rateLimitedUntil).toBeUndefined();
+  });
+  it('joins lines split across chunks', async () => {
+    const r = await runClaude(cfg('partial'), { cwd: process.cwd(), prompt: 'hi' });
+    expect(r.ok).toBe(true);
+    expect(r.resultText).toBe('joined');
+  });
+  it('missing result -> ok:false with error', async () => {
+    const r = await runClaude(cfg('noresult'), { cwd: process.cwd(), prompt: 'hi' });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/without a result/);
+    expect(r.sessionId).toBe('s-n');
+  });
+  it('detects rate limit in non-JSON stdout', async () => {
+    const r = await runClaude(cfg('plain-limit'), { cwd: process.cwd(), prompt: 'hi' });
+    expect(r.rateLimitedUntil).toBeInstanceOf(Date);
+  });
+  it('onEvent errors do not break the run', async () => {
+    const r = await runClaude(cfg('ok'), { cwd: process.cwd(), prompt: 'hi', onEvent: () => { throw new Error('boom'); } });
+    expect(r.ok).toBe(true);
+  });
+  it('validateShellArgs rejects shell metacharacters', () => {
+    expect(() => validateShellArgs(['C:\\my dir\\x', 'abc-1.2'])).not.toThrow();
+    for (const bad of ['a&calc', 'a"b', 'a|b', '%PATH%', 'a^b', 'a\nb']) expect(() => validateShellArgs([bad])).toThrow(/unsafe/i);
   });
 });
 

@@ -25,7 +25,7 @@ export class GitLabClient {
     let payload: BodyInit | undefined;
     if (body instanceof FormData) payload = body;
     else if (body !== undefined) { headers['Content-Type'] = 'application/json'; payload = JSON.stringify(body); }
-    const res = await this.fetchImpl(this.base + path, { method, headers, body: payload });
+    const res = await this.fetchImpl(this.base + path, { method, headers, body: payload, signal: AbortSignal.timeout(60000) });
     const text = await res.text();
     if (!res.ok) throw new GitLabError(res.status, text);
     if (!text) return undefined;

@@ -45,6 +45,17 @@ export function detectRateLimit(text: string, now: Date, defaultPauseMin: number
   return new Date(now.getTime() + defaultPauseMin * 60000);
 }
 
+const SAFE_SHELL_ARG = /^[\w .:\\/@=+-]+$/;
+
+/** In cmd.exe shell mode, reject args that could be interpreted by the shell. Throws on violation. */
+export function validateShellArgs(parts: string[]): void {
+  for (const a of parts) {
+    if (!SAFE_SHELL_ARG.test(a)) throw new Error(`Unsafe argument for shell execution: ${JSON.stringify(a)}`);
+  }
+}
+
+const MAX_BUF = 10 * 1024 * 1024;
+
 function quoteCmd(a: string): string {
   if (a !== '' && !/[\s"&|<>^%()]/.test(a)) return a;
   return '"' + a.replace(/"/g, '\\"') + '"';
@@ -83,6 +94,10 @@ export async function runClaude(cfg: Config, opts: RunOpts): Promise<RunResult> 
   // unreliable, so in shell mode (and for long prompts) the prompt goes via stdin.
   const shell = process.platform === 'win32' && !/[\\/]/.test(cfg.claudeBin) && !/\.[A-Za-z0-9]+$/.test(cfg.claudeBin);
   const viaStdin = shell || opts.prompt.length > PROMPT_ARGV_MAX;
+  if (shell) {
+    try { validateShellArgs([cfg.claudeBin, ...cfg.claudeBinArgs, ...(opts.addDirs ?? []), ...(opts.resumeSessionId ? [opts.resumeSessionId] : [])]); }
+    catch (e) { return { ok: false, resultText: '', error: (e as Error).message }; }
+  }
   const args = [...cfg.claudeBinArgs, '-p', ...(viaStdin ? [] : [opts.prompt]), ...rest];
 
   return new Promise<RunResult>(resolve => {
@@ -101,6 +116,7 @@ export async function runClaude(cfg: Config, opts: RunOpts): Promise<RunResult> 
     let sawResult = false;
     let stderr = '';
     let buf = '';
+    let plain = '';
     let forced: string | undefined;
     let settled = false;
 
@@ -108,11 +124,11 @@ export async function runClaude(cfg: Config, opts: RunOpts): Promise<RunResult> 
       if (!line.trim()) return;
       if (opts.logFile) { try { appendFileSync(opts.logFile, line + '\n'); } catch { /* ignore */ } }
       let ev: any;
-      try { ev = JSON.parse(line); } catch { return; }
+      try { ev = JSON.parse(line); } catch { if (plain.length < 20000) plain += line + '\n'; return; }
       if (ev.type === 'system' && ev.subtype === 'init' && typeof ev.session_id === 'string') sessionId = ev.session_id;
       else if (ev.type === 'assistant') {
         const s = summarize(ev);
-        if (s) opts.onEvent?.(s);
+        if (s) { try { opts.onEvent?.(s); } catch { /* listener errors must not break the run */ } }
       } else if (ev.type === 'result') {
         sawResult = true;
         resultText = typeof ev.result === 'string' ? ev.result : '';
@@ -124,6 +140,7 @@ export async function runClaude(cfg: Config, opts: RunOpts): Promise<RunResult> 
     child.stdout!.setEncoding('utf8');
     child.stdout!.on('data', (d: string) => {
       buf += d;
+      if (buf.length > MAX_BUF && buf.indexOf('\n') < 0) { buf = ''; if (plain.length < 20000) plain += '[devflow: oversized line dropped]\n'; return; }
       let i: number;
       while ((i = buf.indexOf('\n')) >= 0) { handleLine(buf.slice(0, i).replace(/\r$/, '')); buf = buf.slice(i + 1); }
     });
@@ -145,8 +162,9 @@ export async function runClaude(cfg: Config, opts: RunOpts): Promise<RunResult> 
       if (timer) clearTimeout(timer);
       opts.signal?.removeEventListener('abort', onAbort);
       if (buf.trim()) handleLine(buf);
-      const limited = forced ? undefined
-        : detectRateLimit(`${isError || !sawResult ? resultText : ''}\n${stderr}`, new Date(), cfg.rateLimitPauseMin);
+      const failedRun = !sawResult || !!isError;
+      const limited = forced || !failedRun ? undefined
+        : detectRateLimit(`${resultText}\n${plain}\n${stderr}`, new Date(), cfg.rateLimitPauseMin);
       let ok = sawResult && !isError && !forced;
       let error: string | undefined;
       if (limited) { ok = false; error = 'rate limited'; }
