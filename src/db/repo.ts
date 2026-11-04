@@ -126,8 +126,10 @@ export class Repo {
   }
 
   // ---- events ----
-  addEvent(reqId: string, level: string, msg: string): void {
-    this.run('insert into events(request_id,ts,level,message) values(?,?,?,?)', reqId, Date.now(), level, msg);
+  addEvent(reqId: string, level: string, msg: string): EventRow {
+    const ts = Date.now();
+    const info = this.run('insert into events(request_id,ts,level,message) values(?,?,?,?)', reqId, ts, level, msg);
+    return { id: Number(info.lastInsertRowid), requestId: reqId, ts, level, message: msg };
   }
   listEvents(reqId: string, afterId = 0): EventRow[] {
     return this.all('select * from events where request_id=? and id>? order by id', reqId, afterId).map(r => ({
@@ -175,6 +177,7 @@ export class Repo {
     this.run('update stage_runs set status=?, finished_at=?, claude_session_id=coalesce(?,claude_session_id), error=? where id=?',
       status, Date.now(), opts.sessionId ?? null, opts.error ?? null, id);
   }
+  setStageRunSession(id: number, sessionId: string): void { this.run('update stage_runs set claude_session_id=? where id=?', sessionId, id); }
   latestStageRun(reqId: string, stage: Stage): StageRunRow | undefined {
     const r = this.one('select * from stage_runs where request_id=? and stage=? order by attempt desc, id desc limit 1', reqId, stage);
     return r && toStageRun(r);

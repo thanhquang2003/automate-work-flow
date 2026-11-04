@@ -1,0 +1,226 @@
+import { describe, it, expect, beforeEach } from 'vitest';
+import { setMockHandler, clearMockHandler } from '../../src/claude/mock.js';
+import type { RunOpts } from '../../src/claude/runner.js';
+import { bus, clearStages, registerStage, type StageHandler } from '../../src/engine/pipeline.js';
+import { Worker } from '../../src/engine/worker.js';
+import { STAGES, type Stage } from '../../src/domain/types.js';
+import { setup, mkReq } from './helpers.js';
+
+const GATES: Stage[] = ['CODEBASE_SCAN', 'ANALYSIS', 'BREAKDOWN', 'DESIGN', 'PLANNING', 'DEVELOP'];
+let calls: { stage: Stage; feedback?: string }[];
+const next: StageHandler = async () => ({ kind: 'next' });
+function registerAll(over: Partial<Record<Stage, StageHandler>> = {}) {
+  for (const s of STAGES) {
+    registerStage(s, async ctx => { calls.push({ stage: s, feedback: ctx.feedback }); return (over[s] ?? next)(ctx); }, { gate: GATES.includes(s) });
+  }
+}
+beforeEach(() => { clearStages(); calls = []; });
+
+describe('pipeline', () => {
+  it('auto mode runs all stages to DONE', async () => {
+    registerAll({ CLARIFY: async () => ({ kind: 'goto', stage: 'BREAKDOWN' }), TEST: async () => ({ kind: 'next' }) });
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo);
+    pipeline.start(r.id);
+    await worker.drain();
+    expect(calls.map(c => c.stage)).toEqual(['INTAKE', 'CODEBASE_SCAN', 'ANALYSIS', 'CLARIFY', 'BREAKDOWN', 'DESIGN', 'PLANNING', 'DEVELOP', 'TEST', 'DONE']);
+    expect(repo.getRequest(r.id)!.status).toBe('done');
+    expect(repo.getRequest(r.id)!.stage).toBe('DONE');
+  });
+
+  it('review mode stops at gate and approve continues', async () => {
+    registerAll();
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo, { runMode: 'review' });
+    pipeline.start(r.id);
+    await worker.drain();
+    expect(calls.map(c => c.stage)).toEqual(['INTAKE', 'CODEBASE_SCAN']);
+    expect(repo.getRequest(r.id)!.status).toBe('awaiting_approval');
+    expect(repo.getRequest(r.id)!.stage).toBe('CODEBASE_SCAN');
+    pipeline.approve(r.id);
+    await worker.drain();
+    expect(calls.at(-1)!.stage).toBe('ANALYSIS');
+    expect(repo.getRequest(r.id)!.status).toBe('awaiting_approval');
+  });
+
+  it('reject reruns stage with feedback', async () => {
+    registerAll();
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo, { runMode: 'review' });
+    pipeline.start(r.id);
+    await worker.drain();
+    pipeline.reject(r.id, 'làm lại');
+    await worker.drain();
+    expect(calls.slice(-1)[0]).toEqual({ stage: 'CODEBASE_SCAN', feedback: 'làm lại' });
+    expect(repo.latestStageRun(r.id, 'CODEBASE_SCAN')!.feedback).toBe('làm lại');
+    expect(repo.latestStageRun(r.id, 'CODEBASE_SCAN')!.attempt).toBe(2);
+    expect(repo.getRequest(r.id)!.status).toBe('awaiting_approval');
+  });
+
+  it('await_customer then resumeAfterCustomer continues to ANALYSIS', async () => {
+    registerAll({ CLARIFY: async () => ({ kind: 'await_customer' }) });
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo);
+    pipeline.start(r.id);
+    await worker.drain();
+    expect(repo.getRequest(r.id)!.status).toBe('awaiting_customer');
+    expect(repo.getRequest(r.id)!.stage).toBe('CLARIFY');
+    const n = calls.length;
+    pipeline.resumeAfterCustomer(r.id);
+    await worker.drain();
+    expect(calls[n].stage).toBe('ANALYSIS');
+  });
+
+  it('retry_later pauses job', async () => {
+    let t = 1_000_000;
+    let first = true;
+    registerAll({ CODEBASE_SCAN: async () => { if (first) { first = false; return { kind: 'retry_later', until: new Date(t + 60_000) }; } return { kind: 'next' }; } });
+    const { repo, pipeline, worker } = setup({}, () => t);
+    const r = mkReq(repo, { runMode: 'review' });
+    pipeline.start(r.id);
+    await worker.drain();
+    expect(repo.getRequest(r.id)!.status).toBe('paused');
+    const job = repo.listJobs(r.id).find(j => j.status === 'paused')!;
+    expect(job.runAfter).toBe(t + 60_000);
+    await worker.drain();
+    expect(calls.filter(c => c.stage === 'CODEBASE_SCAN')).toHaveLength(1);
+    t += 61_000;
+    await worker.drain();
+    expect(calls.filter(c => c.stage === 'CODEBASE_SCAN')).toHaveLength(2);
+    expect(repo.getRequest(r.id)!.status).toBe('awaiting_approval');
+  });
+
+  it('recovers running stage after restart', async () => {
+    registerAll();
+    const { repo, pipeline, cfg } = setup();
+    const r = mkReq(repo, { runMode: 'review' });
+    pipeline.start(r.id);
+    const job = repo.claimNextJob(Date.now())!; // simulate crash mid-run
+    repo.createStageRun(r.id, 'INTAKE');
+    expect(job.status).toBe('running');
+    const w2 = new Worker(cfg, repo, pipeline);
+    w2.start(); w2.stop();
+    await w2.drain();
+    expect(calls.map(c => c.stage)).toEqual(['INTAKE', 'CODEBASE_SCAN']);
+    const runs = repo.listStageRuns(r.id).filter(s => s.stage === 'INTAKE');
+    expect(runs.map(s => s.status)).toEqual(['failed', 'done']);
+  });
+
+  it('new project skips CODEBASE_SCAN', async () => {
+    registerAll();
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo, { projectKind: 'new' });
+    pipeline.start(r.id);
+    await worker.drain();
+    expect(calls.some(c => c.stage === 'CODEBASE_SCAN')).toBe(false);
+    expect(calls[1].stage).toBe('ANALYSIS');
+  });
+
+  it('exception retries once then fails', async () => {
+    registerAll({ INTAKE: async () => { throw new Error('boom'); } });
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo);
+    pipeline.start(r.id);
+    await worker.drain();
+    expect(calls).toHaveLength(2);
+    expect(repo.getRequest(r.id)!.status).toBe('failed');
+    expect(repo.listStageRuns(r.id).every(s => s.status === 'failed')).toBe(true);
+  });
+
+  it('needs_human and fail outcomes set status', async () => {
+    registerAll({ INTAKE: async () => ({ kind: 'needs_human', reason: 'x' }) });
+    const a = setup(); const r1 = mkReq(a.repo); a.pipeline.start(r1.id); await a.worker.drain();
+    expect(a.repo.getRequest(r1.id)!.status).toBe('needs_human');
+    clearStages(); calls = []; registerAll({ INTAKE: async () => ({ kind: 'fail', error: 'bad' }) });
+    const b = setup(); const r2 = mkReq(b.repo); b.pipeline.start(r2.id); await b.worker.drain();
+    expect(b.repo.getRequest(r2.id)!.status).toBe('failed');
+    expect(calls.filter(c => c.stage === 'INTAKE')).toHaveLength(1);
+  });
+
+  it('cancel aborts running work and marks cancelled', async () => {
+    let started!: () => void;
+    const s = new Promise<void>(r => { started = r; });
+    registerAll({
+      INTAKE: async ctx => {
+        started();
+        await new Promise<void>(res => { ctx.signal.addEventListener('abort', () => res()); });
+        return { kind: 'next' };
+      },
+    });
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo);
+    pipeline.start(r.id);
+    await worker.tick();
+    await s;
+    pipeline.cancel(r.id);
+    await worker.idle();
+    expect(repo.getRequest(r.id)!.status).toBe('cancelled');
+    expect(repo.listJobs(r.id).every(j => j.status === 'failed')).toBe(true);
+    expect(calls.map(c => c.stage)).toEqual(['INTAKE']);
+  });
+
+  it('pause and resume', async () => {
+    registerAll();
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo);
+    pipeline.start(r.id);
+    pipeline.pause(r.id);
+    await worker.drain();
+    expect(calls).toHaveLength(0);
+    expect(repo.getRequest(r.id)!.status).toBe('paused');
+    pipeline.resume(r.id);
+    await worker.drain();
+    expect(repo.getRequest(r.id)!.status).toBe('done');
+  });
+
+  it('rerunStage enqueues that stage', async () => {
+    registerAll();
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo, { runMode: 'review' });
+    pipeline.start(r.id); await worker.drain();
+    pipeline.rerunStage(r.id, 'INTAKE'); await worker.drain();
+    expect(calls.map(c => c.stage)).toEqual(['INTAKE', 'CODEBASE_SCAN', 'INTAKE', 'CODEBASE_SCAN']);
+  });
+
+  it('emits events and status on bus', async () => {
+    const evs: unknown[] = []; const sts: unknown[] = [];
+    const a = (e: unknown) => evs.push(e); const b = (e: unknown) => sts.push(e);
+    bus.on('event', a); bus.on('status', b);
+    registerAll({ INTAKE: async ctx => { ctx.log('hello'); return { kind: 'next' }; } });
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo, { runMode: 'review' });
+    pipeline.start(r.id); await worker.drain();
+    bus.off('event', a); bus.off('status', b);
+    expect(evs).toContainEqual(expect.objectContaining({ requestId: r.id, message: 'hello', level: 'info' }));
+    expect(sts).toContainEqual({ requestId: r.id, stage: 'CODEBASE_SCAN', status: 'awaiting_approval' });
+    expect(repo.listEvents(r.id).some(e => e.message === 'hello')).toBe(true);
+  });
+
+  it('ctx.claude wraps runner, saves session id, writes log file', async () => {
+    let seen: RunOpts | undefined;
+    setMockHandler(o => { seen = o; o.onEvent?.('x'.repeat(900)); return { ok: true, sessionId: 'sess-1', resultText: 'hi' }; });
+    registerAll({ INTAKE: async ctx => { const res = await ctx.claude('hello'); ctx.log(`got=${res.resultText}`); return { kind: 'next' }; } });
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo, { runMode: 'review' });
+    pipeline.start(r.id); await worker.drain();
+    clearMockHandler();
+    expect(seen!.cwd).toMatch(/repo$/);
+    expect(seen!.addDirs).toHaveLength(1);
+    expect(seen!.logFile).toMatch(/INTAKE-1\.log$/);
+    expect(repo.latestStageRun(r.id, 'INTAKE')!.claudeSessionId).toBe('sess-1');
+    expect(repo.listEvents(r.id).some(e => e.message === 'got=hi')).toBe(true);
+    expect(Math.max(...repo.listEvents(r.id).map(e => e.message.length))).toBeLessThanOrEqual(501);
+  });
+
+  it('rate limited claude result becomes retry_later (paused)', async () => {
+    const until = new Date(Date.now() + 3_600_000);
+    setMockHandler(() => ({ ok: false, resultText: '', rateLimitedUntil: until }));
+    registerAll({ INTAKE: async ctx => { await ctx.claude('hello'); return { kind: 'next' }; } });
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo);
+    pipeline.start(r.id); await worker.drain();
+    clearMockHandler();
+    expect(repo.getRequest(r.id)!.status).toBe('paused');
+    expect(repo.listJobs(r.id)[0]).toMatchObject({ status: 'paused', runAfter: until.getTime() });
+  });
+});
