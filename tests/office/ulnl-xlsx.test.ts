@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import JSZip from 'jszip';
 import { loadWorkbook } from '../../src/office/xlsx-load.js';
 import { writeUlnl, type UlnlFeature, type UlnlNonFunc } from '../../src/office/ulnl-xlsx.js';
 
@@ -87,5 +88,21 @@ describe('ulnl-xlsx', () => {
     expect(n.getCell('D17').value).toBe('Total');
     expect(formula(n.getCell('E17').value)).toBe('SUM(E10:E16)');
     expect(formula(wb.getWorksheet('TOTAL EFFORT')!.getCell('F10').value)).toBe("'EFFORT NON-FUNCTION'!E17");
+  });
+
+  it('writes exactly one non-overlapping validation on the unit-test flag column', async () => {
+    for (const n of [3, 15]) {
+      const many: UlnlFeature[] = Array.from({ length: n }, (_, i) => ({ code: 'F' + i, name: 'n', description: 'd', type_code: 'NVJ1-PTM', unit_test: true, note: '' }));
+      const out = join(dir, 'dv' + n + '.xlsx');
+      await writeUlnl(TEMPLATE, many, [], 't', out);
+      const zip = await JSZip.loadAsync(await readFile(out));
+      const wbXml = await zip.file('xl/workbook.xml')!.async('string');
+      const rid = /<sheet [^>]*name="EFFORT_FUNCTION"[^>]*r:id="(rId\d+)"/.exec(wbXml)![1];
+      const rels = await zip.file('xl/_rels/workbook.xml.rels')!.async('string');
+      const target = new RegExp('<Relationship [^>]*Id="' + rid + '"[^>]*>').exec(rels)![0].match(/Target="([^"]+)"/)![1].replace(/^\/?(xl\/)?/, '');
+      const sheetXml = await zip.file('xl/' + target)!.async('string');
+      const sqrefs = [...sheetXml.matchAll(/<dataValidation [^>]*sqref="([^"]+)"/g)].map((m) => m[1]!).filter((s) => s.startsWith('M'));
+      expect(sqrefs).toEqual(['M9:M' + Math.max(8 + n, 20)]);
+    }
   });
 });

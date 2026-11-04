@@ -77,6 +77,11 @@ export async function writeUlnl(templatePath: string, features: UlnlFeature[], n
     if (f) tplFormulas.set(col, f);
   }
   const validation = ws.getRow(first).getCell(c.utFlag).dataValidation;
+  // exceljs loads the template's flag validations as overlapping ranges; drop them all and add one
+  const dvModel = (ws as unknown as { dataValidations: { model: Record<string, ExcelJS.DataValidation> } }).dataValidations.model;
+  for (const key of Object.keys(dvModel)) {
+    if (new RegExp(`^${fn.columns.utFlag}\\d+(:${fn.columns.utFlag}\\d+)?$`).test(key)) delete dvModel[key];
+  }
 
   for (let r = first; r <= lastData; r++) clearRow(ws, r, 1, maxCol);
 
@@ -85,7 +90,6 @@ export async function writeUlnl(templatePath: string, features: UlnlFeature[], n
     const r = first + i;
     const row = ws.getRow(r);
     for (const [col, st] of styles) row.getCell(col).style = { ...st };
-    if (r > fn.minLastRow && validation?.type) row.getCell(c.utFlag).dataValidation = { ...validation };
 
     const typeCode = f.type_code.trim();
     const sol = effort.get(`${typeCode}|Solution`) ?? 0;
@@ -119,22 +123,25 @@ export async function writeUlnl(templatePath: string, features: UlnlFeature[], n
   });
 
   // totals row: SUM ranges follow the last data row
+  dvModel[`${fn.columns.utFlag}${first}:${fn.columns.utFlag}${lastData}`] = validation?.type ? { ...validation } : { type: 'list', allowBlank: true, formulae: ['"Yes,No"'] };
   const totalsRow = ws.getRow(fn.totalsRow);
-  const totalResults: Record<string, number> = { E: sums.sol, F: sums.dev, G: sums.ut, H: sums.test, N: sums.sol, O: sums.dev, P: sums.ut, Q: sums.test };
+  const totalResults: Record<string, number> = { [fn.columns.sol]: sums.sol, [fn.columns.dev]: sums.dev, [fn.columns.ut]: sums.ut, [fn.columns.test]: sums.test, N: sums.sol, O: sums.dev, P: sums.ut, Q: sums.test };
   for (const [letter, res] of Object.entries(totalResults)) {
     totalsRow.getCell(letter).value = { formula: `SUM(${letter}${first}:${letter}${lastData})`, result: round3(res) };
   }
-  totalsRow.getCell('I').value = { formula: 'SUM(E8:H8)', result: round3(sums.sol + sums.dev + sums.ut + sums.test) };
-  totalsRow.getCell('R').value = { formula: 'SUM(N8:Q8)', result: round3(sums.sol + sums.dev + sums.ut + sums.test) };
+  const tr = fn.totalsRow;
+  totalsRow.getCell(fn.columns.total).value = { formula: `SUM(${fn.columns.sol}${tr}:${fn.columns.test}${tr})`, result: round3(sums.sol + sums.dev + sums.ut + sums.test) };
+  // N..R (effort before reuse) are template-fixed columns with no mapping entry
+  totalsRow.getCell('R').value = { formula: `SUM(N${tr}:Q${tr})`, result: round3(sums.sol + sums.dev + sums.ut + sums.test) };
 
   const nws = wb.getWorksheet(map.nonFunction.sheet);
-  if (nws) writeNonFunc(wb, nws, map.nonFunction, nonFunc, sums.total);
+  if (nws) writeNonFunc(wb, nws, map.nonFunction, nonFunc, sums.total, `${fn.sheet}!${fn.columns.total}${fn.totalsRow}`);
 
   wb.calcProperties.fullCalcOnLoad = true;
   await wb.xlsx.writeFile(outPath);
 }
 
-function writeNonFunc(wb: ExcelJS.Workbook, ws: ExcelJS.Worksheet, m: UlnlNonFunctionMapping, items: UlnlNonFunc[], functionTotal: number): void {
+function writeNonFunc(wb: ExcelJS.Workbook, ws: ExcelJS.Worksheet, m: UlnlNonFunctionMapping, items: UlnlNonFunc[], functionTotal: number, functionTotalRef: string): void {
   const col = Object.fromEntries(Object.entries(m.columns).map(([k, v]) => [k, colNo(v)])) as Record<keyof typeof m.columns, number>;
   const first = m.firstDataRow;
   const totalRow = first + m.minRows; // the "Total" row of the template
@@ -182,7 +189,7 @@ function writeNonFunc(wb: ExcelJS.Workbook, ws: ExcelJS.Worksheet, m: UlnlNonFun
       // template convention (e.g. PM = 10% of the function effort): keep it a live formula
       const ratio = Number(pct[1]) / 100;
       const res = round3(functionTotal * ratio);
-      row.getCell(col.effort).value = { formula: `EFFORT_FUNCTION!I8*${ratio}`, result: res };
+      row.getCell(col.effort).value = { formula: `${functionTotalRef}*${ratio}`, result: res };
       sum += res;
     } else {
       row.getCell(col.effort).value = 0;

@@ -89,11 +89,11 @@ function cellText(v: ExcelJS.CellValue | undefined): string {
  * Reads customer answers keyed by ID. unknownRows counts rows that carry an answer but cannot be
  * mapped to a question: no ID, or an ID that is not of the form Q-<n>.
  */
-export async function importAnswers(buf: Buffer): Promise<{ answers: { id: string; answer: string }[]; unknownRows: number }> {
+export async function importAnswers(buf: Buffer): Promise<{ answers: { id: string; answer: string }[]; unknownRows: number; duplicateIds: string[] }> {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buf as unknown as ArrayBuffer);
   const ws = wb.getWorksheet(SHEET) ?? wb.worksheets[0];
-  if (!ws) return { answers: [], unknownRows: 0 };
+  if (!ws) return { answers: [], unknownRows: 0, duplicateIds: [] };
 
   let headerRow = -1;
   for (let r = 1; r <= ws.rowCount; r++) {
@@ -102,7 +102,7 @@ export async function importAnswers(buf: Buffer): Promise<{ answers: { id: strin
       break;
     }
   }
-  if (headerRow < 0) return { answers: [], unknownRows: 0 };
+  if (headerRow < 0) return { answers: [], unknownRows: 0, duplicateIds: [] };
 
   let answerCol = ANSWER_COL;
   ws.getRow(headerRow).eachCell((c, n) => {
@@ -111,16 +111,18 @@ export async function importAnswers(buf: Buffer): Promise<{ answers: { id: strin
 
   const byId = new Map<string, string>();
   let unknownRows = 0;
+  const duplicateIds = new Set<string>();
   for (let r = headerRow + 1; r <= ws.rowCount; r++) {
     const row = ws.getRow(r);
-    const id = cellText(row.getCell(1).value).trim();
+    const id = cellText(row.getCell(1).value).trim().toUpperCase();
     const answer = cellText(row.getCell(answerCol).value).trim();
     if (!answer) continue;
     if (!/^Q-\d+$/i.test(id)) {
       unknownRows++;
       continue;
     }
+    if (byId.has(id)) duplicateIds.add(id); // last one wins
     byId.set(id, answer);
   }
-  return { answers: [...byId].map(([id, answer]) => ({ id, answer })), unknownRows };
+  return { answers: [...byId].map(([id, answer]) => ({ id, answer })), unknownRows, duplicateIds: [...duplicateIds] };
 }

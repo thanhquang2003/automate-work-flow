@@ -75,4 +75,16 @@ describe('questions-xlsx', () => {
     const r = await importAnswers(Buffer.from(await wb.xlsx.writeBuffer()));
     expect(r.answers).toEqual([{ id: 'Q-01', answer: 'Giám đốc' }, { id: 'Q-02', answer: 'ab' }]);
   });
+
+  it('normalises ids to upper case and reports duplicate ids (last wins)', async () => {
+    const wb = await load(await exportQuestions('REQ-001', 1, qs, new Map()));
+    const ws = wb.getWorksheet('Câu hỏi')!;
+    ws.getCell('A4').value = ' q-01 ';
+    ws.getCell('G4').value = 'a';
+    ws.getCell('A5').value = 'Q-01';
+    ws.getCell('G5').value = 'b';
+    const r = await importAnswers(Buffer.from(await wb.xlsx.writeBuffer()));
+    expect(r.answers).toEqual([{ id: 'Q-01', answer: 'b' }]);
+    expect(r.duplicateIds).toEqual(['Q-01']);
+  });
 });

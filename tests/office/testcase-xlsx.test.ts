@@ -45,11 +45,16 @@ describe('testcase-xlsx', () => {
     const out = join(dir, 'b.xlsx');
     await writeTestCases(TEMPLATE, rows, out);
     const ws = (await loadWorkbook(out)).getWorksheet('2. FUNCTIONAL TESTCASE')!;
-    // latest status: 01 P, 02 P (2nd), 03 PE, 04 F (2nd), 05 none
-    expect(ws.getCell('I3').value).toBe(2);
-    expect(ws.getCell('I4').value).toBe(1);
-    expect(ws.getCell('I5').value).toBe(1);
-    expect(ws.getCell('I6').value).toBe(4);
+    // live formulas with cached results; 1st run I: P,F,PE,P,- ; 2nd run J: -,P,-,F,-
+    const f = (a: string) => ws.getCell(a).value as { formula: string; result?: number };
+    expect(f('I3')).toEqual({ formula: 'COUNTIF(I12:I92,"P")', result: 2 });
+    expect(f('I4')).toEqual({ formula: 'COUNTIF(I12:I92,"F")', result: 1 });
+    expect(f('I5')).toEqual({ formula: 'COUNTIF(I12:I92,"PE")', result: 1 });
+    expect(f('I6')).toEqual({ formula: 'SUM(I3:I5)', result: 4 });
+    expect(f('J3')).toEqual({ formula: 'COUNTIF(J12:J92,"P")', result: 1 });
+    expect(f('J4')).toEqual({ formula: 'COUNTIF(J12:J92,"F")', result: 1 });
+    expect(f('J5').formula).toBe('COUNTIF(J12:J92,"PE")');
+    expect(f('J6')).toEqual({ formula: 'SUM(J3:J5)', result: 2 });
     expect(ws.getCell('J13').value).toBe('P');
   });
 

@@ -48,15 +48,27 @@ export async function writeTestCases(templatePath: string, rows: TcSheetRow[], o
     if (tc.comment) row.getCell(col.comment).value = tc.comment;
   });
 
-  const counts = { P: 0, F: 0, PE: 0 };
-  for (const tc of rows) {
-    const latest = tc.status2 ?? tc.status1;
-    if (latest) counts[latest]++;
+  // Live COUNTIF formulas as in the template, over the first run (pre1) and second run (pre2) columns.
+  // Range ends at the last written row, or at the template's own range end when that is larger.
+  const tplF = (ws.getCell(map.summary.pass).value as { formula?: string } | null)?.formula ?? '';
+  const tplEnd = Number(/:[A-Z]+(\d+)/.exec(tplF)?.[1] ?? 0);
+  const lastRow = Math.max(first + rows.length - 1, tplEnd);
+  const runs: [string, 'status1' | 'status2'][] = [[map.columns.pre1, 'status1'], [map.columns.pre2, 'status2']];
+  for (const [letter, key] of runs) {
+    const counts = { P: 0, F: 0, PE: 0 };
+    for (const tc of rows) {
+      const s = tc[key];
+      if (s) counts[s]++;
+    }
+    const at = (cell: string): string => cell.replace(/^[A-Z]+/, letter);
+    const range = `${letter}${first}:${letter}${lastRow}`;
+    const [p, f, pe, t] = [at(map.summary.pass), at(map.summary.fail), at(map.summary.pending), at(map.summary.total)];
+    ws.getCell(p).value = { formula: `COUNTIF(${range},"P")`, result: counts.P };
+    ws.getCell(f).value = { formula: `COUNTIF(${range},"F")`, result: counts.F };
+    ws.getCell(pe).value = { formula: `COUNTIF(${range},"PE")`, result: counts.PE };
+    ws.getCell(t).value = { formula: `SUM(${p}:${pe})`, result: counts.P + counts.F + counts.PE };
   }
-  ws.getCell(map.summary.pass).value = counts.P;
-  ws.getCell(map.summary.fail).value = counts.F;
-  ws.getCell(map.summary.pending).value = counts.PE;
-  ws.getCell(map.summary.total).value = counts.P + counts.F + counts.PE;
+
 
   wb.calcProperties.fullCalcOnLoad = true;
   await wb.xlsx.writeFile(outPath);
