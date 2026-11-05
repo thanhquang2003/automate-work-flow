@@ -5,6 +5,13 @@ import { GitLabClient } from './gitlab/client.js';
 import { decrypt } from './security/crypto.js';
 import { getSecretKey } from './security/secret.js';
 
+const warned = new Set<string>();
+function warnOnce(key: string, msg: string): void {
+  if (warned.has(key)) return;
+  warned.add(key);
+  console.warn(`[devflow] ${msg}`);
+}
+
 export const SETTING_KEYS = {
   gitlabUrl: 'gitlab.url', gitlabToken: 'gitlab.token', gitlabDefaultGroup: 'gitlab.defaultGroup',
   maxConcurrentJobs: 'maxConcurrentJobs', claudeBin: 'claudeBin',
@@ -16,7 +23,7 @@ export function effectiveConfig(cfg: Config, repo: Repo): Config {
   let token = cfg.gitlab.token;
   const enc = s(SETTING_KEYS.gitlabToken);
   if (enc) {
-    try { token = decrypt(enc, getSecretKey(cfg)); } catch { /* unreadable (key changed): keep env token */ }
+    try { token = decrypt(enc, getSecretKey(cfg)); } catch { warnOnce('gitlab.token', 'Không giải mã được token GitLab đã lưu trong cài đặt (khóa thay đổi?); dùng token từ biến môi trường.'); }
   }
   const maxJobs = Number.parseInt(s(SETTING_KEYS.maxConcurrentJobs), 10);
   return {
@@ -50,7 +57,7 @@ export function gitlabFor(cfg: Config, repo: Repo, req: RequestRow): GitLabClien
   if (req.createdBy !== null) {
     const enc = repo.getUser(req.createdBy)?.gitlabTokenEnc;
     if (enc) {
-      try { token = decrypt(enc, getSecretKey(cfg)); } catch { /* fall back to shared token */ }
+      try { token = decrypt(enc, getSecretKey(cfg)); } catch { warnOnce(`user.${req.createdBy}`, `Không giải mã được token GitLab cá nhân của người dùng #${req.createdBy}; dùng token chung.`); }
     }
   }
   return eff.gitlab.url && token ? new GitLabClient(eff.gitlab.url, token) : undefined;

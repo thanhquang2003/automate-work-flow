@@ -13,6 +13,8 @@ export interface Config {
   publicBaseUrl: string;
   gitlab: { url: string; token: string; defaultGroup: string };
   rateLimitPauseMin: number;
+  /** Fastify trustProxy: true, false or a hop count (TRUST_PROXY). */
+  trustProxy: boolean | number;
   /** Per-file upload cap in bytes (default 50MB); overridable for tests. */
   maxUploadBytes?: number;
 }
@@ -37,6 +39,14 @@ function parseArgs(v: string | undefined): string[] {
   return t.split(/\s+/);
 }
 
+function parseTrustProxy(v: string | undefined): boolean | number {
+  const t = (v ?? '').trim().toLowerCase();
+  if (t === '' || t === 'false' || t === '0') return false;
+  if (t === 'true') return true;
+  if (/^\d+$/.test(t)) return Number(t);
+  throw new Error(`Invalid TRUST_PROXY: ${v}`);
+}
+
 export function loadConfig(env: Env = process.env): Config {
   const modeRaw = (env.DEVFLOW_MODE || 'local').toLowerCase();
   if (modeRaw !== 'local' && modeRaw !== 'server') throw new Error(`DEVFLOW_MODE must be local|server, got ${modeRaw}`);
@@ -58,5 +68,6 @@ export function loadConfig(env: Env = process.env): Config {
     publicBaseUrl: env.PUBLIC_BASE_URL || `http://localhost:${port}`,
     gitlab: { url: env.GITLAB_URL ?? '', token: env.GITLAB_TOKEN ?? '', defaultGroup: env.GITLAB_DEFAULT_GROUP ?? '' },
     rateLimitPauseMin: int(env.RATE_LIMIT_PAUSE_MIN, 30),
+    trustProxy: parseTrustProxy(env.TRUST_PROXY),
   };
 }

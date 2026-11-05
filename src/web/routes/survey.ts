@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Config } from '../../config.js';
 import type { QuestionRow, SurveyLinkRow } from '../../domain/types.js';
+import { openQuestions } from '../../engine/stages/common.js';
 import { sameOrigin } from '../auth.js';
 import type { WebDeps } from '../server.js';
 import { renderPartial } from '../view.js';
@@ -11,7 +12,20 @@ const MAX_ANSWER = 5000;
 
 type Body = Record<string, string | string[] | undefined>;
 
-export function surveyRoutes(app: FastifyInstance, cfg: Config, { repo }: WebDeps): void {
+/** Splits a stored multi answer (options joined by "; ") against the exact option list, in option order. */
+export function splitMulti(val: string, options: string[]): string[] {
+  const out: string[] = [];
+  let pos = 0;
+  for (const o of options) {
+    if (val.startsWith(o, pos) && (pos + o.length === val.length || val.startsWith("; ", pos + o.length))) {
+      out.push(o);
+      pos += o.length + 2;
+    }
+  }
+  return out;
+}
+
+export function surveyRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline }: WebDeps): void {
   const hits = new Map<string, number[]>();
   const limited = (ip: string): boolean => {
     const now = Date.now();
@@ -54,7 +68,7 @@ export function surveyRoutes(app: FastifyInstance, cfg: Config, { repo }: WebDep
       groups.set(q.category, g);
     }
     return page(reply, code, {
-      state: 'form', title: req?.title ?? '', groups: [...groups], values: over.values ?? v.values, errors: over.errors ?? new Map(), notice: over.notice ?? '',
+      state: 'form', splitMulti, title: req?.title ?? '', groups: [...groups], values: over.values ?? v.values, errors: over.errors ?? new Map(), notice: over.notice ?? '',
     });
   };
 
@@ -69,6 +83,14 @@ export function surveyRoutes(app: FastifyInstance, cfg: Config, { repo }: WebDep
     }
     if (link.expiresAt < Date.now()) { void msgPage(reply, 410, 'Liên kết đã hết hạn', 'Liên kết đã hết hạn. Vui lòng liên hệ nhân viên để được cấp liên kết mới.'); return undefined; }
     return link;
+  };
+
+  /** Auto mode: once every must question is answered, continue the pipeline without staff. */
+  const autoResume = (reqId: string): void => {
+    const r = repo.getRequest(reqId);
+    if (!r || r.status !== 'awaiting_customer' || r.runMode !== 'auto') return;
+    if (openQuestions(repo, reqId).some(q => q.priority === 'must')) return;
+    try { pipeline.resumeAfterCustomer(reqId); } catch (e) { console.error('auto-resume failed', e); }
   };
 
   app.get('/s/:token', async (req, reply) => {
@@ -92,7 +114,8 @@ export function surveyRoutes(app: FastifyInstance, cfg: Config, { repo }: WebDep
       const raw = b[`a_${q.id}`];
       const arr = (Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]).map(s => String(s).trim()).filter(Boolean);
       const ok = q.type === 'text' || q.options.length === 0 ? arr : arr.filter(x => q.options.includes(x));
-      values.set(q.id, (q.type === 'multi' ? ok.join('; ') : (ok[0] ?? '')).slice(0, MAX_ANSWER));
+      const multi = q.options.length ? q.options.filter(o => ok.includes(o)) : [...new Set(ok)];
+      values.set(q.id, (q.type === 'multi' ? multi.join('; ') : (ok[0] ?? '')).slice(0, MAX_ANSWER));
     }
     if (submit) {
       const errors = new Map<string, string>();
@@ -106,6 +129,7 @@ export function surveyRoutes(app: FastifyInstance, cfg: Config, { repo }: WebDep
       }
       if (submit) repo.markSurveySubmitted(link.token);
     });
+    if (submit) autoResume(link.requestId);
     if (submit) return page(reply, 200, { state: 'thanks', title: repo.getRequest(link.requestId)?.title ?? '' });
     return form(reply, link, 200, { notice: 'Đã lưu bản nháp. Quý khách có thể quay lại hoàn thành sau.' });
   });

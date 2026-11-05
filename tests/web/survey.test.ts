@@ -186,4 +186,51 @@ describe('survey + questions tab', () => {
     expect(String(bad.headers.location)).toContain('err=');
     expect(resume).not.toHaveBeenCalled();
   });
+
+  it('rate limit buckets by client IP only with trustProxy', async () => {
+    const s = setup({ mode: 'server', secretKey: 'test-secret', host: '0.0.0.0', trustProxy: true });
+    const app = await buildServer(s.cfg, { repo: s.repo, pipeline: s.pipeline });
+    apps.push(app);
+    const post = (ip: string) => app.inject({ method: 'POST', url: '/s/none', headers: { ...form, 'x-forwarded-for': ip }, payload: enc({ action: 'save' }) });
+    for (let i = 0; i < 30; i++) await post('1.1.1.1');
+    expect((await post('1.1.1.1')).statusCode).toBe(429);
+    expect((await post('2.2.2.2')).statusCode).toBe(404);
+    // without trustProxy the header is ignored: same bucket
+    const b = await boot(true);
+    const post2 = (ip: string) => b.app.inject({ method: 'POST', url: '/s/none', headers: { ...form, 'x-forwarded-for': ip }, payload: enc({ action: 'save' }) });
+    for (let i = 0; i < 30; i++) await post2('3.3.3.3');
+    expect((await post2('4.4.4.4')).statusCode).toBe(429);
+  });
+
+  it('submit auto-resumes in auto mode only when all must answered; review mode does not', async () => {
+    for (const mode of ['auto', 'review'] as const) {
+      const { app, repo, r, pipeline } = await seedSurvey();
+      repo.updateRequest(r.id, { runMode: mode });
+      const resume = vi.spyOn(pipeline, 'resumeAfterCustomer').mockImplementation(() => undefined);
+      await app.inject({ method: 'POST', url: '/s/tok123', headers: form, payload: enc({ action: 'submit', 'a_Q-01': 'a', 'a_Q-03': 'B' }) });
+      expect(resume).toHaveBeenCalledTimes(mode === 'auto' ? 1 : 0);
+    }
+  });
+
+  it('no auto-resume when a must question stays open (answered elsewhere not counted)', async () => {
+    const { app, repo, r, pipeline } = await seedSurvey();
+    repo.updateRequest(r.id, { runMode: 'auto' });
+    repo.upsertQuestions(r.id, 2, [Q('Q-09')]);
+    const resume = vi.spyOn(pipeline, 'resumeAfterCustomer').mockImplementation(() => undefined);
+    await app.inject({ method: 'POST', url: '/s/tok123', headers: form, payload: enc({ action: 'submit', 'a_Q-01': 'a', 'a_Q-03': 'B' }) });
+    expect(resume).not.toHaveBeenCalled();
+  });
+
+  it('multi options containing semicolons prefill and validate exactly', async () => {
+    const b = await boot(true);
+    const r = mkReq(b.repo);
+    b.repo.upsertQuestions(r.id, 1, [Q('Q-01', { type: 'multi', options: ['A; B', 'C', 'D'] })]);
+    b.repo.createSurveyLink({ token: 'semi', requestId: r.id, round: 1, expiresAt: Date.now() + 1e6 });
+    await b.app.inject({ method: 'POST', url: '/s/semi', headers: form, payload: enc({ action: 'save', 'a_Q-01': ['D', 'A; B', 'bogus'] }) });
+    expect(b.repo.latestAnswers(r.id).get('Q-01')).toBe('A; B; D');
+    const page = await b.app.inject({ method: 'GET', url: '/s/semi' });
+    expect(page.body).toMatch(/value="A; B" checked/);
+    expect(page.body).toMatch(/value="D" checked/);
+    expect(page.body).not.toMatch(/value="C" checked/);
+  });
 });

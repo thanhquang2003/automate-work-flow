@@ -21,7 +21,7 @@ const PUBLIC_PATHS = ['/login', '/setup'];
 const MAX_UPLOAD = 50 * 1024 * 1024;
 
 export async function buildServer(cfg: Config, deps: WebDeps): Promise<FastifyInstance> {
-  const app = Fastify({ logger: false, bodyLimit: 210 * 1024 * 1024 });
+  const app = Fastify({ logger: false, trustProxy: cfg.trustProxy as boolean, /* hop count is supported at runtime by proxy-addr */ bodyLimit: 210 * 1024 * 1024 });
   await app.register(cookie);
   await app.register(formbody);
   await app.register(multipart, { limits: { fileSize: cfg.maxUploadBytes ?? MAX_UPLOAD, files: 30, fields: 50 } });

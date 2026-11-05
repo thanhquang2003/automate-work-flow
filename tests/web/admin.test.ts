@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
@@ -163,6 +163,18 @@ describe('settings', () => {
   });
 });
 
+describe('secret key file', () => {
+  it('refuses to regenerate an empty or invalid key file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'devflow-key-'));
+    const cfg = { secretKey: '', dataDir: dir };
+    writeFileSync(join(dir, 'secret.key'), '');
+    expect(() => getSecretKey(cfg)).toThrow(/rỗng hoặc không hợp lệ/);
+    expect(readFileSync(join(dir, 'secret.key'), 'utf8')).toBe('');
+    writeFileSync(join(dir, 'secret.key'), 'garbage');
+    expect(() => getSecretKey(cfg)).toThrow();
+  });
+});
+
 describe('users', () => {
   async function adminSetup() {
     const b = await boot(true);
@@ -205,6 +217,20 @@ describe('users', () => {
     const self = await app.inject({ method: 'POST', url: `/users/${admin.id}/delete`, headers: h });
     expect(decodeURIComponent(String(self.headers.location))).toContain('err=');
     expect(repo.getUser(admin.id)).toBeDefined();
+  });
+
+  it('deleted user session is rejected; their requests are kept and shown as -', async () => {
+    const { app, repo, admin, member, adminCookie, memberCookie } = await adminSetup();
+    const r = mkReq(repo, { createdBy: member.id });
+    expect((await app.inject({ method: 'GET', url: '/', headers: { cookie: memberCookie } })).statusCode).toBe(200);
+    await app.inject({ method: 'POST', url: `/users/${member.id}/delete`, headers: { ...form, cookie: adminCookie } });
+    const after = await app.inject({ method: 'GET', url: '/', headers: { cookie: memberCookie } });
+    expect(after.statusCode).toBe(302);
+    expect(after.headers.location).toBe('/login');
+    expect(repo.getRequest(r.id)).toBeDefined();
+    const dash = await app.inject({ method: 'GET', url: '/', headers: { cookie: adminCookie } });
+    expect(dash.body).toContain(r.id);
+    void admin;
   });
 
   it('/me stores own gitlab token encrypted and never echoes it', async () => {
