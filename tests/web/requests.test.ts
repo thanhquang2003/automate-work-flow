@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { bus } from '../../src/engine/bus.js';
 import { Workspace } from '../../src/engine/workspace.js';
 import { hashPassword } from '../../src/security/crypto.js';
-import { signSession } from '../../src/web/auth.js';
+import { isLocalHostHeader, signSession } from '../../src/web/auth.js';
 import { markdownToHtml } from '../../src/web/markdown-html.js';
 import { buildServer } from '../../src/web/server.js';
 import { mkReq, setup } from '../engine/helpers.js';
@@ -103,6 +103,7 @@ describe('web: local mode', () => {
     repo.updateRequest(r.id, { status: 'awaiting_approval', stage: 'ANALYSIS' });
     const page = await app.inject({ method: 'GET', url: `/requests/${r.id}` });
     expect(page.statusCode).toBe(200);
+    expect(page.body).toContain('data-status="awaiting_approval" data-stage="ANALYSIS"'); // compared by app.js before reloading
     for (const s of ['Tiếp nhận', 'Đọc hiểu dự án', 'Làm rõ yêu cầu', 'Lập kế hoạch & Test case'.replace('&', '&amp;'), 'Duyệt (Approve)', 'Từ chối (Reject)']) expect(page.body).toContain(s);
     for (const tab of ['analysis', 'questions', 'docs', 'tasks', 'tests', 'bugs']) {
       expect((await app.inject({ method: 'GET', url: `/requests/${r.id}?tab=${tab}` })).statusCode).toBe(200);
@@ -123,6 +124,57 @@ describe('web: local mode', () => {
     expect(res.body).toContain('&lt;script&gt;');
     expect(res.body).toContain('<strong>đậm</strong>');
     expect(markdownToHtml('| a | b |\n|---|---|\n| 1 | <i> |')).toContain('<td>&lt;i&gt;</td>');
+  });
+
+  it('local mode rejects a foreign Host header (DNS rebinding), GET and POST', async () => {
+    const { app } = await boot();
+    for (const host of ['evil.com', 'evil.com:3700', '127.0.0.1.evil.com', 'localhost.evil.com:3700']) {
+      const g = await app.inject({ method: 'GET', url: '/', headers: { host } });
+      expect(g.statusCode, host).toBe(403);
+      const p = await app.inject({ method: 'POST', url: '/requests/REQ-001/pause', headers: { host, origin: `http://${host}` } });
+      expect(p.statusCode, host).toBe(403);
+      expect((await app.inject({ method: 'GET', url: '/static/app.css', headers: { host } })).statusCode, host).toBe(403);
+    }
+    for (const host of ['localhost', 'localhost:3700', 'LOCALHOST:1234', '127.0.0.1:3700', '[::1]:3700']) {
+      expect((await app.inject({ method: 'GET', url: '/', headers: { host } })).statusCode, host).toBe(200);
+    }
+    // An explicit HOST binding (e.g. a LAN address) is accepted too; a wildcard binding is not a hostname.
+    expect(isLocalHostHeader('192.168.1.5:3700', '192.168.1.5')).toBe(true);
+    expect(isLocalHostHeader('0.0.0.0:3700', '0.0.0.0')).toBe(false);
+    expect(isLocalHostHeader('evil.com', '0.0.0.0')).toBe(false);
+    expect(isLocalHostHeader(undefined)).toBe(false);
+  });
+
+  it('file names containing % are not decoded twice', async () => {
+    const { app, repo, cfg } = await boot();
+    const r = mkReq(repo);
+    const ws = Workspace.for(cfg, r.id).ensure();
+    writeFileSync(join(ws.artifactsDir, '100%.txt'), 'percent');
+    writeFileSync(join(ws.artifactsDir, 'a%20b.txt'), 'literal');
+    const a = await app.inject({ method: 'GET', url: `/requests/${r.id}/files/100%25.txt` });
+    expect(a.statusCode).toBe(200);
+    expect(a.body).toBe('percent');
+    const b = await app.inject({ method: 'GET', url: `/requests/${r.id}/files/a%2520b.txt` });
+    expect(b.statusCode).toBe(200);
+    expect(b.body).toBe('literal');
+  });
+
+  it('bugs tab links issues by their stored GitLab URL', async () => {
+    const { app, repo, cfg } = await boot();
+    const r = mkReq(repo, { projectKind: 'new', gitlabProject: 'short-name' });
+    const ws = Workspace.for(cfg, r.id).ensure();
+    repo.upsertBug(r.id, { tcId: 'TC-A-01', gitlabIid: 5, fixAttempts: 1, status: 'open' });
+    repo.upsertBug(r.id, { tcId: 'TC-A-02', gitlabIid: 6, fixAttempts: 0, status: 'open' });
+    repo.upsertBug(r.id, { tcId: 'TC-A-03', gitlabIid: 7, fixAttempts: 0, status: 'open' });
+    writeFileSync(join(ws.root, 'flow-state.json'), JSON.stringify({ issueUrls: { 'TC-A-01': 'https://gl.example.com/team/short-name/-/issues/5', 'TC-A-02': 'javascript:alert(1)' } }));
+    writeFileSync(join(ws.root, 'project.json'), JSON.stringify({ gitlab: true, projectId: 9, pathWithNamespace: 'team/short-name', defaultBranch: 'main', webUrl: 'https://gl.example.com/team/short-name', branch: `devflow/${r.id}` }));
+    const res = await app.inject({ method: 'GET', url: `/requests/${r.id}?tab=bugs` });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('href="https://gl.example.com/team/short-name/-/issues/5"');
+    expect(res.body).not.toContain('javascript:');
+    // No (usable) stored URL: built from the project's web URL recorded at INTAKE, not from the request's short name.
+    expect(res.body).toContain('href="https://gl.example.com/team/short-name/-/issues/7"');
+    expect(res.body).toContain('href="https://gl.example.com/team/short-name/-/issues/6"'); // unsafe stored URL ignored
   });
 
   it('file download works and blocks ../ traversal', async () => {

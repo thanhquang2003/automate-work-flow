@@ -70,7 +70,7 @@ cp .env.example .env      # chỉnh nếu cần; mặc định chạy được n
 npm start
 ```
 
-Mở trình duyệt tại **http://127.0.0.1:3700**. Chế độ local chỉ lắng nghe `127.0.0.1` và không yêu cầu đăng nhập.
+Mở trình duyệt tại **http://127.0.0.1:3700** (hoặc `http://localhost:3700`). Chế độ local chỉ lắng nghe `127.0.0.1`, không yêu cầu đăng nhập, và từ chối truy cập qua tên miền khác (chống DNS rebinding).
 
 `npm start` tự đọc file `.env` ở thư mục hiện tại (biến đã có trong môi trường được ưu tiên hơn `.env`). Dữ liệu nằm trong `DATA_DIR` (mặc định `./data`). Vào trang **Cài đặt** để nhập GitLab URL và token nếu làm việc với GitLab.
 
@@ -102,15 +102,15 @@ Dùng một VPS **riêng cho DevFlow** (không phải máy chủ GitLab, xem [L�
    TRUST_PROXY=1
    HOST=127.0.0.1
    DATA_DIR=/opt/devflow/data
+   CLAUDE_BIN=/opt/devflow/.local/bin/claude
    ```
 
    - `SECRET_KEY` **bắt buộc** ở server mode; mất hoặc đổi khóa thì các token GitLab đã lưu không giải mã được.
-   - `PUBLIC_BASE_URL` là URL HTTPS công khai: dùng để tạo link khảo sát và kiểm tra nguồn gốc (Origin) của các yêu cầu POST.
+   - `PUBLIC_BASE_URL` **bắt buộc** ở server mode (DevFlow không khởi động nếu thiếu): URL HTTPS công khai, dùng để tạo link khảo sát và kiểm tra nguồn gốc (Origin) của các yêu cầu POST.
    - `TRUST_PROXY=1` khi đứng sau một reverse proxy (Caddy) để rate limit lấy đúng IP khách; `HOST=127.0.0.1` để chỉ Caddy truy cập được cổng 3700.
+   - `CLAUDE_BIN` nên là **đường dẫn đầy đủ**: PATH của systemd không có `~/.local/bin`, nên lệnh `claude` trần sẽ không tìm thấy. Xem đường dẫn bằng `sudo -u devflow -H bash -lc 'command -v claude'` (với user ở trên thường là `/opt/devflow/.local/bin/claude`; nếu home là `/home/devflow` thì là `/home/devflow/.local/bin/claude`).
 
-4. Reverse proxy HTTPS bằng **Caddy**: dùng [`Caddyfile.example`](Caddyfile.example) (đổi tên miền), đặt vào `/etc/caddy/Caddyfile` rồi `sudo systemctl reload caddy`. Caddy tự cấp và gia hạn chứng chỉ Let's Encrypt.
-
-5. Chạy như service **systemd**: dùng [`scripts/devflow.service`](scripts/devflow.service):
+4. Chạy như service **systemd**: dùng [`scripts/devflow.service`](scripts/devflow.service):
 
    ```bash
    sudo cp scripts/devflow.service /etc/systemd/system/
@@ -119,13 +119,22 @@ Dùng một VPS **riêng cho DevFlow** (không phải máy chủ GitLab, xem [L�
    journalctl -u devflow -f
    ```
 
-6. Mở `https://devflow.example.com`. Lần đầu chưa có tài khoản, DevFlow chuyển tới trang `/setup` để tạo **quản trị viên** đầu tiên; sau đó quản trị viên tạo thêm người dùng ở trang **Người dùng** (vai trò `admin`/`member`).
+5. **Tạo quản trị viên trước khi mở DevFlow ra Internet.** Khi chưa có tài khoản nào, trang `/setup` cho **bất kỳ ai truy cập đầu tiên** tạo quản trị viên. Vì vậy hãy tạo admin qua SSH tunnel khi DevFlow mới chỉ nghe ở `127.0.0.1`:
+
+   ```bash
+   ssh -L 3700:127.0.0.1:3700 <user>@<vps>
+   # rồi mở http://localhost:3700/setup trên máy của bạn và tạo tài khoản admin
+   ```
+
+6. Reverse proxy HTTPS bằng **Caddy**: dùng [`Caddyfile.example`](Caddyfile.example) (đổi tên miền), đặt vào `/etc/caddy/Caddyfile` rồi `sudo systemctl reload caddy`. Caddy tự cấp và gia hạn chứng chỉ Let's Encrypt.
+
+7. Mở `https://devflow.example.com`, đăng nhập bằng tài khoản admin vừa tạo; quản trị viên tạo thêm người dùng ở trang **Người dùng** (vai trò `admin`/`member`).
 
 Ở server mode mọi trang đều cần đăng nhập, **trừ** `/s/*` (khảo sát khách hàng) và `/static/*`.
 
 ## Cấu hình
 
-Cấu hình qua biến môi trường (hoặc file `.env`); xem [`.env.example`](.env.example). GitLab URL/token, `CLAUDE_BIN` và số job song song còn có thể đặt trong trang **Cài đặt** (giá trị trong trang Cài đặt ghi đè biến môi trường).
+Cấu hình qua biến môi trường (hoặc file `.env`); xem [`.env.example`](.env.example). GitLab URL/token, group mặc định và số job song song còn có thể đặt trong trang **Cài đặt** (giá trị trong trang Cài đặt ghi đè biến môi trường). `CLAUDE_BIN` **chỉ** đặt qua biến môi trường (lệnh này được thực thi trên máy chủ nên không cho sửa từ giao diện web).
 
 | Biến | Mặc định | Ý nghĩa |
 |------|----------|---------|
@@ -134,16 +143,17 @@ Cấu hình qua biến môi trường (hoặc file `.env`); xem [`.env.example`]
 | `PORT` | `3700` | Cổng web |
 | `DATA_DIR` | `./data` | Thư mục dữ liệu: SQLite, workspace từng yêu cầu, template tải lên, cache |
 | `SECRET_KEY` | (trống) | Khóa mã hóa token GitLab AES-256-GCM. Bắt buộc ở server mode. Local để trống thì tự tạo `DATA_DIR/secret.key` |
-| `CLAUDE_BIN` | `claude` | Lệnh Claude Code |
+| `CLAUDE_BIN` | `claude` | Lệnh Claude Code; chỉ đặt qua biến môi trường. Trên VPS (systemd) dùng đường dẫn đầy đủ, ví dụ `/opt/devflow/.local/bin/claude`. Trên Windows có thể trỏ thẳng tới file `.cmd` |
 | `CLAUDE_BIN_ARGS` | (trống) | Tham số đặt trước tham số của claude (JSON mảng hoặc cách nhau bằng dấu cách); chủ yếu cho kiểm thử |
 | `CLAUDE_MOCK` | `0` | `1` = dùng Claude giả lập (chỉ cho kiểm thử, không dùng khi chạy thật) |
 | `MAX_CONCURRENT_JOBS` | `1` (local) / `2` (server) | Số job Claude chạy đồng thời |
 | `SURVEY_TTL_DAYS` | `14` | Số ngày link khảo sát còn hiệu lực |
-| `PUBLIC_BASE_URL` | `http://localhost:<PORT>` | URL công khai, dùng cho link khảo sát và kiểm tra Origin (server mode) |
+| `PUBLIC_BASE_URL` | `http://localhost:<PORT>` (local) | URL công khai, dùng cho link khảo sát và kiểm tra Origin. **Bắt buộc** ở server mode |
 | `GITLAB_URL` | (trống) | Địa chỉ GitLab, ví dụ `https://gitlab.example.com` |
 | `GITLAB_TOKEN` | (trống) | Personal Access Token chung (quyền `api`, `write_repository`) |
 | `GITLAB_DEFAULT_GROUP` | (trống) | Group mặc định khi tạo project GitLab mới |
 | `RATE_LIMIT_PAUSE_MIN` | `30` | Số phút tạm dừng khi chạm giới hạn subscription nếu Claude không báo thời điểm reset |
+| `STAGE_TIMEOUT_MIN` | `120` | Thời gian tối đa (phút) cho một lần chạy Claude; quá hạn thì DevFlow dừng tiến trình Claude và coi lần chạy đó là lỗi (bước bị lỗi thì bấm **Chạy lại bước**). `0` = không giới hạn |
 | `TRUST_PROXY` | `false` | `true` hoặc số tầng proxy khi đứng sau reverse proxy |
 | `ANDROID_HOME` | (trống) | (Tùy chọn) Android SDK cho kiểm thử mobile; DevFlow chỉ đọc để báo cho Tester |
 
@@ -161,7 +171,7 @@ Chọn **Yêu cầu → Tạo yêu cầu mới** và điền: tiêu đề, mô t
 - **Tự động**: chạy toàn trình, không dừng giữa các giai đoạn. Chỉ dừng khi cần khách hàng trả lời câu hỏi hoặc cần can thiệp thủ công.
 - **Duyệt từng bước**: sau các giai đoạn khảo sát mã nguồn, phân tích, bóc tách, thiết kế, lập kế hoạch và phát triển (sau khi xong tất cả task), yêu cầu dừng ở "Chờ duyệt". Bấm **Approve** để đi tiếp, hoặc **Reject** kèm nhận xét để chạy lại giai đoạn đó với nhận xét làm đầu vào.
 
-Ở cả hai chế độ có thể **Tạm dừng / Tiếp tục / Hủy** và **Chạy lại giai đoạn** trên trang chi tiết; log Claude hiển thị realtime.
+Ở cả hai chế độ có thể **Tạm dừng / Tiếp tục / Hủy** trên trang chi tiết, và **Chạy lại bước** khi bước bị lỗi hoặc cần người xử lý; log Claude hiển thị realtime.
 
 ### Khảo sát khách hàng (Excel hoặc web)
 
@@ -206,7 +216,13 @@ Yêu cầu chuyển sang `NEEDS_HUMAN` ("Cần can thiệp thủ công") khi:
 - một bug sửa quá 3 lần vẫn chưa qua (issue được gắn label `needs-human`);
 - stage báo cần người xử lý.
 
-Xem log trên trang chi tiết để biết lý do, xử lý (sửa tay trên nhánh `devflow/<REQ>`, bổ sung thông tin...) rồi bấm **Chạy lại giai đoạn**.
+Xem log trên trang chi tiết để biết lý do, xử lý (sửa tay trên nhánh `devflow/<REQ>`, bổ sung thông tin...) rồi bấm **Chạy lại bước**.
+
+**Bug sửa quá 3 lần (dừng ở giai đoạn `BUGFIX`)** — cách xử lý:
+
+1. Lấy nhánh `devflow/<REQ>` về máy (`git fetch && git checkout devflow/<REQ>`), tự sửa lỗi và commit.
+2. `git push` nhánh `devflow/<REQ>` (không push vào nhánh mặc định). Không có GitLab thì sửa trực tiếp trong repo của workspace `DATA_DIR/workspaces/<REQ>/repo` trên nhánh đó.
+3. Bấm **Chạy lại bước** trên trang chi tiết. Bước `BUGFIX` bỏ qua các bug đã chuyển sang người xử lý (không sửa thêm lần nào) nên chuyển ngay sang `TEST`; `TEST` kéo nhánh về (bao gồm bản sửa tay của bạn) rồi **kiểm thử lại** các test case đó. Pass thì issue được đóng và yêu cầu đi tiếp; vẫn Fail thì issue nhận comment kết quả mới và yêu cầu lại dừng ở `NEEDS_HUMAN` (DevFlow không tự sửa thêm bug đã quá 3 lần).
 
 ## Mẫu tài liệu
 
@@ -219,6 +235,8 @@ DevFlow đi kèm 4 mẫu mặc định trong `templates/default/`: `tkct.docx`, 
 ## Lưu ý bảo mật
 
 - **Claude Code chạy với `bypassPermissions`** trong workspace của yêu cầu: có thể đọc/ghi file, chạy lệnh, cài gói mà không hỏi. Chỉ chạy DevFlow trên **máy hoặc VPS dành riêng**, không chứa dữ liệu hay khóa khác; dùng user hệ điều hành riêng, không phải root. Không đặt DevFlow chung máy chủ GitLab.
+- Tiến trình Claude **không** nhận các biến môi trường bí mật của DevFlow (`SECRET_KEY`, `GITLAB_*`, `GIT_CONFIG_*`, `CLAUDE_MOCK`, `CLAUDE_BIN_ARGS`). Tuy vậy Claude vẫn làm việc trong repo đã clone và có thể chạy `git push`; DevFlow chỉ push nhánh `devflow/*`, nhưng hãy **bật Protected branches trên GitLab cho nhánh mặc định** (chỉ Maintainer được merge, không ai được push) làm lớp bảo vệ cuối, và dùng token có quyền tối thiểu (Developer).
+- Chế độ local không có đăng nhập nên chỉ chấp nhận yêu cầu có header `Host` là `localhost`, `127.0.0.1` hoặc `[::1]` (hoặc đúng địa chỉ đặt trong `HOST`); tên miền khác bị từ chối 403 (chống DNS rebinding).
 - Token GitLab lưu trong DB được **mã hóa AES-256-GCM** bằng `SECRET_KEY`; hãy sao lưu và bảo vệ khóa (file `.env`/`/etc/devflow.env` quyền `600`).
 - Mật khẩu người dùng băm bằng scrypt; session cookie httpOnly; các yêu cầu POST được kiểm tra nguồn gốc (Origin).
 - **Trang khảo sát `/s/<token>` là công khai**: ai có link đều trả lời được. Token ngẫu nhiên 32 byte, hết hạn sau `SURVEY_TTL_DAYS` ngày, có rate limit theo IP; chỉ gửi link cho đúng khách hàng và không đưa thông tin nhạy cảm vào nội dung câu hỏi.

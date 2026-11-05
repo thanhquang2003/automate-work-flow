@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { GitLabClient } from '../../src/gitlab/client.js';
@@ -32,10 +32,12 @@ export function fakeGitLab(bare: string, project = { id: 7, path: 'grp/app', def
       const m = mrs.get(iid)!;
       if (m.state !== 'opened') throw new Error('not open');
       const tmp = mkdtempSync(join(tmpdir(), 'devflow-merge-'));
-      git(tmp, 'clone', '-q', bare, '.');
-      git(tmp, 'checkout', '-q', m.target);
-      git(tmp, '-c', 'user.name=gl', '-c', 'user.email=gl@gl', 'merge', '-q', '--no-ff', `origin/${m.source}`, '-m', `Merge ${m.source}`);
-      git(tmp, 'push', '-q', 'origin', m.target);
+      try {
+        git(tmp, 'clone', '-q', bare, '.');
+        git(tmp, 'checkout', '-q', m.target);
+        git(tmp, '-c', 'user.name=gl', '-c', 'user.email=gl@gl', 'merge', '-q', '--no-ff', `origin/${m.source}`, '-m', `Merge ${m.source}`);
+        git(tmp, 'push', '-q', 'origin', m.target);
+      } finally { rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
       m.state = 'merged';
     },
     getMR: async (_pid: number, iid: number) => { const m = mrs.get(iid)!; return { iid, state: m.state, web_url: `http://gl/grp/app/-/merge_requests/${iid}` }; },

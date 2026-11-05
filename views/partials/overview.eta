@@ -1,7 +1,7 @@
 <div class="grid2">
   <div>
     <h3>Log trực tiếp</h3>
-    <pre id="log" class="log" data-events="/requests/<%= it.r.id %>/events" aria-live="polite"></pre>
+    <pre id="log" class="log" data-events="/requests/<%= it.r.id %>/events" data-status="<%= it.r.status %>" data-stage="<%= it.r.stage %>" aria-live="polite"></pre>
   </div>
   <div>
     <h3>Mô tả</h3>

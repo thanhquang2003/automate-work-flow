@@ -4,7 +4,7 @@
   <tbody>
   <% for (const b of it.bugs) { %>
   <tr><td><%= b.tcId %></td>
-  <td><% if (b.gitlabIid) { %><% if (it.gitlabBase && it.r.gitlabProject) { %><a href="<%= it.gitlabBase %>/<%= it.r.gitlabProject %>/-/issues/<%= b.gitlabIid %>" target="_blank" rel="noopener">#<%= b.gitlabIid %></a><% } else { %>#<%= b.gitlabIid %><% } %><% } %></td>
+  <td><% if (b.issueUrl) { %><a href="<%= b.issueUrl %>" target="_blank" rel="noopener"><%= b.gitlabIid ? '#' + b.gitlabIid : 'Mở issue' %></a><% } else if (b.gitlabIid) { %>#<%= b.gitlabIid %><% } %></td>
   <td><%= b.fixAttempts %></td><td><span class="badge"><%= b.status %></span></td></tr>
   <% } %>
   </tbody>

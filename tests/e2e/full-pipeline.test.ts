@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
@@ -20,12 +20,20 @@ const HOST = 'localhost:3700';
 const HEADERS = { origin: `http://${HOST}`, host: HOST };
 
 const apps: FastifyInstance[] = [];
-afterEach(async () => { while (apps.length) await apps.pop()!.close(); clearMockHandler(); clearStages(); });
+const tmpDirs: string[] = [];
+/** mkdtemp that afterEach removes again. */
+const tempDir = (prefix: string): string => { const d = mkdtempSync(join(tmpdir(), prefix)); tmpDirs.push(d); return d; };
+afterEach(async () => {
+  while (apps.length) await apps.pop()!.close();
+  clearMockHandler();
+  clearStages();
+  while (tmpDirs.length) rmSync(tmpDirs.pop()!, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+});
 
 /** The whole app (real Pipeline + Worker + web server), fake GitLab over a local bare remote, mock Claude. */
 async function boot(withGitLab: boolean) {
-  const cfg: Config = { ...loadConfig({ DEVFLOW_MODE: 'local', CLAUDE_MOCK: '1' }), dataDir: mkdtempSync(join(tmpdir(), 'devflow-e2e-')) };
-  const root = mkdtempSync(join(tmpdir(), 'devflow-e2e-remote-'));
+  const cfg: Config = { ...loadConfig({ DEVFLOW_MODE: 'local', CLAUDE_MOCK: '1' }), dataDir: tempDir('devflow-e2e-') };
+  const root = tempDir('devflow-e2e-remote-');
   const bare = join(root, 'app.git');
   git(root, 'init', '-q', '--bare', '-b', 'main', bare);
   const seed = join(root, 'seed');

@@ -5,7 +5,8 @@ import { pipeline as streamPipeline } from 'node:stream/promises';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { ZipArchive } from 'archiver';
 import type { Config } from '../../config.js';
-import type { ProjectKind, RequestRow, RunMode, SoftwareType } from '../../domain/types.js';
+import type { BugRow, ProjectKind, RequestRow, RunMode, SoftwareType } from '../../domain/types.js';
+import { readFlowState, readProjectInfo } from '../../engine/stages/common.js';
 import { Workspace } from '../../engine/workspace.js';
 import { markdownToHtml } from '../markdown-html.js';
 import { questionsTabData } from './questions.js';
@@ -24,6 +25,23 @@ const INLINE_TYPES: Record<string, string> = {
 const IMAGE_RE = /\.(png|jpe?g|gif|webp)$/i;
 
 interface FileEntry { rel: string; size: number; mtime: number; image: boolean }
+
+const httpUrl = (u: unknown): string | undefined => (typeof u === 'string' && /^https?:\/\/[^\s"'<>]+$/i.test(u) ? u : undefined);
+
+/**
+ * Bug rows with their GitLab issue link: the issue URL GitLab returned (flow-state), else the project web URL
+ * recorded at INTAKE + /-/issues/<iid>. Unreadable state files just mean "no link".
+ */
+function bugsWithLinks(ws: Workspace, bugs: BugRow[]): (BugRow & { issueUrl?: string })[] {
+  let urls: Record<string, unknown> = {};
+  let webUrl: string | undefined;
+  try { urls = readFlowState(ws).issueUrls ?? {}; } catch { /* corrupt flow-state: no links */ }
+  try { webUrl = httpUrl(readProjectInfo(ws)?.webUrl)?.replace(/\/+$/, ''); } catch { /* no project info */ }
+  return bugs.map(b => {
+    const issueUrl = httpUrl(urls[b.tcId]) ?? (b.gitlabIid && webUrl ? `${webUrl}/-/issues/${b.gitlabIid}` : undefined);
+    return issueUrl ? { ...b, issueUrl } : b;
+  });
+}
 
 function listFiles(dir: string, base = dir): FileEntry[] {
   if (!existsSync(dir)) return [];
@@ -160,8 +178,7 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
         evidenceLinks: t.evidence.map(e => ({ name: e, rel: have.has(e) ? e : have.has(`evidence/${e}`) ? `evidence/${e}` : e, image: IMAGE_RE.test(e) })),
       }));
     } else if (tab === 'bugs') {
-      data.bugs = repo.listBugs(id);
-      data.gitlabBase = cfg.gitlab.url.replace(/\/$/, '');
+      data.bugs = bugsWithLinks(ws, repo.listBugs(id));
     }
     const flash = q.err ?? q.ok;
     return html(reply, render('request-detail', layout(req, `${r.id} - ${r.title}`, { flash, flashKind: q.err ? 'error' : 'ok' }), data));
@@ -205,8 +222,8 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
   // ---- files ----
   app.get('/requests/:id/files/*', async (req, reply) => {
     const { id } = req.params as { id: string };
-    let rel: string;
-    try { rel = decodeURIComponent((req.params as Record<string, string>)['*'] ?? ''); } catch { rel = '..'; }
+    // Fastify already percent-decoded the wildcard; decoding again would break names containing '%'.
+    const rel = (req.params as Record<string, string>)['*'] ?? '';
     if (!getReq(id)) return notFound(req, reply);
     const ws = Workspace.for(cfg, id);
     let file = safeJoin(ws.artifactsDir, rel);
