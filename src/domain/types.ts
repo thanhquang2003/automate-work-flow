@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const STAGES = ['INTAKE', 'CODEBASE_SCAN', 'ANALYSIS', 'CLARIFY', 'BREAKDOWN', 'DESIGN', 'PLANNING', 'DEVELOP', 'TEST', 'BUGFIX', 'DONE'] as const;
+export const STAGES = ['INTAKE', 'CODEBASE_SCAN', 'ANALYSIS', 'CLARIFY', 'BREAKDOWN', 'DESIGN', 'PLANNING', 'DEVELOP', 'TEST', 'BUGFIX', 'DONE', 'CHANGE'] as const;
 export type Stage = (typeof STAGES)[number];
 
 export type RequestStatus = 'running' | 'awaiting_approval' | 'awaiting_customer' | 'paused' | 'needs_human' | 'failed' | 'done' | 'cancelled';
@@ -11,6 +11,11 @@ export type JobStatus = 'queued' | 'running' | 'done' | 'failed' | 'paused';
 export type AnswerSource = 'excel' | 'web' | 'staff';
 export type TestStatus = 'P' | 'F' | 'PE';
 export type UserRole = 'admin' | 'member';
+export type CrKind = 'add' | 'modify' | 'remove' | 'nfr' | 'other';
+export type CrSource = 'staff' | 'customer';
+export type CrStatus = 'proposed' | 'pending' | 'analyzing' | 'awaiting_decision' | 'accepted' | 'rejected' | 'applied';
+export type ScopeStatus = 'active' | 'cancelled';
+export const SCOPE_STATUSES = ['active', 'cancelled'] as const;
 
 // ---- Zod schemas for Claude outputs (spec section 8/9) ----
 
@@ -39,6 +44,7 @@ export const FeatureSchema = z.object({
   unit_test: z.boolean(),
   note: z.string().default(''),
   kind: z.enum(['function', 'nonfunction']).default('function'),
+  scope_status: z.enum(SCOPE_STATUSES).default('active'),
 });
 export type FeatureOut = z.infer<typeof FeatureSchema>;
 export const FeaturesOut = z.object({ features: z.array(FeatureSchema) });
@@ -48,6 +54,7 @@ export const TaskSchema = z.object({
   title: z.string(),
   feature_id: z.string(),
   depends_on: z.array(z.string()).default([]),
+  scope_status: z.enum(SCOPE_STATUSES).default('active'),
 });
 export const TasksOut = z.object({ tasks: z.array(TaskSchema) });
 
@@ -58,6 +65,7 @@ export const TestCaseSchema = z.object({
   data: z.string().default(''),
   steps: z.string(),
   expected: z.string(),
+  scope_status: z.enum(SCOPE_STATUSES).default('active'),
 });
 export const TestCasesOut = z.object({ test_cases: z.array(TestCaseSchema) });
 
@@ -80,6 +88,23 @@ export const ReviewOut = z.object({
   })),
 });
 
+export const CR_REENTER_STAGES = ['ANALYSIS', 'BREAKDOWN', 'DESIGN', 'PLANNING', 'DEVELOP', 'TEST'] as const;
+export const ImpactOut = z.object({
+  cr_id: z.string(),
+  summary: z.string(),
+  scope: z.object({
+    add: z.array(z.object({ name: z.string(), description: z.string() })),
+    modify: z.array(z.object({ feature_id: z.string(), change: z.string() })),
+    remove: z.array(z.string()),
+  }),
+  affected: z.object({ features: z.array(z.string()), tasks: z.array(z.string()), test_cases: z.array(z.string()) }),
+  questions: z.array(QuestionSchema).default([]),
+  effort_delta_mh: z.number(),
+  risks: z.array(z.string()).default([]),
+  reenter: z.enum(CR_REENTER_STAGES),
+});
+export type ImpactOutT = z.infer<typeof ImpactOut>;
+
 // ---- DB row types ----
 
 export interface NewRequest {
@@ -99,6 +124,8 @@ export interface RequestRow extends NewRequest {
   stage: Stage;
   status: RequestStatus;
   clarifyRound: number;
+  baselineVersion: number;
+  iteration: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -126,12 +153,23 @@ export interface EventRow { id: number; requestId: string; ts: number; level: st
 
 export interface FeatureRow {
   id: string; code: string; name: string; description: string; typeCode: string; unitTest: boolean; note: string; kind: 'function' | 'nonfunction';
+  scopeStatus: ScopeStatus; changedByCr: string | null;
 }
 export interface TaskRow {
   id: string; title: string; featureId: string | null; dependsOn: string[]; status: string; reviewRounds: number; branch: string | null; mrIid: number | null;
+  scopeStatus: ScopeStatus; changedByCr: string | null;
 }
 export interface TestCaseRow {
   id: string; featureId: string | null; purpose: string; data: string; steps: string; expected: string;
   status1: TestStatus | null; status2: TestStatus | null; realResult: string | null; evidence: string[]; comment: string | null;
+  scopeStatus: ScopeStatus; changedByCr: string | null; baseline: number | null;
 }
 export interface BugRow { tcId: string; gitlabIid: number | null; fixAttempts: number; status: string }
+
+export interface ChangeRequestRow {
+  id: string; requestId: string; title: string; description: string; kind: CrKind; source: CrSource; status: CrStatus;
+  createdBy: number | null; createdAt: number; decidedBy: number | null; decidedAt: number | null; decisionNote: string | null;
+  baselineFrom: number | null; baselineTo: number | null; reenterStage: Stage | null;
+  interruptedStage: Stage | null; interruptedStatus: RequestStatus | null; impactSummary: string | null;
+}
+export interface CrAttachmentRow { crId: string; requestId: string; filename: string; path: string }

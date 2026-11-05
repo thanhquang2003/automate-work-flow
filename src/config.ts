@@ -18,6 +18,8 @@ export interface Config {
   rateLimitPauseMin: number;
   /** Minutes one Claude run may take before it is killed (STAGE_TIMEOUT_MIN, default 120; 0 = no limit). */
   stageTimeoutMin: number;
+  /** CR auto-accept ceiling in man-hours (CR_AUTO_ACCEPT_MAX_MH, default 40). */
+  crAutoAcceptMaxMh: number;
   /** Fastify trustProxy: true, false or a hop count (TRUST_PROXY). */
   trustProxy: boolean | number;
   /** Per-file upload cap in bytes (default 50MB); overridable for tests. */
@@ -62,6 +64,8 @@ export function loadConfig(env: Env = process.env): Config {
   if (mode === 'server' && !publicBaseUrl) throw new Error('PUBLIC_BASE_URL is required in server mode (e.g. https://devflow.example.com)');
   const stageTimeoutMin = int(env.STAGE_TIMEOUT_MIN, 120);
   if (stageTimeoutMin < 0) throw new Error(`Invalid STAGE_TIMEOUT_MIN: ${env.STAGE_TIMEOUT_MIN}`);
+  const crAutoAcceptMaxMh = int(env.CR_AUTO_ACCEPT_MAX_MH, 40);
+  if (crAutoAcceptMaxMh < 0) throw new Error(`Invalid CR_AUTO_ACCEPT_MAX_MH: ${env.CR_AUTO_ACCEPT_MAX_MH}`);
   const port = int(env.PORT, 3700);
   return {
     mode,
@@ -79,6 +83,7 @@ export function loadConfig(env: Env = process.env): Config {
     rateLimitPauseMin: int(env.RATE_LIMIT_PAUSE_MIN, 30),
     stageTimeoutMin,
     trustProxy: parseTrustProxy(env.TRUST_PROXY),
+    crAutoAcceptMaxMh,
   };
 }
 

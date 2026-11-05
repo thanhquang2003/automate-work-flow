@@ -143,9 +143,57 @@ create table if not exists events(
   message text not null
 );
 create index if not exists idx_events_req on events(request_id, id);
+create table if not exists change_requests(
+  request_id text not null,
+  id text not null,
+  title text not null,
+  description text not null default '',
+  kind text not null,
+  source text not null,
+  status text not null,
+  created_by integer,
+  created_at integer not null,
+  decided_by integer,
+  decided_at integer,
+  decision_note text,
+  baseline_from integer,
+  baseline_to integer,
+  reenter_stage text,
+  interrupted_stage text,
+  interrupted_status text,
+  impact_summary text,
+  primary key(request_id, id)
+);
+create table if not exists cr_attachments(
+  id integer primary key autoincrement,
+  request_id text not null,
+  cr_id text not null,
+  filename text not null,
+  path text not null
+);
 create table if not exists settings(key text primary key, value text not null);
 create table if not exists templates(kind text primary key, path text not null);
 `;
+
+const ADD_COLUMNS: [table: string, column: string, ddl: string][] = [
+  ['requests', 'baseline_version', 'integer not null default 1'],
+  ['requests', 'iteration', 'integer not null default 1'],
+  ['features', 'scope_status', "text not null default 'active'"],
+  ['features', 'changed_by_cr', 'text'],
+  ['tasks', 'scope_status', "text not null default 'active'"],
+  ['tasks', 'changed_by_cr', 'text'],
+  ['test_cases', 'scope_status', "text not null default 'active'"],
+  ['test_cases', 'changed_by_cr', 'text'],
+  ['test_cases', 'baseline', 'integer'],
+];
+
+/** Idempotent `alter table add column`, guarded by pragma table_info. */
+function migrate(db: DatabaseSync): void {
+  for (const [table, column, ddl] of ADD_COLUMNS) {
+    const cols = db.prepare(`pragma table_info(${table})`).all() as { name: string }[];
+    if (!cols.some(c => c.name === column)) db.exec(`alter table ${table} add column ${column} ${ddl}`);
+  }
+}
 
 /** Open (creating if needed) the SQLite DB and run idempotent migrations. Use ':memory:' in tests. */
 export function openDb(file: string): DatabaseSync {
@@ -153,5 +201,6 @@ export function openDb(file: string): DatabaseSync {
   const db = new DatabaseSync(file);
   db.exec('pragma journal_mode = WAL; pragma busy_timeout = 5000;');
   db.exec(SCHEMA);
+  migrate(db);
   return db;
 }

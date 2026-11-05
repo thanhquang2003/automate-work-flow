@@ -54,6 +54,7 @@ function checkFeatures(path: string, fs: FeatureOut[], cat: UlnlCatalog): void {
 
 const toRow = (f: FeatureOut): FeatureRow => ({
   id: f.id, code: f.code, name: f.name, description: f.description, typeCode: f.type_code, unitTest: f.unit_test, note: f.note, kind: f.kind,
+  scopeStatus: f.scope_status, changedByCr: null,
 });
 
 export function ulnlFileName(reqId: string): string { return `ULNL_${reqId}.xlsx`; }

@@ -1,6 +1,7 @@
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import type {
   AnswerRow, AnswerSource, AttachmentRow, BugRow, EventRow, FeatureRow, JobRow, NewRequest, Question, QuestionRow,
+  ChangeRequestRow, CrAttachmentRow, CrKind, CrSource, CrStatus, ScopeStatus,
   RequestPatch, RequestRow, Stage, StageRunRow, SurveyLinkRow, TaskRow, TestCaseRow, UserRole, UserRow,
 } from '../domain/types.js';
 
@@ -17,6 +18,7 @@ const toRequest = (r: Row): RequestRow => ({
   id: r.id, title: r.title, description: r.description, perfReq: r.perf_req, nonfuncReq: r.nonfunc_req,
   projectKind: r.project_kind, gitlabProject: r.gitlab_project ?? null, softwareTypes: parse(r.software_types, []),
   runMode: r.run_mode, stage: r.stage, status: r.status, clarifyRound: r.clarify_round,
+  baselineVersion: r.baseline_version ?? 1, iteration: r.iteration ?? 1,
   createdBy: r.created_by ?? null, createdAt: r.created_at, updatedAt: r.updated_at,
 });
 const toUser = (r: Row): UserRow => ({
@@ -39,26 +41,45 @@ const toSurvey = (r: Row): SurveyLinkRow => ({
 });
 const toFeature = (r: Row): FeatureRow => ({
   id: r.id, code: r.code, name: r.name, description: r.description, typeCode: r.type_code, unitTest: !!r.unit_test, note: r.note, kind: r.kind,
+  scopeStatus: r.scope_status ?? 'active', changedByCr: r.changed_by_cr ?? null,
 });
 const toTask = (r: Row): TaskRow => ({
   id: r.id, title: r.title, featureId: r.feature_id ?? null, dependsOn: parse(r.depends_on, []), status: r.status,
   reviewRounds: r.review_rounds, branch: r.branch ?? null, mrIid: r.mr_iid ?? null,
+  scopeStatus: r.scope_status ?? 'active', changedByCr: r.changed_by_cr ?? null,
 });
 const toTestCase = (r: Row): TestCaseRow => ({
   id: r.id, featureId: r.feature_id ?? null, purpose: r.purpose, data: r.data, steps: r.steps, expected: r.expected,
   status1: r.status1 ?? null, status2: r.status2 ?? null, realResult: r.real_result ?? null,
   evidence: parse(r.evidence, []), comment: r.comment ?? null,
+  scopeStatus: r.scope_status ?? 'active', changedByCr: r.changed_by_cr ?? null, baseline: r.baseline ?? null,
 });
 const toBug = (r: Row): BugRow => ({ tcId: r.tc_id, gitlabIid: r.gitlab_iid ?? null, fixAttempts: r.fix_attempts, status: r.status });
+
+const toCr = (r: Row): ChangeRequestRow => ({
+  id: r.id, requestId: r.request_id, title: r.title, description: r.description, kind: r.kind, source: r.source, status: r.status,
+  createdBy: r.created_by ?? null, createdAt: r.created_at, decidedBy: r.decided_by ?? null, decidedAt: r.decided_at ?? null,
+  decisionNote: r.decision_note ?? null, baselineFrom: r.baseline_from ?? null, baselineTo: r.baseline_to ?? null,
+  reenterStage: r.reenter_stage ?? null, interruptedStage: r.interrupted_stage ?? null, interruptedStatus: r.interrupted_status ?? null,
+  impactSummary: r.impact_summary ?? null,
+});
+
+const CR_COLS: Record<string, string> = {
+  title: 'title', description: 'description', kind: 'kind', source: 'source', status: 'status', decidedBy: 'decided_by',
+  decidedAt: 'decided_at', decisionNote: 'decision_note', baselineFrom: 'baseline_from', baselineTo: 'baseline_to',
+  reenterStage: 'reenter_stage', interruptedStage: 'interrupted_stage', interruptedStatus: 'interrupted_status', impactSummary: 'impact_summary',
+};
+const SCOPE_TABLES = { feature: 'features', task: 'tasks', test_case: 'test_cases' } as const;
 
 const REQUEST_COLS: Record<string, string> = {
   title: 'title', description: 'description', perfReq: 'perf_req', nonfuncReq: 'nonfunc_req', projectKind: 'project_kind',
   gitlabProject: 'gitlab_project', softwareTypes: 'software_types', runMode: 'run_mode', stage: 'stage', status: 'status',
-  clarifyRound: 'clarify_round', createdBy: 'created_by', updatedAt: 'updated_at',
+  clarifyRound: 'clarify_round', baselineVersion: 'baseline_version', iteration: 'iteration', createdBy: 'created_by', updatedAt: 'updated_at',
 };
 const TC_COLS: Record<string, string> = {
   featureId: 'feature_id', purpose: 'purpose', data: 'data', steps: 'steps', expected: 'expected', status1: 'status1',
   status2: 'status2', realResult: 'real_result', evidence: 'evidence', comment: 'comment',
+  scopeStatus: 'scope_status', changedByCr: 'changed_by_cr', baseline: 'baseline',
 };
 
 export class Repo {
@@ -219,11 +240,12 @@ export class Repo {
   // ---- features ----
   upsertFeatures(reqId: string, fs: FeatureRow[]): void {
     const st = this.db.prepare(
-      `insert into features(request_id,id,code,name,description,type_code,unit_test,note,kind) values(?,?,?,?,?,?,?,?,?)
+      `insert into features(request_id,id,code,name,description,type_code,unit_test,note,kind,scope_status,changed_by_cr) values(?,?,?,?,?,?,?,?,?,?,?)
        on conflict(request_id,id) do update set code=excluded.code,name=excluded.name,description=excluded.description,
-       type_code=excluded.type_code,unit_test=excluded.unit_test,note=excluded.note,kind=excluded.kind`,
+       type_code=excluded.type_code,unit_test=excluded.unit_test,note=excluded.note,kind=excluded.kind,
+       scope_status=excluded.scope_status,changed_by_cr=excluded.changed_by_cr`,
     );
-    this.tx(() => { for (const f of fs) st.run(reqId, f.id, f.code, f.name, f.description, f.typeCode, f.unitTest ? 1 : 0, f.note, f.kind); });
+    this.tx(() => { for (const f of fs) st.run(reqId, f.id, f.code, f.name, f.description, f.typeCode, f.unitTest ? 1 : 0, f.note, f.kind, f.scopeStatus ?? 'active', f.changedByCr ?? null); });
   }
   /** Replaces the whole feature list of a request (a re-run of BREAKDOWN may drop features). */
   replaceFeatures(reqId: string, fs: FeatureRow[]): void {
@@ -239,10 +261,11 @@ export class Repo {
   // ---- tasks ----
   upsertTask(reqId: string, t: TaskRow): void {
     this.run(
-      `insert into tasks(request_id,id,title,feature_id,depends_on,status,review_rounds,branch,mr_iid) values(?,?,?,?,?,?,?,?,?)
+      `insert into tasks(request_id,id,title,feature_id,depends_on,status,review_rounds,branch,mr_iid,scope_status,changed_by_cr) values(?,?,?,?,?,?,?,?,?,?,?)
        on conflict(request_id,id) do update set title=excluded.title,feature_id=excluded.feature_id,depends_on=excluded.depends_on,
-       status=excluded.status,review_rounds=excluded.review_rounds,branch=excluded.branch,mr_iid=excluded.mr_iid`,
-      reqId, t.id, t.title, t.featureId, json(t.dependsOn), t.status, t.reviewRounds, t.branch, t.mrIid,
+       status=excluded.status,review_rounds=excluded.review_rounds,branch=excluded.branch,mr_iid=excluded.mr_iid,
+       scope_status=excluded.scope_status,changed_by_cr=excluded.changed_by_cr`,
+      reqId, t.id, t.title, t.featureId, json(t.dependsOn), t.status, t.reviewRounds, t.branch, t.mrIid, t.scopeStatus ?? 'active', t.changedByCr ?? null,
     );
   }
   updateTask(reqId: string, id: string, patch: Partial<Omit<TaskRow, 'id'>>): void {
@@ -268,10 +291,11 @@ export class Repo {
   // ---- test cases ----
   upsertTestCase(reqId: string, t: TestCaseRow): void {
     this.run(
-      `insert into test_cases(request_id,id,feature_id,purpose,data,steps,expected,status1,status2,real_result,evidence,comment) values(?,?,?,?,?,?,?,?,?,?,?,?)
+      `insert into test_cases(request_id,id,feature_id,purpose,data,steps,expected,status1,status2,real_result,evidence,comment,scope_status,changed_by_cr,baseline) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        on conflict(request_id,id) do update set feature_id=excluded.feature_id,purpose=excluded.purpose,data=excluded.data,steps=excluded.steps,
-       expected=excluded.expected,status1=excluded.status1,status2=excluded.status2,real_result=excluded.real_result,evidence=excluded.evidence,comment=excluded.comment`,
-      reqId, t.id, t.featureId, t.purpose, t.data, t.steps, t.expected, t.status1, t.status2, t.realResult, json(t.evidence), t.comment,
+       expected=excluded.expected,status1=excluded.status1,status2=excluded.status2,real_result=excluded.real_result,evidence=excluded.evidence,comment=excluded.comment,
+       scope_status=excluded.scope_status,changed_by_cr=excluded.changed_by_cr,baseline=excluded.baseline`,
+      reqId, t.id, t.featureId, t.purpose, t.data, t.steps, t.expected, t.status1, t.status2, t.realResult, json(t.evidence), t.comment, t.scopeStatus ?? 'active', t.changedByCr ?? null, t.baseline ?? null,
     );
   }
   updateTestCase(reqId: string, id: string, patch: Partial<Omit<TestCaseRow, 'id'>>): void {
@@ -316,6 +340,64 @@ export class Repo {
   }
   listBugs(reqId: string): BugRow[] {
     return this.all('select * from bugs where request_id=? order by tc_id', reqId).map(toBug);
+  }
+
+  // ---- change requests ----
+  nextCrId(reqId: string): string {
+    let max = 0;
+    for (const r of this.all('select id from change_requests where request_id=?', reqId)) {
+      const m = /^CR-(\d+)$/.exec(r.id);
+      if (m) max = Math.max(max, Number(m[1]));
+    }
+    return `CR-${String(max + 1).padStart(2, '0')}`;
+  }
+  createChangeRequest(
+    reqId: string,
+    c: { title: string; description: string; kind: CrKind; source: CrSource; createdBy?: number | null; status: CrStatus },
+  ): ChangeRequestRow {
+    return this.tx(() => {
+      const id = this.nextCrId(reqId);
+      this.run(
+        'insert into change_requests(request_id,id,title,description,kind,source,status,created_by,created_at) values(?,?,?,?,?,?,?,?,?)',
+        reqId, id, c.title, c.description, c.kind, c.source, c.status, c.createdBy ?? null, Date.now(),
+      );
+      return this.getChangeRequest(reqId, id)!;
+    });
+  }
+  getChangeRequest(reqId: string, crId: string): ChangeRequestRow | undefined {
+    const r = this.one('select * from change_requests where request_id=? and id=?', reqId, crId);
+    return r && toCr(r);
+  }
+  listChangeRequests(reqId: string): ChangeRequestRow[] {
+    return this.all('select * from change_requests where request_id=? order by id', reqId).map(toCr);
+  }
+  updateChangeRequest(reqId: string, crId: string, patch: Partial<Omit<ChangeRequestRow, 'id' | 'requestId' | 'createdAt' | 'createdBy'>>): ChangeRequestRow {
+    const sets: string[] = [];
+    const vals: SQLInputValue[] = [];
+    for (const [k, v] of Object.entries(patch)) {
+      const col = CR_COLS[k];
+      if (!col || v === undefined) continue;
+      sets.push(`${col}=?`);
+      vals.push(v as SQLInputValue);
+    }
+    if (sets.length) this.run(`update change_requests set ${sets.join(',')} where request_id=? and id=?`, ...vals, reqId, crId);
+    const r = this.getChangeRequest(reqId, crId);
+    if (!r) throw new Error(`Change request not found: ${reqId}/${crId}`);
+    return r;
+  }
+  addCrAttachment(reqId: string, crId: string, filename: string, path: string): void {
+    this.run('insert into cr_attachments(request_id,cr_id,filename,path) values(?,?,?,?)', reqId, crId, filename, path);
+  }
+  listCrAttachments(reqId: string, crId: string): CrAttachmentRow[] {
+    return this.all('select * from cr_attachments where request_id=? and cr_id=? order by id', reqId, crId).map(r => ({
+      crId: r.cr_id, requestId: r.request_id, filename: r.filename, path: r.path,
+    }));
+  }
+  /** Marks a feature/task/test case active or cancelled; `changed_by_cr` records the CR responsible. Cancelled rows are never deleted. */
+  setScope(kind: keyof typeof SCOPE_TABLES, reqId: string, id: string, scopeStatus: ScopeStatus, crId: string | null): void {
+    const table = SCOPE_TABLES[kind];
+    if (!table) throw new Error(`Unknown scope kind: ${String(kind)}`);
+    this.run(`update ${table} set scope_status=?, changed_by_cr=? where request_id=? and id=?`, scopeStatus, crId, reqId, id);
   }
 
   // ---- survey links ----

@@ -77,14 +77,14 @@ const MAX_LOG_LINE = 500;
 
 /**
  * Stage that follows `stage` in normal flow, or undefined when finished.
- * CODEBASE_SCAN is skipped for new projects. BUGFIX is only reachable via goto, and loops back to TEST.
+ * CODEBASE_SCAN is skipped for new projects. BUGFIX and CHANGE are only reachable via goto/submitChange; BUGFIX loops back to TEST.
  */
 export function nextStage(stage: Stage, req: Pick<RequestRow, 'projectKind'>): Stage | undefined {
   if (stage === 'BUGFIX') return 'TEST';
   let i = STAGES.indexOf(stage) + 1;
   while (i < STAGES.length) {
     const s = STAGES[i++];
-    if (s === 'BUGFIX') continue;
+    if (s === 'BUGFIX' || s === 'CHANGE') continue;
     if (s === 'CODEBASE_SCAN' && req.projectKind === 'new') continue;
     return s;
   }

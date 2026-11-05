@@ -110,11 +110,12 @@ export async function planning(ctx: StageContext): Promise<StageOutcome> {
   if (!r.ok) return { kind: 'fail', error: r.error };
 
   const taskRows: TaskRow[] = r.value.tasks.map(t => ({
-    id: t.id, title: t.title, featureId: t.feature_id, dependsOn: t.depends_on, status: 'todo', reviewRounds: 0, branch: null, mrIid: null,
+    id: t.id, title: t.title, featureId: t.feature_id, dependsOn: t.depends_on, status: 'todo', reviewRounds: 0, branch: null, mrIid: null, scopeStatus: t.scope_status, changedByCr: null,
   }));
   const tcRows: TestCaseRow[] = r.value.test_cases.map(t => ({
     id: t.id, featureId: t.feature_id, purpose: t.purpose, data: t.data, steps: t.steps, expected: t.expected,
     status1: null, status2: null, realResult: null, evidence: [], comment: null,
+    scopeStatus: t.scope_status, changedByCr: null, baseline: null,
   }));
   repo.replaceTasks(req.id, taskRows);
   repo.replaceTestCases(req.id, tcRows);
