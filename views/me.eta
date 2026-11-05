@@ -1,0 +1,16 @@
+<h1>Tài khoản</h1>
+<% if (!it.canSet) { %>
+<div class="card"><p class="muted">Chế độ local không có tài khoản riêng. Hãy cấu hình token GitLab tại trang Cài đặt.</p></div>
+<% } else { %>
+<form method="post" action="/me" class="card stack">
+  <p>Token GitLab cá nhân được ưu tiên hơn token chung khi bạn là người tạo yêu cầu.</p>
+  <label>GitLab token
+    <% if (it.tokenSet) { %><span class="muted">đã lưu ••••</span><% } %>
+    <input name="gitlab_token" type="password" autocomplete="new-password" placeholder="<%= it.tokenSet ? 'Nhập để thay thế token đã lưu' : 'Nhập token' %>">
+  </label>
+  <div class="row">
+    <button class="btn primary" type="submit">Lưu token</button>
+    <% if (it.tokenSet) { %><button class="btn danger" type="submit" name="clear_token" value="1">Xóa token</button><% } %>
+  </div>
+</form>
+<% } %>

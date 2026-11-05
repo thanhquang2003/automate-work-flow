@@ -6,6 +6,7 @@ import { Repo } from './db/repo.js';
 import { Pipeline } from './engine/pipeline.js';
 import { registerAllStages } from './engine/stages/index.js';
 import { Worker } from './engine/worker.js';
+import { applySettings, gitlabFor } from './settings.js';
 import { buildServer } from './web/server.js';
 
 async function main(): Promise<void> {
@@ -13,8 +14,9 @@ async function main(): Promise<void> {
   cfg.dataDir = resolve(cfg.dataDir);
   mkdirSync(cfg.dataDir, { recursive: true });
   const repo = new Repo(openDb(join(cfg.dataDir, 'devflow.db')));
-  // GitLab client is built from cfg.gitlab (url + token) by the pipeline when both are set.
-  const pipeline = new Pipeline(cfg, repo);
+  // Settings stored in the DB (Cài đặt page) override env; applied onto the shared cfg for new jobs.
+  applySettings(cfg, repo);
+  const pipeline = new Pipeline(cfg, repo, { makeGitLab: req => gitlabFor(cfg, repo, req) });
   registerAllStages();
   const worker = new Worker(cfg, repo, pipeline);
   worker.start();

@@ -7,6 +7,7 @@ import type { Config } from '../config.js';
 import type { Repo } from '../db/repo.js';
 import type { Pipeline } from '../engine/pipeline.js';
 import { currentUser, sameOrigin } from './auth.js';
+import { adminRoutes } from './routes/admin.js';
 import { authRoutes } from './routes/auth.js';
 import { questionRoutes } from './routes/questions.js';
 import { requestRoutes } from './routes/requests.js';
@@ -54,6 +55,7 @@ export async function buildServer(cfg: Config, deps: WebDeps): Promise<FastifyIn
   authRoutes(app, cfg, deps);
   requestRoutes(app, cfg, deps);
   questionRoutes(app, cfg, deps);
+  adminRoutes(app, cfg, deps);
   surveyRoutes(app, cfg, deps);
   return app;
 }

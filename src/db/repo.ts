@@ -360,6 +360,7 @@ export class Repo {
   setTemplate(kind: string, path: string): void {
     this.run('insert into templates(kind,path) values(?,?) on conflict(kind) do update set path=excluded.path', kind, path);
   }
+  deleteTemplate(kind: string): void { this.run('delete from templates where kind=?', kind); }
   listTemplates(): { kind: string; path: string }[] {
     return this.all('select kind, path from templates order by kind').map(r => ({ kind: r.kind, path: r.path }));
   }

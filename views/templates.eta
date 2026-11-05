@@ -1,0 +1,28 @@
+<h1>Mẫu tài liệu</h1>
+<p class="muted">Tải lên file mẫu của công ty để thay thế mẫu mặc định. Chỉ áp dụng cho các lần sinh tài liệu sau đó.</p>
+<div class="table-wrap">
+<table class="list">
+  <thead><tr><th>Loại mẫu</th><th>Đang dùng</th><th>Thao tác</th></tr></thead>
+  <tbody>
+  <% for (const t of it.rows) { %>
+  <tr>
+    <td><strong><%= t.kind.toUpperCase() %></strong><br><span class="muted"><%= t.label %></span></td>
+    <td><%= t.file %> <span class="badge"><%= t.custom ? 'Mẫu đã tải lên' : 'Mặc định' %></span></td>
+    <td>
+      <a class="btn" href="/templates/<%= t.kind %>/download">Tải về</a>
+      <% if (it.canEdit) { %>
+      <form method="post" action="/templates/<%= t.kind %>" enctype="multipart/form-data" class="row">
+        <input type="file" name="file" accept=".<%= t.ext %>" required>
+        <button class="btn primary" type="submit">Tải lên (.<%= t.ext %>)</button>
+      </form>
+      <% if (t.custom) { %>
+      <form method="post" action="/templates/<%= t.kind %>/reset" class="inline" data-confirm="Khôi phục mẫu mặc định?"><button class="btn" type="submit">Khôi phục mặc định</button></form>
+      <% } %>
+      <% } %>
+    </td>
+  </tr>
+  <% } %>
+  </tbody>
+</table>
+</div>
+<% if (!it.canEdit) { %><p class="muted">Chỉ quản trị viên mới được thay đổi mẫu.</p><% } %>

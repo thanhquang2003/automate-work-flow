@@ -1,0 +1,34 @@
+<h1>Người dùng</h1>
+<div class="table-wrap">
+<table class="list">
+  <thead><tr><th>Tên đăng nhập</th><th>Vai trò</th><th>Token GitLab</th><th>Tạo lúc</th><th>Thao tác</th></tr></thead>
+  <tbody>
+  <% for (const u of it.users) { %>
+  <tr>
+    <td><%= u.username %></td>
+    <td><%= u.role === 'admin' ? 'Quản trị viên' : 'Thành viên' %></td>
+    <td><%= u.hasToken ? 'đã lưu ••••' : '-' %></td>
+    <td><%= it.fmtTime(u.createdAt) %></td>
+    <td>
+      <form method="post" action="/users/<%= u.id %>/password" class="row">
+        <input type="password" name="password" minlength="8" placeholder="Mật khẩu mới" autocomplete="new-password" required>
+        <button class="btn" type="submit">Đặt lại mật khẩu</button>
+      </form>
+      <% if (u.id !== it.selfId) { %>
+      <form method="post" action="/users/<%= u.id %>/delete" class="inline" data-confirm="Xóa người dùng này?"><button class="btn danger" type="submit">Xóa</button></form>
+      <% } %>
+    </td>
+  </tr>
+  <% } %>
+  </tbody>
+</table>
+</div>
+<h3>Thêm người dùng</h3>
+<form method="post" action="/users" class="card stack">
+  <label>Tên đăng nhập <input name="username" required pattern="[\w.@\-]{3,64}" autocomplete="off"></label>
+  <label>Mật khẩu (tối thiểu 8 ký tự) <input name="password" type="password" minlength="8" required autocomplete="new-password"></label>
+  <label>Vai trò
+    <select name="role"><option value="member">Thành viên</option><option value="admin">Quản trị viên</option></select>
+  </label>
+  <div><button class="btn primary" type="submit">Tạo người dùng</button></div>
+</form>

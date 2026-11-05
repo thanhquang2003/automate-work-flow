@@ -1,0 +1,14 @@
+<h1>Cài đặt</h1>
+<p class="muted">Giá trị lưu tại đây ghi đè biến môi trường và áp dụng cho các job mới.</p>
+<form method="post" action="/settings" class="card stack">
+  <label>GitLab URL <input name="gitlab_url" value="<%= it.values.gitlabUrl %>" placeholder="https://gitlab.example.com"></label>
+  <label>GitLab token
+    <% if (it.tokenSet) { %><span class="muted">đã lưu ••••</span><% } %>
+    <input name="gitlab_token" type="password" autocomplete="new-password" placeholder="<%= it.tokenSet ? 'Nhập để thay thế token đã lưu' : 'Nhập token' %>">
+  </label>
+  <% if (it.tokenSet) { %><label class="check"><input type="checkbox" name="clear_token" value="1"> Xóa token đã lưu</label><% } %>
+  <label>Nhóm GitLab mặc định <input name="gitlab_default_group" value="<%= it.values.gitlabDefaultGroup %>"></label>
+  <label>Số job chạy đồng thời tối đa <input name="max_concurrent_jobs" type="number" min="1" max="32" value="<%= it.values.maxConcurrentJobs %>"></label>
+  <label>Đường dẫn lệnh Claude <input name="claude_bin" value="<%= it.values.claudeBin %>"></label>
+  <div><button class="btn primary" type="submit">Lưu cài đặt</button></div>
+</form>
