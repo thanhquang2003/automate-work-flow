@@ -1,0 +1,115 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'ROOT=$(git rev-parse --show-toplevel 2>/dev/null) && node \"$ROOT/.claude/hooks/pre-gate.cjs\"'",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0; cd \"$ROOT\" 2>/dev/null || exit 0; BEHIND=$(git rev-list --count HEAD..origin/main 2>/dev/null) || exit 0; test \"${BEHIND:-0}\" -gt 0 || exit 0; echo \"Stale branch: ${BEHIND} commit(s) behind origin/main. Run: git rebase origin/main\" >&2; exit 1'",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '━━━ READ AGENTS.md BEFORE ACTING ━━━ Key rules: 8 (lah add only — never edit state JSON), 20 (one item or --parallel N), 36 (learnings → AGENTS.md not Claude memory). Run: cat AGENTS.md'",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "lah resume 2>/dev/null || true",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "git fetch origin --quiet && git rebase origin/main --quiet 2>/dev/null || true",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'MAIN=$(git worktree list --porcelain 2>/dev/null | head -1 | cut -c10-); [ -n \"$MAIN\" ] && git -C \"$MAIN\" pull --ff-only --quiet 2>/dev/null || true'",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'ROOT=$(git rev-parse --show-toplevel 2>/dev/null) && bash \"$ROOT/.claude/hooks/prune-worktrees.sh\"' 2>/dev/null || true",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "lah save 2>/dev/null || true",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'ROOT=$(git rev-parse --show-toplevel 2>/dev/null) && node \"$ROOT/.claude/hooks/sync-main.cjs\"' 2>/dev/null || true",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'ROOT=$(git rev-parse --show-toplevel 2>/dev/null) && node \"$ROOT/.claude/hooks/commit-queue-state.cjs\"' 2>/dev/null || true",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

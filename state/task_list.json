@@ -1,0 +1,19 @@
+{
+  "_template_version": "1.0.0",
+  "_notes": {
+    "status_values": [
+      "open",
+      "in-progress",
+      "done",
+      "wont-do"
+    ],
+    "priority_values": [
+      "high",
+      "medium",
+      "low"
+    ],
+    "id_format": "TASK-NNN",
+    "evidence_rule": "Tasks cannot move to done without evidence."
+  },
+  "tasks": []
+}

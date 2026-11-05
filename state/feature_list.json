@@ -1,0 +1,155 @@
+{
+  "_template_version": "1.0.0",
+  "_notes": {
+    "status_values": [
+      "planned",
+      "in-progress",
+      "done",
+      "blocked"
+    ],
+    "id_format": "FEAT-NNN",
+    "dependency_rule": "A feature in dependencies must be done before this feature can be in-progress.",
+    "use_cases_rule": "use_cases lists actor:goal bullets — who can do what. Full Given/When/Then lives in docs/specs/FEAT-NNN.md."
+  },
+  "features": [
+    {
+      "id": "FEAT-001",
+      "name": "V3-1 Data model v3",
+      "description": "Implement Task 1 of docs/superpowers/plans/2026-11-07-v3-implementation.md (spec: docs/superpowers/specs/2026-11-07-v3-roles-and-lah-delta-design.md).",
+      "use_cases": [
+        "admin:store users departments projects roles"
+      ],
+      "complexity": "large",
+      "status": "planned",
+      "layer": "Full-stack",
+      "dependencies": [],
+      "evidence": null,
+      "created": "2026-11-05",
+      "updated": "2026-11-05"
+    },
+    {
+      "id": "FEAT-002",
+      "name": "V3-2 Permissions and Google SSO",
+      "description": "Implement Task 2 of docs/superpowers/plans/2026-11-07-v3-implementation.md (spec: docs/superpowers/specs/2026-11-07-v3-roles-and-lah-delta-design.md).",
+      "use_cases": [
+        "staff:sign in with company Google email"
+      ],
+      "complexity": "large",
+      "status": "planned",
+      "layer": "Full-stack",
+      "dependencies": [
+        "FEAT-001"
+      ],
+      "evidence": null,
+      "created": "2026-11-05",
+      "updated": "2026-11-05"
+    },
+    {
+      "id": "FEAT-003",
+      "name": "V3-3 Projects members workspaces",
+      "description": "Implement Task 3 of docs/superpowers/plans/2026-11-07-v3-implementation.md (spec: docs/superpowers/specs/2026-11-07-v3-roles-and-lah-delta-design.md).",
+      "use_cases": [
+        "PM:create project and assign members per role"
+      ],
+      "complexity": "large",
+      "status": "planned",
+      "layer": "Full-stack",
+      "dependencies": [
+        "FEAT-001",
+        "FEAT-002"
+      ],
+      "evidence": null,
+      "created": "2026-11-05",
+      "updated": "2026-11-05"
+    },
+    {
+      "id": "FEAT-004",
+      "name": "V3-4 dfctl SystemOps SeatRunner seat login",
+      "description": "Implement Task 4 of docs/superpowers/plans/2026-11-07-v3-implementation.md (spec: docs/superpowers/specs/2026-11-07-v3-roles-and-lah-delta-design.md).",
+      "use_cases": [
+        "staff:run Claude on own seat"
+      ],
+      "complexity": "large",
+      "status": "planned",
+      "layer": "Full-stack",
+      "dependencies": [
+        "FEAT-001"
+      ],
+      "evidence": null,
+      "created": "2026-11-05",
+      "updated": "2026-11-05"
+    },
+    {
+      "id": "FEAT-005",
+      "name": "V3-5 Engine seats approvals worktrees parallel",
+      "description": "Implement Task 5 of docs/superpowers/plans/2026-11-07-v3-implementation.md (spec: docs/superpowers/specs/2026-11-07-v3-roles-and-lah-delta-design.md).",
+      "use_cases": [
+        "team:run requests in parallel on own seats"
+      ],
+      "complexity": "epic",
+      "status": "planned",
+      "layer": "Full-stack",
+      "dependencies": [
+        "FEAT-003",
+        "FEAT-004"
+      ],
+      "evidence": null,
+      "created": "2026-11-05",
+      "updated": "2026-11-05"
+    },
+    {
+      "id": "FEAT-006",
+      "name": "V3-6 Web projects inbox assignments admin",
+      "description": "Implement Task 6 of docs/superpowers/plans/2026-11-07-v3-implementation.md (spec: docs/superpowers/specs/2026-11-07-v3-roles-and-lah-delta-design.md).",
+      "use_cases": [
+        "PM:manage projects members and assignments in the web UI"
+      ],
+      "complexity": "large",
+      "status": "planned",
+      "layer": "Full-stack",
+      "dependencies": [
+        "FEAT-003",
+        "FEAT-005"
+      ],
+      "evidence": null,
+      "created": "2026-11-05",
+      "updated": "2026-11-05"
+    },
+    {
+      "id": "FEAT-007",
+      "name": "V3-7 Oversight area CTO head deputy admin",
+      "description": "Implement Task 7 of docs/superpowers/plans/2026-11-07-v3-implementation.md (spec: docs/superpowers/specs/2026-11-07-v3-roles-and-lah-delta-design.md).",
+      "use_cases": [
+        "CTO:see progress blockers and project content read-only"
+      ],
+      "complexity": "large",
+      "status": "planned",
+      "layer": "Full-stack",
+      "dependencies": [
+        "FEAT-003",
+        "FEAT-005"
+      ],
+      "evidence": null,
+      "created": "2026-11-05",
+      "updated": "2026-11-05"
+    },
+    {
+      "id": "FEAT-008",
+      "name": "V3-8 E2E deployment docs release",
+      "description": "Implement Task 8 of docs/superpowers/plans/2026-11-07-v3-implementation.md (spec: docs/superpowers/specs/2026-11-07-v3-roles-and-lah-delta-design.md).",
+      "use_cases": [
+        "owner:deploy v3 on the VPS"
+      ],
+      "complexity": "large",
+      "status": "planned",
+      "layer": "Full-stack",
+      "dependencies": [
+        "FEAT-006",
+        "FEAT-007"
+      ],
+      "evidence": null,
+      "created": "2026-11-05",
+      "updated": "2026-11-05"
+    }
+  ]
+}

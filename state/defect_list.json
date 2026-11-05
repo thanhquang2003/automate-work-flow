@@ -1,0 +1,20 @@
+{
+  "_template_version": "1.1.0",
+  "_notes": {
+    "status_values": [
+      "open",
+      "in-progress",
+      "resolved",
+      "wont-fix"
+    ],
+    "severity_values": [
+      "critical",
+      "high",
+      "medium",
+      "low"
+    ],
+    "id_format": "BUG-NNN",
+    "evidence_rule": "Defects cannot move to resolved without evidence."
+  },
+  "defects": []
+}
