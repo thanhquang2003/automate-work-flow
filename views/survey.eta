@@ -51,7 +51,7 @@ button.primary{background:#2b5fd9;border-color:#2b5fd9;color:#fff}
     <% if (q.type === 'single' && q.options.length) { %>
       <% if (q.suggested_answer) { %><div class="hint">Gợi ý: <%= q.suggested_answer %></div><% } %>
       <% for (const o of q.options) { %><label class="opt"><input type="radio" name="<%= name %>" value="<%= o %>" <%= val === o ? 'checked' : '' %>><span><%= o %></span></label><% } %>
-    <% } else if (q.type === 'multi' && q.options.length) { const picked = val.split('; '); %>
+    <% } else if (q.type === 'multi' && q.options.length) { const picked = it.splitMulti(val, q.options); %>
       <% if (q.suggested_answer) { %><div class="hint">Gợi ý: <%= q.suggested_answer %></div><% } %>
       <% for (const o of q.options) { %><label class="opt"><input type="checkbox" name="<%= name %>" value="<%= o %>" <%= picked.includes(o) ? 'checked' : '' %>><span><%= o %></span></label><% } %>
     <% } else { %>
