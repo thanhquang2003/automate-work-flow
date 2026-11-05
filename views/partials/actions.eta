@@ -1,5 +1,26 @@
 <% const r = it.r; const base = '/requests/' + r.id; %>
-<% if (r.status === 'awaiting_approval') { %>
+<% if (r.status === 'awaiting_approval' && r.stage === 'CHANGE') { %>
+  <p>Có <strong><%= it.decisions.length %></strong> yêu cầu thay đổi đang chờ quyết định.</p>
+  <% for (const d of it.decisions) { %>
+  <div class="card cr-decision">
+    <h3><%= d.cr.id %> - <%= d.cr.title %> <span class="badge"><%= it.CR_KIND_LABELS[d.cr.kind] %></span></h3>
+    <% if (d.impact) { %>
+    <p><strong>Tóm tắt:</strong> <%= d.impact.summary %></p>
+    <p><strong>Công sức ước tính:</strong> <%= d.impact.effort_delta_mh %> man-hour · <strong>Quay lại giai đoạn:</strong> <%= it.STAGE_LABELS[d.impact.reenter] %></p>
+    <% if (d.impact.risks.length) { %><p><strong>Rủi ro:</strong></p><ul><% for (const k of d.impact.risks) { %><li><%= k %></li><% } %></ul><% } %>
+    <% } %>
+    <% if (d.impactHtml) { %><details><summary>Báo cáo tác động</summary><div class="md"><%~ d.impactHtml %></div></details><% } %>
+    <p><a href="<%= base %>/changes/<%= d.cr.id %>/impact">Xem chi tiết tác động</a></p>
+    <form method="post" action="<%= base %>/changes/<%= d.cr.id %>/decide" class="stack">
+      <textarea name="note" rows="2" placeholder="Lý do (bắt buộc khi từ chối)"></textarea>
+      <div class="row">
+        <button class="btn primary" type="submit" name="decision" value="accept">Chấp nhận</button>
+        <button class="btn danger" type="submit" name="decision" value="reject">Từ chối</button>
+      </div>
+    </form>
+  </div>
+  <% } %>
+<% } else if (r.status === 'awaiting_approval') { %>
   <p>Giai đoạn <strong><%= it.STAGE_LABELS[r.stage] %></strong> đã xong, đang chờ duyệt.</p>
   <div class="row">
     <form method="post" action="<%= base %>/approve"><button class="btn primary" type="submit">Duyệt (Approve)</button></form>

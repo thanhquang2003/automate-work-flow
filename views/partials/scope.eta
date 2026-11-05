@@ -1,0 +1,20 @@
+<% const base = '/requests/' + it.r.id; %>
+<h3>Phạm vi chức năng</h3>
+<% if (it.features.length === 0) { %><p class="muted">Chưa có chức năng nào.</p><% } else { %>
+<div class="table-wrap"><table class="list">
+  <thead><tr><th>Mã</th><th>Chức năng</th><th>Trạng thái phạm vi</th><th></th></tr></thead>
+  <tbody>
+  <% for (const f of it.features) { const cancelled = f.scopeStatus === 'cancelled'; %>
+  <tr class="<%= cancelled ? 'cancelled' : '' %>">
+    <td><%= f.id %></td>
+    <td><%= f.name %></td>
+    <td><% if (cancelled) { %><span class="badge st-cancelled">Hủy theo <%= f.changedByCr %></span><% } else { %><span class="badge">Đang áp dụng</span><% if (f.changedByCr) { %> <span class="muted">(<%= f.changedByCr %>)</span><% } %><% } %></td>
+    <td><% if (!cancelled && it.canChange) { %>
+      <a class="btn" href="<%= base %>?tab=changes&amp;prefill=remove:<%= f.id %>">Đề xuất bỏ khỏi phạm vi</a>
+      <a class="btn" href="<%= base %>?tab=changes&amp;prefill=modify:<%= f.id %>">Đề xuất sửa</a>
+    <% } %></td>
+  </tr>
+  <% } %>
+  </tbody>
+</table></div>
+<% } %>

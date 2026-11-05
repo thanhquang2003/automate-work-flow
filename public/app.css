@@ -48,3 +48,8 @@ table.list th{font-size:13px;color:var(--muted)}
 .md table{border:1px solid var(--line)}.md th,.md td{border:1px solid var(--line);padding:4px 8px}.md pre{background:#f0f2f6;padding:10px;overflow:auto;border-radius:6px}
 .runs,.files{padding-left:18px}
 @media(max-width:800px){.grid2{grid-template-columns:1fr}.topbar{gap:10px}}
+
+.st-change{background:#efe3ff;color:#4b1d8a}.st-cr-awaiting_decision,.st-cr-proposed{background:#fff3cd;color:#8a6100}.st-cr-accepted,.st-cr-applied{background:#e3f6ea;color:#14633a}.st-cr-rejected{background:#fde8e8;color:#8a1f1f}
+tr.cancelled td{text-decoration:line-through;color:#777}
+tr.cancelled td:last-child,tr.cancelled td:nth-child(3){text-decoration:none}
+.cr-decision{margin:8px 0}

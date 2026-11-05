@@ -1,0 +1,127 @@
+import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { join, resolve } from 'node:path';
+import { pipeline as streamPipeline } from 'node:stream/promises';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { Config } from '../../config.js';
+import type { CrKind } from '../../domain/types.js';
+import { loadImpact } from '../../engine/changes.js';
+import { changeDir } from '../../engine/stages/common.js';
+import { Workspace } from '../../engine/workspace.js';
+import { markdownToHtml } from '../markdown-html.js';
+import type { WebDeps } from '../server.js';
+import { render, type LayoutData } from '../view.js';
+import { cleanName } from './requests.js';
+
+const KINDS: CrKind[] = ['add', 'modify', 'remove', 'nfr', 'other'];
+const MAX_TEXT = 20000;
+
+export function changeRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline }: WebDeps): void {
+  const layout = (req: FastifyRequest, title: string): LayoutData => ({ user: req.user, mode: cfg.mode, title });
+  const html = (reply: FastifyReply, s: string, code = 200) => reply.code(code).type('text/html; charset=utf-8').send(s);
+  const errPage = (req: FastifyRequest, reply: FastifyReply, code: number, message: string) =>
+    html(reply, render('error', layout(req, code === 404 ? 'Không tìm thấy' : 'Lỗi'), { code, message }), code);
+
+  const msgOf = (e: unknown): string => {
+    if (e instanceof Error && e.name === 'PipelineBusyError') return 'Bước hiện tại đang chạy, vui lòng thử lại sau khi hoàn tất.';
+    return (e instanceof Error ? e.message : String(e)).slice(0, 300);
+  };
+  const back = (reply: FastifyReply, id: string, tab: string, err?: string) =>
+    reply.redirect(`/requests/${id}?tab=${tab}${err ? `&err=${encodeURIComponent(err)}` : ''}`);
+
+  // ---- create (multipart: title, description, kind, files[]) ----
+  app.post('/requests/:id/changes', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const r = repo.getRequest(id);
+    if (!r) return errPage(req, reply, 404, 'Không tìm thấy yêu cầu.');
+    if (r.status === 'cancelled') return errPage(req, reply, 409, 'Yêu cầu đã bị hủy, không thể tạo yêu cầu thay đổi.');
+    if (!req.isMultipart()) return errPage(req, reply, 400, 'Biểu mẫu phải gửi dạng multipart.');
+
+    const fields: Record<string, string> = {};
+    const tmpDir = join(resolve(cfg.dataDir), 'tmp', randomBytes(8).toString('hex'));
+    mkdirSync(tmpDir, { recursive: true });
+    const saved: { name: string; tmp: string; size: number }[] = [];
+    let tooLarge = false;
+    try {
+      for await (const part of req.parts()) {
+        if (part.type === 'field') {
+          fields[part.fieldname] ??= String(part.value);
+        } else {
+          if (!part.filename) { part.file.resume(); continue; }
+          const tmp = join(tmpDir, `${saved.length}`);
+          await streamPipeline(part.file, createWriteStream(tmp));
+          if (part.file.truncated) { tooLarge = true; continue; }
+          saved.push({ name: cleanName(part.filename), tmp, size: statSync(tmp).size });
+        }
+      }
+      const title = (fields.title ?? '').trim();
+      const description = (fields.description ?? '').trim().slice(0, MAX_TEXT);
+      const kind = (fields.kind ?? '') as CrKind;
+      const err = tooLarge ? 'Tệp đính kèm vượt quá 50MB.'
+        : !title ? 'Vui lòng nhập tiêu đề thay đổi.'
+        : !description ? 'Vui lòng nhập mô tả thay đổi.'
+        : !KINDS.includes(kind) ? 'Loại thay đổi không hợp lệ.'
+        : '';
+      if (err) return back(reply, id, 'changes', err);
+
+      let crId: string;
+      try {
+        crId = pipeline.submitChange(id, { title: title.slice(0, 300), description, kind, createdBy: req.user?.id ?? null }).id;
+      } catch (e) {
+        return back(reply, id, 'changes', msgOf(e));
+      }
+      // The CHANGE job runs on a later worker tick, so attaching synchronously here is visible to it.
+      const dir = join(Workspace.for(cfg, id).ensure().inputsDir, 'changes', crId);
+      mkdirSync(dir, { recursive: true });
+      const used = new Set<string>();
+      for (const s of saved) {
+        let name = s.name;
+        for (let i = 2; used.has(name); i++) name = `${i}_${s.name}`;
+        used.add(name);
+        const dest = join(dir, name);
+        renameSync(s.tmp, dest);
+        repo.addCrAttachment(id, crId, name, dest);
+      }
+      return reply.redirect(`/requests/${id}?tab=changes&ok=${encodeURIComponent(`Đã ghi nhận yêu cầu thay đổi ${crId}`)}`);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // ---- per-CR actions ----
+  const crAction = (name: string, fn: (id: string, crId: string, body: Record<string, string | undefined>, req: FastifyRequest) => void, tab = 'changes') => {
+    app.post(`/requests/:id/changes/:cr/${name}`, async (req, reply) => {
+      const { id, cr } = req.params as { id: string; cr: string };
+      if (!repo.getRequest(id)) return errPage(req, reply, 404, 'Không tìm thấy yêu cầu.');
+      if (!repo.getChangeRequest(id, cr)) return errPage(req, reply, 404, 'Không tìm thấy yêu cầu thay đổi.');
+      try { fn(id, cr, (req.body ?? {}) as Record<string, string | undefined>, req); } catch (e) { return back(reply, id, tab, msgOf(e)); }
+      return reply.redirect(`/requests/${id}?tab=${tab}`);
+    });
+  };
+  crAction('decide', (id, cr, b, req) => {
+    const decision = b.decision;
+    if (decision !== 'accept' && decision !== 'reject') throw new Error('Quyết định không hợp lệ.');
+    const note = (b.note ?? '').trim().slice(0, 2000);
+    if (decision === 'reject' && !note) throw new Error('Vui lòng nhập lý do khi từ chối thay đổi.');
+    pipeline.decideChange(id, cr, decision, note, req.user?.id ?? null);
+  }, 'overview');
+  crAction('accept-proposal', (id, cr) => { pipeline.acceptProposal(id, cr); });
+  crAction('reject-proposal', (id, cr, b, req) => {
+    const note = (b.note ?? '').trim().slice(0, 2000);
+    if (!note) throw new Error('Vui lòng nhập lý do từ chối đề xuất.');
+    pipeline.rejectProposal(id, cr, note, req.user?.id ?? null);
+  });
+
+  // ---- impact view ----
+  app.get('/requests/:id/changes/:cr/impact', async (req, reply) => {
+    const { id, cr: crId } = req.params as { id: string; cr: string };
+    const r = repo.getRequest(id);
+    const cr = r && repo.getChangeRequest(id, crId);
+    if (!r || !cr) return errPage(req, reply, 404, 'Không tìm thấy yêu cầu thay đổi.');
+    const ws = Workspace.for(cfg, id);
+    const md = join(changeDir(ws, crId), 'impact.md');
+    return html(reply, render('impact', layout(req, `${cr.id} - Tác động`), {
+      r, cr, impact: loadImpact(ws, crId), impactHtml: existsSync(md) ? markdownToHtml(readFileSync(md, 'utf8')) : '',
+    }));
+  });
+}

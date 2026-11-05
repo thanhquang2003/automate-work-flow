@@ -1,0 +1,31 @@
+<% const base = '/requests/' + it.r.id; %>
+<%~ include('./change-form', it) %>
+<h3>Danh sách thay đổi</h3>
+<% if (it.crRows.length === 0) { %><p class="muted">Chưa có yêu cầu thay đổi nào.</p><% } else { %>
+<div class="table-wrap"><table class="list">
+  <thead><tr><th>Mã</th><th>Tiêu đề</th><th>Loại</th><th>Nguồn</th><th>Trạng thái</th><th>Phiên bản</th><th>Quyết định</th><th></th></tr></thead>
+  <tbody>
+  <% for (const c of it.crRows) { %>
+  <tr>
+    <td><%= c.id %></td>
+    <td><%= c.title %><div class="muted pre-wrap"><%= c.description %></div>
+      <% if (c.attachments.length) { %><div class="muted">Tệp: <%= c.attachments.map(a => a.filename).join(', ') %></div><% } %></td>
+    <td><%= it.CR_KIND_LABELS[c.kind] %></td>
+    <td><%= it.CR_SOURCE_LABELS[c.source] %></td>
+    <td><span class="badge st-cr-<%= c.status %>"><%= it.CR_STATUS_LABELS[c.status] %></span></td>
+    <td><% if (c.baselineTo !== null) { %>v<%= c.baselineFrom %> → v<%= c.baselineTo %><% } %></td>
+    <td><% if (c.decidedAt) { %><%= it.fmtTime(c.decidedAt) %><% } %><% if (c.decisionNote) { %><div class="muted"><%= c.decisionNote %></div><% } %></td>
+    <td>
+      <% if (c.hasImpact) { %><a href="<%= base %>/changes/<%= c.id %>/impact">Tác động</a><% } %>
+      <% if (c.status === 'proposed') { %>
+      <form method="post" action="<%= base %>/changes/<%= c.id %>/accept-proposal"><button class="btn primary" type="submit">Nhận đề xuất</button></form>
+      <form method="post" action="<%= base %>/changes/<%= c.id %>/reject-proposal" class="stack">
+        <input name="note" placeholder="Lý do từ chối" required><button class="btn danger" type="submit">Từ chối đề xuất</button>
+      </form>
+      <% } %>
+    </td>
+  </tr>
+  <% } %>
+  </tbody>
+</table></div>
+<% } %>

@@ -1,0 +1,15 @@
+<% const pf = it.prefill || { kind: 'add', title: '', description: '' }; %>
+<% if (it.canChange) { %>
+<form method="post" action="/requests/<%= it.r.id %>/changes" enctype="multipart/form-data" class="stack">
+  <h3>Gửi yêu cầu thay đổi</h3>
+  <label>Tiêu đề <input name="title" value="<%= pf.title %>" required maxlength="300"></label>
+  <label>Mô tả <textarea name="description" rows="4" required><%= pf.description %></textarea></label>
+  <label>Loại
+    <select name="kind">
+      <% for (const [k, v] of Object.entries(it.CR_KIND_LABELS)) { %><option value="<%= k %>" <%= pf.kind === k ? 'selected' : '' %>><%= v %></option><% } %>
+    </select>
+  </label>
+  <label>Tệp đính kèm <input type="file" name="files" multiple></label>
+  <div><button class="btn primary" type="submit">Gửi yêu cầu thay đổi</button></div>
+</form>
+<% } else { %><p class="muted">Yêu cầu đã bị hủy, không thể tạo yêu cầu thay đổi.</p><% } %>

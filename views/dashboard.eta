@@ -17,12 +17,14 @@
 <% } else { %>
 <div class="table-wrap">
 <table class="list">
-  <thead><tr><th>Mã</th><th>Tiêu đề</th><th>Giai đoạn</th><th>Chế độ</th><th>Trạng thái</th><th>Người tạo</th><th>Tạo lúc</th></tr></thead>
+  <thead><tr><th>Mã</th><th>Tiêu đề</th><th>Phiên bản</th><th>Thay đổi chờ</th><th>Giai đoạn</th><th>Chế độ</th><th>Trạng thái</th><th>Người tạo</th><th>Tạo lúc</th></tr></thead>
   <tbody>
   <% for (const r of it.rows) { %>
   <tr>
     <td><a href="/requests/<%= r.id %>"><%= r.id %></a></td>
     <td><a href="/requests/<%= r.id %>"><%= r.title %></a></td>
+    <td>v<%= r.baselineVersion %></td>
+    <td><%= r.openCrs %></td>
     <td><%= it.STAGE_LABELS[r.stage] %></td>
     <td><%= it.RUN_MODE_LABELS[r.runMode] %></td>
     <td><span class="badge st-<%= r.status %>"><%= it.STATUS_LABELS[r.status] %></span></td>

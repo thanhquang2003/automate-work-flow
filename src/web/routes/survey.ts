@@ -58,7 +58,7 @@ export function surveyRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
     return { questions, values };
   }
 
-  const form = (reply: FastifyReply, link: SurveyLinkRow, code = 200, over: { values?: Map<string, string>; errors?: Map<string, string>; notice?: string } = {}) => {
+  const form = (reply: FastifyReply, link: SurveyLinkRow, code = 200, over: { values?: Map<string, string>; errors?: Map<string, string>; notice?: string; proposal?: string } = {}) => {
     const req = repo.getRequest(link.requestId);
     const v = visibleQuestions(link);
     const groups = new Map<string, QuestionRow[]>();
@@ -68,7 +68,7 @@ export function surveyRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
       groups.set(q.category, g);
     }
     return page(reply, code, {
-      state: 'form', splitMulti, title: req?.title ?? '', groups: [...groups], values: over.values ?? v.values, errors: over.errors ?? new Map(), notice: over.notice ?? '',
+      state: 'form', splitMulti, title: req?.title ?? '', groups: [...groups], values: over.values ?? v.values, errors: over.errors ?? new Map(), notice: over.notice ?? '', proposal: over.proposal ?? '',
     });
   };
 
@@ -108,6 +108,7 @@ export function surveyRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
 
     const b = (req.body ?? {}) as Body;
     const submit = b.action === 'submit';
+    const proposal = String(Array.isArray(b.proposal) ? (b.proposal[0] ?? '') : (b.proposal ?? '')).trim().slice(0, MAX_ANSWER);
     const { questions, values: prev } = visibleQuestions(link);
     const values = new Map<string, string>();
     for (const q of questions) {
@@ -120,7 +121,7 @@ export function surveyRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
     if (submit) {
       const errors = new Map<string, string>();
       for (const q of questions) if (q.priority === 'must' && !values.get(q.id)) errors.set(q.id, 'Vui lòng trả lời câu hỏi bắt buộc này.');
-      if (errors.size) return form(reply, link, 400, { values, errors, notice: `Vui lòng trả lời ${errors.size} câu hỏi bắt buộc còn thiếu.` });
+      if (errors.size) return form(reply, link, 400, { values, errors, proposal, notice: `Vui lòng trả lời ${errors.size} câu hỏi bắt buộc còn thiếu.` });
     }
     repo.tx(() => {
       for (const q of questions) {
@@ -129,8 +130,15 @@ export function surveyRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
       }
       if (submit) repo.markSurveySubmitted(link.token);
     });
+    let proposalNote = '';
+    if (proposal) {
+      try {
+        pipeline.proposeChange(link.requestId, { title: 'Đề xuất của khách hàng', description: proposal, kind: 'other', source: 'customer' });
+        proposalNote = ' Đề xuất thay đổi của Quý khách đã được ghi nhận.';
+      } catch (e) { console.error('proposeChange failed', e); proposalNote = ' Không thể ghi nhận đề xuất thay đổi.'; }
+    }
     if (submit) autoResume(link.requestId);
     if (submit) return page(reply, 200, { state: 'thanks', title: repo.getRequest(link.requestId)?.title ?? '' });
-    return form(reply, link, 200, { notice: 'Đã lưu bản nháp. Quý khách có thể quay lại hoàn thành sau.' });
+    return form(reply, link, 200, { notice: `Đã lưu bản nháp. Quý khách có thể quay lại hoàn thành sau.${proposalNote}` });
   });
 }

@@ -9,6 +9,7 @@ import type { Pipeline } from '../engine/pipeline.js';
 import { currentUser, isLocalHostHeader, sameOrigin } from './auth.js';
 import { adminRoutes } from './routes/admin.js';
 import { authRoutes } from './routes/auth.js';
+import { changeRoutes } from './routes/changes.js';
 import { questionRoutes } from './routes/questions.js';
 import { requestRoutes } from './routes/requests.js';
 import { surveyRoutes } from './routes/survey.js';
@@ -58,6 +59,7 @@ export async function buildServer(cfg: Config, deps: WebDeps): Promise<FastifyIn
 
   authRoutes(app, cfg, deps);
   requestRoutes(app, cfg, deps);
+  changeRoutes(app, cfg, deps);
   questionRoutes(app, cfg, deps);
   adminRoutes(app, cfg, deps);
   surveyRoutes(app, cfg, deps);

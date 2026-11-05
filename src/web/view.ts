@@ -9,6 +9,12 @@ export const STATUS_LABELS: Record<string, string> = {
   running: 'Đang chạy', awaiting_approval: 'Chờ duyệt', awaiting_customer: 'Chờ khách hàng', paused: 'Tạm dừng',
   needs_human: 'Cần người xử lý', failed: 'Lỗi', done: 'Hoàn thành', cancelled: 'Đã hủy',
 };
+export const CR_STATUS_LABELS: Record<string, string> = {
+  proposed: 'Đề xuất', pending: 'Chờ phân tích', analyzing: 'Đang phân tích', awaiting_decision: 'Chờ quyết định',
+  accepted: 'Đã chấp nhận', rejected: 'Đã từ chối', applied: 'Đã áp dụng',
+};
+export const CR_KIND_LABELS: Record<string, string> = { add: 'Thêm mới', modify: 'Sửa đổi', remove: 'Loại bỏ', nfr: 'Phi chức năng', other: 'Khác' };
+export const CR_SOURCE_LABELS: Record<string, string> = { staff: 'Nhân viên', customer: 'Khách hàng' };
 export const RUN_MODE_LABELS: Record<string, string> = { auto: 'Tự động', review: 'Duyệt từng bước' };
 
 export const fmtTime = (ms: number): string => {
@@ -19,7 +25,7 @@ export const fmtTime = (ms: number): string => {
 export const fmtSize = (n: number): string => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 
 const eta = new Eta({ views: `${ROOT}views`, cache: true, autoEscape: true });
-const helpers = { STAGES, STAGE_LABELS, STATUS_LABELS, RUN_MODE_LABELS, fmtTime, fmtSize };
+const helpers = { CR_STATUS_LABELS, CR_KIND_LABELS, CR_SOURCE_LABELS, STAGES, STAGE_LABELS, STATUS_LABELS, RUN_MODE_LABELS, fmtTime, fmtSize };
 
 export interface LayoutData { user?: { username: string; role: string } | undefined; mode: string; title: string; flash?: string | undefined; flashKind?: string }
 

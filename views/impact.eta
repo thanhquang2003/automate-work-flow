@@ -1,0 +1,17 @@
+<div class="head">
+  <div>
+    <h1><%= it.cr.id %> - <%= it.cr.title %></h1>
+    <p class="muted"><%= it.CR_KIND_LABELS[it.cr.kind] %> · <%= it.CR_SOURCE_LABELS[it.cr.source] %> · <span class="badge"><%= it.CR_STATUS_LABELS[it.cr.status] %></span></p>
+  </div>
+  <a class="btn" href="/requests/<%= it.r.id %>?tab=changes">Quay lại</a>
+</div>
+<section class="card">
+  <h3>Mô tả</h3>
+  <p class="pre-wrap"><%= it.cr.description %></p>
+  <% if (it.impact) { %>
+  <p><strong>Công sức ước tính:</strong> <%= it.impact.effort_delta_mh %> man-hour · <strong>Quay lại giai đoạn:</strong> <%= it.STAGE_LABELS[it.impact.reenter] %></p>
+  <% if (it.impact.risks.length) { %><h3>Rủi ro</h3><ul><% for (const k of it.impact.risks) { %><li><%= k %></li><% } %></ul><% } %>
+  <% } %>
+  <h3>Báo cáo tác động</h3>
+  <% if (it.impactHtml) { %><div class="md"><%~ it.impactHtml %></div><% } else { %><p class="muted">Chưa có báo cáo tác động.</p><% } %>
+</section>

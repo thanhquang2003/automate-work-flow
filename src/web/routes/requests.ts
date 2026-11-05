@@ -6,7 +6,9 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { ZipArchive } from 'archiver';
 import type { Config } from '../../config.js';
 import type { BugRow, ProjectKind, RequestRow, RunMode, SoftwareType } from '../../domain/types.js';
-import { readFlowState, readProjectInfo } from '../../engine/stages/common.js';
+import { STAGES } from '../../domain/types.js';
+import { loadImpact } from '../../engine/changes.js';
+import { changeDir, readFlowState, readProjectInfo } from '../../engine/stages/common.js';
 import { Workspace } from '../../engine/workspace.js';
 import { markdownToHtml } from '../markdown-html.js';
 import { questionsTabData } from './questions.js';
@@ -15,7 +17,7 @@ import type { WebDeps } from '../server.js';
 import { render, renderPartial, type LayoutData } from '../view.js';
 
 const SOFTWARE_TYPES: SoftwareType[] = ['web', 'mobile', 'api', 'background'];
-const TABS = ['overview', 'analysis', 'questions', 'docs', 'tasks', 'tests', 'bugs'] as const;
+const TABS = ['overview', 'analysis', 'questions', 'docs', 'tasks', 'tests', 'bugs', 'changes', 'scope'] as const;
 type Tab = (typeof TABS)[number];
 const INLINE_TYPES: Record<string, string> = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
@@ -66,10 +68,22 @@ export function safeJoin(root: string, rel: string): string | undefined {
   return !p.startsWith(base + sep) ? undefined : p;
 }
 
-const cleanName = (n: string): string => {
+export const cleanName = (n: string): string => {
   const b = basename(n.replace(/\\/g, '/')).replace(/[^\w.\- ()À-ỹ]/g, '_').replace(/^\.+/, '_');
   return /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(b.replace(/\..*$/, '')) ? `${b}_` : b || 'file';
 };
+
+const OPEN_CR = new Set(['proposed', 'pending', 'analyzing', 'awaiting_decision']);
+
+/** Artifacts grouped by `_v<N>` suffix (unsuffixed = v1), newest version first. */
+export function groupByVersion(files: FileEntry[]): { version: number; files: FileEntry[] }[] {
+  const m = new Map<number, FileEntry[]>();
+  for (const f of files) {
+    const v = Number(/_v(\d+)\.[^./]+$/.exec(f.rel)?.[1] ?? 1);
+    (m.get(v) ?? m.set(v, []).get(v)!).push(f);
+  }
+  return [...m].sort((a, b) => b[0] - a[0]).map(([version, fs]) => ({ version, files: fs }));
+}
 
 export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline }: WebDeps): void {
   const layout = (req: FastifyRequest, title: string, extra: Partial<LayoutData> = {}): LayoutData => ({ user: req.user, mode: cfg.mode, title, ...extra });
@@ -87,7 +101,7 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
       .filter(r => !q.status || r.status === q.status)
       .filter(r => !needle || r.id.toLowerCase().includes(needle) || r.title.toLowerCase().includes(needle))
       .sort((a, b) => b.createdAt - a.createdAt)
-      .map(r => ({ ...r, creator: r.createdBy === null ? (cfg.mode === 'local' ? 'local' : '-') : (users.get(r.createdBy) ?? '-') }));
+      .map(r => ({ ...r, openCrs: repo.listChangeRequests(r.id).filter(c => OPEN_CR.has(c.status)).length, creator: r.createdBy === null ? (cfg.mode === 'local' ? 'local' : '-') : (users.get(r.createdBy) ?? '-') }));
     return html(reply, render('dashboard', layout(req, 'Yêu cầu'), { rows, filterStatus: q.status ?? '', filterQ: q.q ?? '' }));
   });
 
@@ -167,6 +181,7 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
     } else if (tab === 'docs') {
       const files = listFiles(ws.artifactsDir);
       data.docs = files.filter(f => !f.rel.startsWith('evidence/'));
+      data.docGroups = groupByVersion(data.docs as FileEntry[]);
       data.evidence = files.filter(f => f.rel.startsWith('evidence/'));
     } else if (tab === 'tasks') {
       data.tasks = repo.listTasks(id);
@@ -179,6 +194,32 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
       }));
     } else if (tab === 'bugs') {
       data.bugs = bugsWithLinks(ws, repo.listBugs(id));
+    }
+    const crs = repo.listChangeRequests(id);
+    data.crs = crs;
+    data.canChange = r.status !== 'cancelled';
+    data.decisions = [];
+    if (r.stage === 'CHANGE' && r.status === 'awaiting_approval') {
+      data.decisions = crs.filter(c => c.status === 'awaiting_decision').map(cr => {
+        const md = join(changeDir(ws, cr.id), 'impact.md');
+        return { cr, impact: loadImpact(ws, cr.id), impactHtml: existsSync(md) ? markdownToHtml(readFileSync(md, 'utf8')) : '' };
+      });
+    }
+    // Stepper: CHANGE is not a normal step; while in CHANGE the position of the interrupted stage is shown.
+    const steps = STAGES.filter(s => s !== 'CHANGE');
+    const at = r.stage === 'CHANGE' ? (crs.find(c => c.interruptedStage && OPEN_CR.has(c.status))?.interruptedStage ?? null) : r.stage;
+    data.steps = steps;
+    data.stepIdx = at === null ? -1 : steps.indexOf(at === 'CHANGE' ? 'TEST' : at);
+    if (tab === 'changes') {
+      const feats = new Map(repo.listFeatures(id).map(f => [f.id, f]));
+      data.crRows = crs.map(c => ({ ...c, attachments: repo.listCrAttachments(id, c.id), hasImpact: existsSync(join(changeDir(ws, c.id), 'impact.md')) }));
+      const pm = /^(remove|modify):(F-[\w-]+)$/.exec((q as { prefill?: string }).prefill ?? '');
+      const pf = pm && feats.get(pm[2]!);
+      data.prefill = pf
+        ? { kind: pm[1], title: `${pm[1] === 'remove' ? 'Bỏ khỏi phạm vi' : 'Sửa'} chức năng ${pf.id} - ${pf.name}`, description: '' }
+        : { kind: 'add', title: '', description: '' };
+    } else if (tab === 'scope') {
+      data.features = repo.listFeatures(id);
     }
     const flash = q.err ?? q.ok;
     return html(reply, render('request-detail', layout(req, `${r.id} - ${r.title}`, { flash, flashKind: q.err ? 'error' : 'ok' }), data));
