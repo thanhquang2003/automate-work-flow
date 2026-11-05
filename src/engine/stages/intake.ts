@@ -1,7 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { extname, join, resolve } from 'node:path';
 import { GitLabError, type GlProject } from '../../gitlab/client.js';
-import type { StageContext, StageOutcome } from '../pipeline.js';
+import { gitlabToken, type StageContext, type StageOutcome } from '../pipeline.js';
 import { ensureOnBranch, integrationBranch, writeProjectInfo } from './common.js';
 
 /** Safe file name for inputs/: no directories, no reserved characters, never "." / ".." / empty. */
@@ -57,7 +57,8 @@ async function cloneProject(ctx: StageContext, p: GlProject, branch: string): Pr
   const gitlab = ctx.gitlab!;
   const empty = (p as GlProject & { empty_repo?: boolean }).empty_repo === true || !p.default_branch;
   if (!empty) await gitlab.createBranch(p.id, branch, p.default_branch);
-  await ctx.git.clone(p.http_url_to_repo, ctx.cfg.gitlab.token, ctx.ws.repoDir);
+  // Same credential as the API calls above (creator's own token when set), else the shared token.
+  await ctx.git.clone(p.http_url_to_repo, gitlabToken(gitlab) || ctx.cfg.gitlab.token, ctx.ws.repoDir);
   if (!empty) {
     await ctx.git.checkout(branch);
   } else {

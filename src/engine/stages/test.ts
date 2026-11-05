@@ -209,7 +209,41 @@ async function reconcile(ctx: StageContext, gl: ProjectGitLab | undefined, all: 
   }
 }
 
-type Plan = { kind: 'test'; targets: TestCaseRow[]; regression: boolean } | { kind: 'bugfix'; failing: string[] } | { kind: 'done' };
+const TEST_DIRS = new Set(['test', 'tests', '__tests__', 'e2e', 'spec']);
+const TEST_FILE_RES = [/\.(test|spec)\.[^/]+$/i, /Test\.java$/, /^test_[^/]*\.py$/, /_test\.(go|py)$/];
+
+/**
+ * Paths the Tester may change: docs/devflow/**, anything under a test directory (test/, tests/, __tests__/, e2e/,
+ * spec/, src/test/…) and test files by name (*.test.*, *.spec.*, *Test.java, test_*.py, *_test.go, *_test.py).
+ */
+export function isTesterPath(path: string): boolean {
+  const p = path.replace(/\\/g, '/');
+  if (p === 'docs/devflow' || p.startsWith('docs/devflow/')) return true;
+  const segs = p.split('/');
+  const file = segs.pop() ?? '';
+  return segs.some(d => TEST_DIRS.has(d.toLowerCase())) || TEST_FILE_RES.some(re => re.test(file));
+}
+
+/**
+ * Commits only the Tester's own output (see isTesterPath). Other changes to tracked files are reverted; other new
+ * files (not in the pre-run `baseline` of untracked files) are left in place, uncommitted, with a warning.
+ */
+async function commitTesterOutput(ctx: StageContext, baseline: string[], msg: string): Promise<boolean> {
+  const before = new Set(baseline);
+  const tracked = await ctx.git.changedTracked();
+  const created = (await ctx.git.untracked()).filter(p => !before.has(p));
+  const revert = tracked.filter(p => !isTesterPath(p));
+  const stray = created.filter(p => !isTesterPath(p));
+  const list = (xs: string[]): string => xs.slice(0, 20).join(', ') + (xs.length > 20 ? ` … (+${xs.length - 20})` : '');
+  if (revert.length) {
+    await ctx.git.restore(revert);
+    ctx.log(`Tester đã sửa file ngoài phạm vi kiểm thử; đã hoàn tác: ${list(revert)}`, 'warn');
+  }
+  if (stray.length) ctx.log(`Tester tạo file ngoài phạm vi kiểm thử; không commit (vẫn để trong workspace): ${list(stray)}`, 'warn');
+  return ctx.git.commitPaths([...tracked, ...created].filter(isTesterPath), msg);
+}
+
+type Plan ={ kind: 'test'; targets: TestCaseRow[]; regression: boolean } | { kind: 'bugfix'; failing: string[] } | { kind: 'done' };
 
 /**
  * What TEST does next, from the run history:
@@ -274,7 +308,7 @@ export async function test(ctx: StageContext): Promise<StageOutcome> {
     ctx.log(`Kết quả kiểm thử${regression ? ' hồi quy' : ''}: ${counts}`);
     await reconcile(ctx, gl, all, state);
     const runLabel = [...new Set(targets.map(t => state.runs[t.id]!.length))].join(',');
-    if (await ctx.git.commitAll(`test(devflow): ${req.id} kết quả kiểm thử lần ${runLabel}`, baseline)) await pushIfRemote(ctx, branch);
+    if (await commitTesterOutput(ctx, baseline, `test(devflow): ${req.id} kết quả kiểm thử lần ${runLabel}`)) await pushIfRemote(ctx, branch);
     p = plan(ctx, all, state);
   }
   await writeTestCases(templatePath(ctx.cfg, 'testcase'), sortedTestCases(repo, req.id).map(tcSheetRow), join(ws.artifactsDir, testCaseXlsxName(req.id)));

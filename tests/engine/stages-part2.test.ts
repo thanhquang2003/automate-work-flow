@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import ExcelJS from 'exceljs';
@@ -8,6 +8,7 @@ import { clearStages, Pipeline, registerStage, Workspace } from '../../src/engin
 import { Worker } from '../../src/engine/worker.js';
 import { writeProjectInfo } from '../../src/engine/stages/common.js';
 import { validateResults } from '../../src/engine/evidence.js';
+import { isTesterPath } from '../../src/engine/stages/test.js';
 import type { Stage, TestCaseRow } from '../../src/domain/types.js';
 import { setup, mkReq } from './helpers.js';
 import { calls, git, initRepo, mockClaude, outputPaths, register, resetCalls, startAt, type Call } from './stage-helpers.js';
@@ -333,6 +334,50 @@ describe('stages part 2', () => {
     // test-results.json committed and pushed to the integration branch.
     expect(git(p.bare, 'ls-tree', '-r', '--name-only', p.branch)).toContain('docs/devflow/test-results.json');
     expect(p.repo.getRequest(p.r.id)!.stage).toBe('BUGFIX');
+  });
+
+  it('test commits only docs/devflow and test files; other tracked edits reverted, other new files left uncommitted', async () => {
+    const p = prep({ testCases: [tcRow('TC-DANGNHAP-01', 'F-01')], stubs: ['DONE'] });
+    mkdirSync(join(p.ws.repoDir, 'src'), { recursive: true });
+    writeFileSync(join(p.ws.repoDir, 'src', 'app.ts'), 'original\n');
+    writeFileSync(join(p.ws.repoDir, 'src', 'old.ts'), 'keep me\n');
+    git(p.ws.repoDir, 'add', '-A');
+    git(p.ws.repoDir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'app');
+    const base = tester(p.ws.evidenceDir, [[{ tc_id: 'TC-DANGNHAP-01', status: 'P', files: ['ok.png'] }]]);
+    mockClaude({
+      tester: (dir, call) => {
+        const repo = call.opts.cwd;
+        writeFileSync(join(repo, 'src', 'app.ts'), 'tester changed app code\n');
+        rmSync(join(repo, 'src', 'old.ts'));
+        for (const f of ['tests/e2e/login.spec.ts', 'src/test/java/LoginTest.java', 'src/login.test.ts', 'tools/test_login.py', 'scratch.txt', 'src/helper.ts']) {
+          mkdirSync(join(repo, f, '..'), { recursive: true });
+          writeFileSync(join(repo, f), `// ${f}\n`);
+        }
+        return base(dir);
+      },
+    });
+    startAt(p.pipeline, p.r.id, 'TEST');
+    await p.worker.drain();
+    const files = git(p.ws.repoDir, 'ls-tree', '-r', '--name-only', p.branch).split('\n');
+    expect(files).toEqual(expect.arrayContaining([
+      'docs/devflow/test-results.json', 'tests/e2e/login.spec.ts', 'src/test/java/LoginTest.java', 'src/login.test.ts', 'tools/test_login.py', 'src/app.ts', 'src/old.ts',
+    ]));
+    expect(files).not.toContain('scratch.txt');
+    expect(files).not.toContain('src/helper.ts');
+    // Tracked code changes are reverted, the deleted file restored; stray new files stay, uncommitted.
+    expect(readFileSync(join(p.ws.repoDir, 'src', 'app.ts'), 'utf8').trim()).toBe('original'); // (autocrlf may add \r)
+    expect(readFileSync(join(p.ws.repoDir, 'src', 'old.ts'), 'utf8').trim()).toBe('keep me');
+    expect(existsSync(join(p.ws.repoDir, 'scratch.txt'))).toBe(true);
+    expect(git(p.ws.repoDir, 'show', `${p.branch}:src/app.ts`)).toBe('original');
+    const warns = p.repo.listEvents(p.r.id).filter(e => e.level === 'warn').map(e => e.message).join('\n');
+    expect(warns).toMatch(/hoàn tác: .*src\/app\.ts/);
+    expect(warns).toMatch(/không commit.*scratch\.txt/);
+    expect(warns).toContain('src/helper.ts');
+    expect(isTesterPath('docs/devflow/x.md')).toBe(true);
+    expect(isTesterPath('src/__tests__/a.ts')).toBe(true);
+    expect(isTesterPath('pkg/a_test.go')).toBe(true);
+    expect(isTesterPath('src/contest/a.ts')).toBe(false);
+    expect(isTesterPath('docs/other.md')).toBe(false);
   });
 
   it('bugfix >3 attempts → needs_human with label', async () => {

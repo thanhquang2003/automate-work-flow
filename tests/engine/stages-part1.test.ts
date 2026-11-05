@@ -480,6 +480,38 @@ describe('stages part 1', () => {
     expect(git(bare, 'log', '--oneline', '-1', 'main')).toMatch(/readme/);
     expect(JSON.parse(readFileSync(join(ws.root, 'project.json'), 'utf8'))).toMatchObject({ projectId: 7, defaultBranch: 'main', branch: `devflow/${r.id}` });
   });
+
+  it('intake clones with the request GitLab client token (creator token), not the shared env token', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'devflow-remote-'));
+    const bare = join(root, 'app.git');
+    git(root, 'init', '-q', '--bare', '-b', 'main', bare);
+    const seed = join(root, 'seed');
+    initRepo(seed, 'main');
+    git(seed, 'push', '-q', bare, 'main');
+    const fakeGitLab = {
+      token: 'creator-tok',
+      getProject: async () => ({ id: 7, path_with_namespace: 'grp/app', default_branch: 'main', http_url_to_repo: bare }),
+      createBranch: async (_pid: number, branch: string, ref: string) => { git(bare, 'branch', branch, ref); },
+    } as unknown as GitLabClient;
+    const s = setup({ gitlab: { url: 'http://gl', token: 'shared-tok', defaultGroup: '' } });
+    const cloneTokens: string[] = [];
+    const pipeline = new Pipeline(s.cfg, s.repo, {
+      makeGitLab: () => fakeGitLab,
+      makeGit: (_r, ws) => {
+        const g = new Git(ws.repoDir);
+        const clone = g.clone.bind(g);
+        g.clone = async (url, token, dir) => { cloneTokens.push(token); return clone(url, '', dir); };
+        return g;
+      },
+    });
+    const worker = new Worker(s.cfg, s.repo, pipeline);
+    const r = mkReq(s.repo, { projectKind: 'existing', gitlabProject: 'grp/app' });
+    register(['CODEBASE_SCAN']);
+    pipeline.start(r.id);
+    await worker.drain();
+    expect(cloneTokens).toEqual(['creator-tok']);
+    expect(s.repo.getRequest(r.id)!.stage).toBe('CODEBASE_SCAN');
+  });
 });
 
 const featureRows = (fs: typeof FEATURES.features) => fs.map(f => ({ id: f.id, code: f.code, name: f.name, description: f.description, typeCode: f.type_code, unitTest: f.unit_test, note: f.note, kind: f.kind as 'function' | 'nonfunction' }));

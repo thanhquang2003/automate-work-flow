@@ -107,6 +107,19 @@ export class Git {
     return out.split('\0').filter(Boolean);
   }
 
+  /** Tracked paths that differ from HEAD (worktree or index; additions, changes, deletions; renames split). */
+  async changedTracked(): Promise<string[]> {
+    const out = await this.run(['diff', '--name-only', '--no-renames', '-z', 'HEAD', '--']);
+    return out.split('\0').filter(Boolean);
+  }
+
+  /** Puts the given repo-relative paths back to HEAD, in the index and the worktree. */
+  async restore(paths: string[]): Promise<void> {
+    if (!paths.length) return;
+    for (const p of paths) if (!p || p.startsWith('-')) throw new Error(`Invalid path: ${JSON.stringify(p)}`);
+    await this.run(['restore', '--source=HEAD', '--staged', '--worktree', '--', ...paths]);
+  }
+
   async branchExists(branch: string): Promise<boolean> {
     this.checkRef(branch);
     return (await this.exec(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { allowFail: true })).code === 0;

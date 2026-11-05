@@ -14,7 +14,8 @@ type Id = number | string;
 
 export class GitLabClient {
   private base: string;
-  constructor(baseUrl: string, private token: string, private fetchImpl: typeof fetch = fetch) {
+  /** `token` is the resolved credential for this request; git clone/push must use the same one. */
+  constructor(baseUrl: string, readonly token: string, private fetchImpl: typeof fetch = fetch) {
     this.base = baseUrl.replace(/\/+$/, '') + '/api/v4';
   }
 
