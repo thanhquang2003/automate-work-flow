@@ -313,7 +313,7 @@ describe('stages part 1', () => {
     expect(calls[0]!.prompt).toContain('PM');
     const fs = repo.listFeatures(r.id);
     expect(fs.map(f => [f.id, f.kind])).toEqual([['F-01', 'function'], ['F-02', 'function'], ['NF-01', 'nonfunction']]);
-    const out = join(Workspace.for(cfg, r.id).artifactsDir, `ULNL_${r.id}.xlsx`);
+    const out = join(Workspace.for(cfg, r.id).artifactsDir, `ULNL_${r.id}_v1.xlsx`);
     expect(existsSync(out)).toBe(true);
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.readFile(out);
@@ -356,7 +356,7 @@ describe('stages part 1', () => {
     expect(calls.map(c => c.role)).toEqual(['architect']);
     expect(calls[0]!.prompt).toContain('DANGNHAP');
     for (const kind of ['TKCT', 'TKDB']) {
-      const out = join(ws.artifactsDir, `${kind}_${r.id}.docx`);
+      const out = join(ws.artifactsDir, `${kind}_${r.id}_v1.docx`);
       expect(existsSync(out)).toBe(true);
       const xml = await (await JSZip.loadAsync(readFileSync(out))).file('word/document.xml')!.async('string');
       expect(xml).toContain(kind === 'TKCT' ? 'THIẾT KẾ CHI TIẾT' : 'Script rollback');

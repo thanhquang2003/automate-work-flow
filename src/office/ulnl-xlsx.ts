@@ -9,6 +9,8 @@ export interface UlnlFeature {
   type_code: string;
   unit_test: boolean;
   note: string;
+  /** CR that cancelled the feature: the row stays visible, noted "Hủy theo CR-NN", with no effort. */
+  cancelledBy?: string;
 }
 
 export interface UlnlNonFunc {
@@ -16,7 +18,13 @@ export interface UlnlNonFunc {
   name: string;
   description: string;
   effort_mh?: number;
+  /** CR that cancelled the item: the row stays visible, noted "Hủy theo CR-NN", with effort 0. */
+  cancelledBy?: string;
 }
+
+/** Note text of a row cancelled by a change request. */
+export const cancelNote = (crId: string): string => (crId ? `Hủy theo ${crId}` : 'Đã hủy');
+const withCancel = (crId: string | undefined, text: string): string => (crId === undefined ? text : [cancelNote(crId), text].filter(Boolean).join('. '));
 
 const round3 = (n: number): number => Math.round(n * 1000) / 1000;
 
@@ -92,9 +100,10 @@ export async function writeUlnl(templatePath: string, features: UlnlFeature[], n
     for (const [col, st] of styles) row.getCell(col).style = { ...st };
 
     const typeCode = f.type_code.trim();
-    const sol = effort.get(`${typeCode}|Solution`) ?? 0;
-    const dev = effort.get(`${typeCode}|Development`) ?? 0;
-    const test = effort.get(`${typeCode}|Test`) ?? 0;
+    const cancelled = f.cancelledBy !== undefined;
+    const sol = cancelled ? 0 : (effort.get(`${typeCode}|Solution`) ?? 0);
+    const dev = cancelled ? 0 : (effort.get(`${typeCode}|Development`) ?? 0);
+    const test = cancelled ? 0 : (effort.get(`${typeCode}|Test`) ?? 0);
     const ut = f.unit_test ? round3(dev * fn.unitTestRatio) : 0;
     const total = round3(sol + dev + ut + test);
     sums.sol += sol;
@@ -110,7 +119,7 @@ export async function writeUlnl(templatePath: string, features: UlnlFeature[], n
     row.getCell(c.typeCode).value = typeCode;
     row.getCell(c.utFlag).value = f.unit_test ? 'Yes' : 'No';
     for (const letter of ['S', 'T', 'U', 'W']) row.getCell(colNo(letter)).value = 0; // reuse % and outsource effort
-    row.getCell(c.note).value = f.note || null;
+    row.getCell(c.note).value = withCancel(f.cancelledBy, f.note) || null;
 
     const results = new Map<number, string | number>([
       [c.sol, sol], [c.dev, dev], [c.ut, ut], [c.test, test], [c.total, total],
@@ -118,8 +127,11 @@ export async function writeUlnl(templatePath: string, features: UlnlFeature[], n
       [colNo('N'), sol], [colNo('O'), dev], [colNo('P'), ut], [colNo('Q'), test], [colNo('R'), total],
     ]);
     for (const [col, tpl] of tplFormulas) {
-      row.getCell(col).value = { formula: shiftFormula(tpl, first, r), result: results.get(col) };
+      // A cancelled row keeps plain zeros: a live lookup formula would bring its effort back on recalculation.
+      if (cancelled && col !== c.typeName) row.getCell(col).value = 0;
+      else row.getCell(col).value = { formula: shiftFormula(tpl, first, r), result: results.get(col) };
     }
+    if (cancelled) for (const col of [c.sol, c.dev, c.ut, c.test, c.total]) row.getCell(col).value = 0;
   });
 
   // totals row: SUM ranges follow the last data row
@@ -177,9 +189,11 @@ function writeNonFunc(wb: ExcelJS.Workbook, ws: ExcelJS.Worksheet, m: UlnlNonFun
     row.getCell(col.no).value = i + 1;
     row.getCell(col.code).value = it.code;
     row.getCell(col.name).value = it.name || ref?.name || '';
-    row.getCell(col.desc).value = it.description || null;
+    row.getCell(col.desc).value = withCancel(it.cancelledBy, it.description) || null;
     const pct = typeof ref?.mh === 'string' ? /(\d+(?:\.\d+)?)\s*%/.exec(ref.mh) : null;
-    if (typeof it.effort_mh === 'number') {
+    if (it.cancelledBy !== undefined) {
+      row.getCell(col.effort).value = 0;
+    } else if (typeof it.effort_mh === 'number') {
       row.getCell(col.effort).value = it.effort_mh;
       sum += it.effort_mh;
     } else if (typeof ref?.mh === 'number') {

@@ -8,8 +8,8 @@ import { buildPrompt } from '../prompt.js';
 import type { StageContext, StageOutcome } from '../pipeline.js';
 import { MAX_SCHEMA_RETRIES, OutputError, readJsonOutput, runClaudeStep } from './claude-json.js';
 import {
-  codebaseMapPath, designFile, fileRef, prepareIntegration, projectGitLab, promptExtras, pushIfRemote, readFlowState, sortedTestCases,
-  tcSheetRow, testCaseXlsxName, writeFlowState, type FlowState, type ProjectGitLab, type TestRun,
+  artifactName, codebaseMapPath, designFile, fileRef, prepareIntegration, projectGitLab, promptExtras, pushIfRemote, readFlowState, sortedTestCases,
+  tcSheetRow, writeFlowState, type FlowState, type ProjectGitLab, type TestRun,
 } from './common.js';
 
 const RESULTS_EXAMPLE = {
@@ -24,6 +24,16 @@ const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp']);
 
 export const resultsPath = (ctx: StageContext): string => join(ctx.ws.devflowDir, 'test-results.json');
 export const latestRun = (s: FlowState, tcId: string): TestRun | undefined => s.runs[tcId]?.at(-1);
+
+/**
+ * Baseline a TC's latest run was made at: the run's own record, else the DB column, else 1 (runs recorded before
+ * change requests existed all belong to the first baseline).
+ */
+export const runBaseline = (tc: Pick<TestCaseRow, 'baseline'>, r: TestRun): number => r.baseline ?? tc.baseline ?? 1;
+
+/** True when the TC has a result at the current baseline (any status). */
+export const hasCurrentResult = (tc: Pick<TestCaseRow, 'baseline'>, r: TestRun | undefined, baseline: number): boolean =>
+  !!r && runBaseline(tc, r) >= baseline;
 
 /** Test case comment: tester's latest comment, then "Lần N: X" for runs 3+, then the bug link. */
 function composeComment(runs: TestRun[], bugLine: string | undefined): string | null {
@@ -205,6 +215,7 @@ async function reconcile(ctx: StageContext, gl: ProjectGitLab | undefined, all: 
     repo.updateTestCase(req.id, tc.id, {
       status1: runs[0]!.status, status2: runs.length >= 2 ? last.status : null, realResult: last.real_result || null,
       evidence: last.evidence, comment: composeComment(runs, bugLine(ctx, tc.id, state)),
+      ...(last.baseline !== undefined ? { baseline: last.baseline } : {}),
     });
   }
 }
@@ -243,13 +254,34 @@ async function commitTesterOutput(ctx: StageContext, baseline: string[], msg: st
   return ctx.git.commitPaths([...tracked, ...created].filter(isTesterPath), msg);
 }
 
+/**
+ * Bugs closed by an accepted CR (note "Đóng do CR-NN", see applyAcceptedChange) have their GitLab issue closed here,
+ * once (FlowState.crClosedIssues), with the note as explanation.
+ */
+async function closeCrIssues(ctx: StageContext, gl: ProjectGitLab | undefined, state: FlowState): Promise<void> {
+  if (!gl) return;
+  const done = new Set(state.crClosedIssues ?? []);
+  for (const b of ctx.repo.listBugs(ctx.req.id)) {
+    const key = `${b.tcId}@${b.note ?? ''}`;
+    if (b.status !== 'closed' || !b.note || !b.gitlabIid || done.has(key)) continue;
+    await gl.client.addIssueNote(gl.pid, b.gitlabIid, `${b.note} (yêu cầu thay đổi đã được chấp nhận) — đóng issue.`);
+    await gl.client.updateIssue(gl.pid, b.gitlabIid, { state_event: 'close' });
+    done.add(key);
+    state.crClosedIssues = [...done];
+    writeFlowState(ctx.ws, state);
+    ctx.log(`Đóng issue của ${b.tcId}: ${b.note}`);
+  }
+}
+
 type Plan = { kind: 'test'; targets: TestCaseRow[]; regression: boolean } | { kind: 'bugfix'; failing: string[] } | { kind: 'done' };
 
 /**
- * What TEST does next, from the run history:
- * - TCs never run, and F TCs with a fix merged after their last run (or whose bug is parked for a human) → test them;
+ * What TEST does next, from the run history of the ACTIVE test cases (cancelled ones are never tested):
+ * - TCs never run or without a result at the current baseline (a CR changed the request since), and F TCs with a
+ *   merge after their last run (or whose bug is parked for a human) → test them;
  * - else F TCs without a new fix (e.g. a rerun after a crash) → BUGFIX without re-testing;
- * - else a fix was merged after the last run of some P TC → one regression run of every non-PE TC;
+ * - else something was merged into the integration branch (bug fix, task or feedback item) after the last run of
+ *   some P TC → one regression run of every non-PE TC;
  * - else done.
  */
 function plan(ctx: StageContext, all: TestCaseRow[], state: FlowState): Plan {
@@ -257,7 +289,7 @@ function plan(ctx: StageContext, all: TestCaseRow[], state: FlowState): Plan {
   const fixedSince = (r: TestRun): boolean => state.lastFixSeq > r.seq;
   const retest = all.filter(tc => {
     const r = last(tc.id);
-    if (!r) return true;
+    if (!r || !hasCurrentResult(tc, r, ctx.baseline)) return true;
     return r.status === 'F' && (fixedSince(r) || ctx.repo.getBug(ctx.req.id, tc.id)?.status === 'needs_human');
   });
   if (retest.length) return { kind: 'test', targets: retest, regression: false };
@@ -279,19 +311,21 @@ function plan(ctx: StageContext, all: TestCaseRow[], state: FlowState): Plan {
 export async function test(ctx: StageContext): Promise<StageOutcome> {
   const { ws, req, repo } = ctx;
   const all = sortedTestCases(repo, req.id);
-  if (!all.length) return { kind: 'fail', error: 'Chưa có test case — hãy chạy lại giai đoạn PLANNING.' };
+  const active = all.filter(tc => tc.scopeStatus === 'active');
+  if (!active.length) return { kind: 'fail', error: 'Chưa có test case còn hiệu lực — hãy chạy lại giai đoạn PLANNING.' };
   const bad = all.find(tc => !safeTcId(tc.id));
   if (bad) return { kind: 'fail', error: `Mã test case không hợp lệ: ${bad.id}` };
   const branch = await prepareIntegration(ctx);
   const state = readFlowState(ws);
   const gl = projectGitLab(ctx);
 
+  await closeCrIssues(ctx, gl, state);
   await reconcile(ctx, gl, all, state);
-  let p = plan(ctx, all, state);
+  let p = plan(ctx, active, state);
 
   if (p.kind === 'test') {
     const { targets, regression } = p;
-    if (regression) ctx.log(`Đã có bản sửa lỗi sau lần kiểm thử trước → kiểm thử hồi quy ${targets.length} test case`);
+    if (regression) ctx.log(`Đã có thay đổi được merge vào nhánh tích hợp sau lần kiểm thử trước → kiểm thử hồi quy ${targets.length} test case`);
     const baseline = await ctx.git.untracked();
     const r = await runTester(ctx, branch, targets, state);
     if (!r.ok) return { kind: 'fail', error: `Tester: ${r.error}` };
@@ -300,7 +334,7 @@ export async function test(ctx: StageContext): Promise<StageOutcome> {
       const runs = (state.runs[res.tc_id] ??= []);
       runs.push({
         run: runs.length + 1, seq: ++state.clock, status: res.status, real_result: res.real_result, comment: res.comment,
-        evidence: copyEvidence(ws.evidenceDir, ws.artifactsDir, res.tc_id),
+        evidence: copyEvidence(ws.evidenceDir, ws.artifactsDir, res.tc_id), baseline: ctx.baseline,
       });
     }
     writeFlowState(ws, state); // the results are the checkpoint: a rerun reconciles instead of re-testing
@@ -309,9 +343,9 @@ export async function test(ctx: StageContext): Promise<StageOutcome> {
     await reconcile(ctx, gl, all, state);
     const runLabel = [...new Set(targets.map(t => state.runs[t.id]!.length))].join(',');
     if (await commitTesterOutput(ctx, baseline, `test(devflow): ${req.id} kết quả kiểm thử lần ${runLabel}`)) await pushIfRemote(ctx, branch);
-    p = plan(ctx, all, state);
+    p = plan(ctx, active, state);
   }
-  await writeTestCases(templatePath(ctx.cfg, 'testcase'), sortedTestCases(repo, req.id).map(tcSheetRow), join(ws.artifactsDir, testCaseXlsxName(req.id)));
+  await writeTestCases(templatePath(ctx.cfg, 'testcase'), sortedTestCases(repo, req.id).map(tcSheetRow), join(ws.artifactsDir, artifactName('TestCase', req.id, ctx.baseline)));
 
   if (p.kind === 'bugfix') {
     ctx.log(`Còn ${p.failing.length} test case F: ${p.failing.join(', ')} → sửa lỗi`, 'warn');

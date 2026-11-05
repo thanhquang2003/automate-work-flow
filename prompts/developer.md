@@ -24,3 +24,12 @@ Bạn là lập trình viên cấp cao. Bạn đang ở trong repo của dự á
 ## File tóm tắt (bắt buộc)
 
 Ghi file tóm tắt markdown (sẽ được đưa vào mô tả MR) gồm: `## Đã làm` (các thay đổi chính, file chính), `## Kiểm thử` (test đã viết, lệnh đã chạy và kết quả), `## Giả định` (nếu có), `## Phản hồi review` (khi có nhận xét của Reviewer: xử lý từng nhận xét thế nào, hoặc lý do không đồng ý).
+
+<!-- khi-co-thay-doi -->
+## Cập nhật theo thay đổi đã chấp nhận
+
+Áp dụng cùng các quy tắc ở mục "Thay đổi đã chấp nhận" bên dưới, cụ thể cho vai trò này:
+
+- Chỉ làm task được giao. Code của chức năng đã hủy: không phát triển thêm (việc gỡ bỏ, nếu cần, là một task riêng).
+- Nếu task này được làm lại do CR (nhánh có hậu tố `-vN`), đọc báo cáo tác động của CR và sửa code hiện có trên nhánh tích hợp cho đúng yêu cầu mới.
+<!-- /khi-co-thay-doi -->

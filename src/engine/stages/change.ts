@@ -11,7 +11,7 @@ import { typeTable } from './breakdown.js';
 import { OutputError, readJsonOutput, readTextOutput, runClaudeStep } from './claude-json.js';
 import {
   DOCS_PATHSPEC, answeredQuestions, answersPath, assumptionsPath, changeDir, codebaseMapPath, designFile, ensureOnBranch, integrationBranch,
-  missingHeadings, promptExtras, pushIfRemote,
+  latestArtifact, missingHeadings, promptExtras, pushIfRemote,
 } from './common.js';
 import { safeFileName, uniqueName } from './intake.js';
 
@@ -91,8 +91,8 @@ function artifactsText(ctx: StageContext, crIds: Set<string>): string {
     ['Bản đồ mã nguồn', codebaseMapPath(ws)],
   ];
   const lines = items.map(([label, p]) => `- ${label}: ${existsSync(p) ? `\`${p}\`` : '(chưa có)'}`);
-  const tcBooks = existsSync(ws.artifactsDir) ? readdirSync(ws.artifactsDir).filter(n => /^TestCase_.*\.xlsx$/i.test(n)).sort() : [];
-  lines.push(`- Kết quả kiểm thử (file test case): ${tcBooks.length ? tcBooks.map(n => `\`${join(ws.artifactsDir, n)}\``).join(', ') : '(chưa có)'}`);
+  const tcBook = latestArtifact(ws, 'TestCase', ctx.req.id);
+  lines.push(`- Kết quả kiểm thử (file test case mới nhất): ${tcBook ? `\`${tcBook}\`` : '(chưa có)'}`);
   const changes = join(ws.devflowDir, 'changes');
   const older = existsSync(changes) ? readdirSync(changes).filter(n => /^CR-\d+$/.test(n) && !crIds.has(n)).sort() : [];
   lines.push(`- Báo cáo tác động của các CR trước: ${older.length ? older.map(n => `\`${join(changes, n, 'impact.md')}\``).join(', ') : '(không có)'}`);
@@ -251,7 +251,7 @@ export async function change(ctx: StageContext): Promise<StageOutcome> {
     existing_questions: existingQuestionsText(ctx),
     next_question_no: String(maxQ + 1).padStart(2, '0'),
     type_catalog: typeTable(cat),
-  }, promptExtras(ctx, outputs));
+  }, { ...promptExtras(ctx, outputs), changes: undefined }); // earlier CRs are listed in the artifacts section instead
 
   const r = await runClaudeStep(ctx, {
     prompt,

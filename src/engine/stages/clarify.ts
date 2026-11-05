@@ -5,8 +5,9 @@ import type { StageContext, StageOutcome } from '../pipeline.js';
 import { createSurveyLink } from '../survey.js';
 import { MAX_CLARIFY_ROUNDS, openQuestions, writeAnswers, writeAssumptions } from './common.js';
 
-export function questionsFileName(reqId: string, round: number): string {
-  return `Questions_${reqId}_round${round}.xlsx`;
+/** Questions workbook of a round; after a change request (baseline > 1, rounds restart at 1) the baseline is included. */
+export function questionsFileName(reqId: string, round: number, baseline = 1): string {
+  return `Questions_${reqId}${baseline > 1 ? `_v${baseline}` : ''}_round${round}.xlsx`;
 }
 
 /** First run: export the open questions (Excel, + survey link in server mode) and wait for the customer. */
@@ -19,9 +20,13 @@ async function ask(ctx: StageContext): Promise<StageOutcome> {
     ctx.log('Không còn câu hỏi nào chưa trả lời. Chuyển sang bóc tách chức năng.');
     return { kind: 'goto', stage: 'BREAKDOWN' };
   }
+  // Still-open questions numbered under an earlier baseline (a CR reset the round counter; CR questions too)
+  // move to this round, so the survey link of this round (which shows rounds <= its own) lists every one of them.
+  const stale = open.filter(q => q.round > round);
+  if (stale.length) repo.upsertQuestions(req.id, round, stale);
   const dir = join(ws.artifactsDir, 'questions');
   mkdirSync(dir, { recursive: true });
-  const file = join(dir, questionsFileName(req.id, round));
+  const file = join(dir, questionsFileName(req.id, round, req.baselineVersion));
   writeFileSync(file, await exportQuestions(req.id, round, open, repo.latestAnswers(req.id)));
   ctx.log(`Đã xuất ${open.length} câu hỏi vòng ${round} ra ${file}. Gửi file cho khách hàng rồi tải lên file đã trả lời.`);
 

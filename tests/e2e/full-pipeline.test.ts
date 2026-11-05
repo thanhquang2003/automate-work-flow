@@ -147,9 +147,9 @@ describe('end-to-end pipeline over HTTP', () => {
 
     // ---- artifacts ----
     const art = join(t.cfg.dataDir, 'workspaces', id, 'artifacts');
-    for (const f of [`TKCT_${id}.docx`, `TKDB_${id}.docx`, `ULNL_${id}.xlsx`, `TestCase_${id}.xlsx`, 'report.md']) expect(existsSync(join(art, f)), f).toBe(true);
+    for (const f of [`TKCT_${id}_v1.docx`, `TKDB_${id}_v1.docx`, `ULNL_${id}_v1.xlsx`, `TestCase_${id}_v1.xlsx`, 'report.md']) expect(existsSync(join(art, f)), f).toBe(true);
     const tc = new ExcelJS.Workbook();
-    await tc.xlsx.readFile(join(art, `TestCase_${id}.xlsx`));
+    await tc.xlsx.readFile(join(art, `TestCase_${id}_v1.xlsx`));
     const sh = tc.getWorksheet('2. FUNCTIONAL TESTCASE')!;
     let row = 0;
     sh.eachRow((r, n) => { if (text(r.getCell('A').value) === FAILS_FIRST) row = n; });

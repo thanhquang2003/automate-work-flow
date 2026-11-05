@@ -119,3 +119,13 @@ Mục nào không áp dụng (ví dụ không có Trigger) thì vẫn giữ tiê
 - Mỗi bảng được nhắc trong thiết kế chi tiết đều có trong TKDB, và ngược lại.
 - Mọi giả định đã được liệt kê ở PHỤ LỤC > Câu hỏi mở và giả định.
 - Có ít nhất các file sơ đồ: mô hình tổng thể, luồng dữ liệu nghiệp vụ, mô hình quan hệ dữ liệu.
+
+<!-- khi-co-thay-doi -->
+## Cập nhật theo thay đổi đã chấp nhận
+
+Áp dụng cùng các quy tắc ở mục "Thay đổi đã chấp nhận" bên dưới, cụ thể cho vai trò này:
+
+- Cập nhật `tkct.md`, `tkdb.md` và các sơ đồ hiện có: chỉ sửa phần bị ảnh hưởng, thêm phần thiết kế chi tiết cho chức năng mới.
+- Phần thiết kế của chức năng đã hủy: giữ tiêu đề, ghi rõ "(Đã hủy theo CR-NN)" ở đầu phần, không mô tả như phạm vi còn hiệu lực.
+- **Không** viết mục "Lịch sử thay đổi": DevFlow tự sinh bảng này từ dữ liệu CR vào PHỤ LỤC của TKCT.
+<!-- /khi-co-thay-doi -->

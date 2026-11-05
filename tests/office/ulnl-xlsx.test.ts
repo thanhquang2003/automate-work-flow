@@ -105,4 +105,26 @@ describe('ulnl-xlsx', () => {
       expect(sqrefs).toEqual(['M9:M' + Math.max(8 + n, 20)]);
     }
   });
+
+  it('cancelled feature row stays visible with "Hủy theo CR-NN" and contributes no effort', async () => {
+    const fs: UlnlFeature[] = [
+      { code: 'F01-LOG', name: 'Đăng nhập', description: 'd', type_code: 'NVJ2-PTM', unit_test: true, note: '' },
+      { code: 'F02-RPT', name: 'Báo cáo', description: 'd', type_code: 'BC1', unit_test: false, note: 'ghi chú', cancelledBy: 'CR-02' },
+    ];
+    const nf: UlnlNonFunc[] = [{ code: 'PM', name: 'Quản lý dự án', description: 'PM', effort_mh: 5 }, { code: 'SIT', name: 'SIT', description: 'x', effort_mh: 7, cancelledBy: 'CR-02' }];
+    const out = join(dir, 'cancel.xlsx');
+    await writeUlnl(TEMPLATE, fs, nf, 't', out);
+    const wb = await loadWorkbook(out);
+    const ws = wb.getWorksheet('EFFORT_FUNCTION')!;
+    expect(ws.getCell('B10').value).toBe('F02-RPT');
+    expect(String(ws.getCell('X10').value)).toContain('Hủy theo CR-02');
+    expect(String(ws.getCell('X10').value)).toContain('ghi chú');
+    for (const col of ['E', 'F', 'G', 'H', 'I']) expect(ws.getCell(`${col}10`).value).toBe(0);
+    expect(val(ws.getCell('I8').value)).toBe(val(ws.getCell('I9').value));
+    const n = wb.getWorksheet('EFFORT NON-FUNCTION')!;
+    expect(n.getCell('B11').value).toBe('SIT');
+    expect(n.getCell('E11').value).toBe(0);
+    expect(String(n.getCell('D11').value)).toContain('Hủy theo CR-02');
+    expect(val(n.getCell('E15').value)).toBe(5);
+  });
 });

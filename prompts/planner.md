@@ -45,3 +45,14 @@ Danh sách chức năng (id — code — tên):
 
 - Mọi `feature_id` có trong danh sách chức năng; mọi `depends_on` trỏ tới task có thật; không có phụ thuộc vòng.
 - Mỗi chức năng có ít nhất một task và một test case; id test case đúng mẫu `TC-<code>-NN`, không trùng.
+
+<!-- khi-co-thay-doi -->
+## Cập nhật theo thay đổi đã chấp nhận
+
+Áp dụng cùng các quy tắc ở mục "Thay đổi đã chấp nhận" bên dưới, cụ thể cho vai trò này:
+
+- Cập nhật `tasks.json` và `testcases.json` hiện có: giữ nguyên id; ghi đủ mọi task/test case cũ (kể cả đã xong, đã hủy).
+- Task đã xong và không bị ảnh hưởng: giữ nguyên, không sửa. Task mới có thể phụ thuộc (`depends_on`) task đã xong.
+- Khi có chức năng bị bỏ (CR loại "Bỏ chức năng"): đánh dấu task/test case của chức năng đó `"scope_status": "cancelled"`, và nếu code đã có trên nhánh tích hợp thì thêm một task thường "Gỡ bỏ chức năng <code>" (gắn vào một chức năng còn hiệu lực bị ảnh hưởng gần nhất) — không revert git.
+- Test case bị ảnh hưởng: sửa `purpose`/`steps`/`expected` cho đúng thiết kế mới (DevFlow sẽ kiểm thử lại); test case mới đánh số tiếp nối trong từng chức năng.
+<!-- /khi-co-thay-doi -->

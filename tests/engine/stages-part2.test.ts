@@ -182,7 +182,7 @@ describe('stages part 2', () => {
     expect(calls[0]!.prompt).toContain('DANGNHAP');
     expect(p.repo.listTasks(p.r.id).map(t => [t.id, t.dependsOn, t.status])).toEqual([['T-01', [], 'todo'], ['T-02', ['T-01'], 'todo']]);
     expect(p.repo.listTestCases(p.r.id).map(t => t.id)).toEqual(['TC-BAOCAO-01', 'TC-DANGNHAP-01']);
-    const xlsx = join(p.ws.artifactsDir, `TestCase_${p.r.id}.xlsx`);
+    const xlsx = join(p.ws.artifactsDir, `TestCase_${p.r.id}_v1.xlsx`);
     expect(existsSync(xlsx)).toBe(true);
     const sh = await readSheet(xlsx);
     expect([sh.row(12).id, sh.row(13).id]).toEqual(['TC-DANGNHAP-01', 'TC-BAOCAO-01']);
@@ -304,7 +304,7 @@ describe('stages part 2', () => {
     expect(get('TC-DANGNHAP-02').comment).toContain('thiếu lý do PE');
     // Offline: bugs only in DB.
     expect(p.repo.listBugs(p.r.id).map(b => [b.tcId, b.status, b.gitlabIid])).toEqual([['TC-BAOCAO-01', 'open', null], ['TC-DANGNHAP-02', 'open', null]]);
-    const sh = await readSheet(join(p.ws.artifactsDir, `TestCase_${p.r.id}.xlsx`));
+    const sh = await readSheet(join(p.ws.artifactsDir, `TestCase_${p.r.id}_v1.xlsx`));
     const row = [12, 13, 14].map(n => sh.row(n)).find(x => x.id === 'TC-DANGNHAP-01')!;
     expect(row.s1).toBe('P');
     expect(row.evidence).toBe('evidence/TC-DANGNHAP-01/shot.png');
@@ -430,7 +430,7 @@ describe('stages part 2', () => {
     const report = readFileSync(join(p.ws.artifactsDir, 'report.md'), 'utf8');
     expect(report).toContain(p.r.id);
     expect(report).toMatch(/P\s*\|\s*2/);
-    expect(report).toContain(`TestCase_${p.r.id}.xlsx`);
+    expect(report).toContain(`TestCase_${p.r.id}_v1.xlsx`);
     expect(report).toMatch(/không có GitLab|chưa kết nối GitLab/i);
   });
 
@@ -527,7 +527,7 @@ describe('stages part 2', () => {
     expect(a.comment).toContain('http://gl/grp/app/-/issues/1');
     expect([b.status1, b.status2]).toEqual(['P', null]);
     expect(b.evidence).toEqual(['evidence/TC-BAOCAO-01/ok.png']);
-    const sh = await readSheet(join(p.ws.artifactsDir, `TestCase_${p.r.id}.xlsx`));
+    const sh = await readSheet(join(p.ws.artifactsDir, `TestCase_${p.r.id}_v1.xlsx`));
     expect([sh.row(12).id, sh.row(12).s1, sh.row(13).id, sh.row(13).s1]).toEqual(['TC-DANGNHAP-01', 'F', 'TC-BAOCAO-01', 'P']);
     expect(p.repo.getRequest(p.r.id)!.stage).toBe('BUGFIX');
   });

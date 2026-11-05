@@ -186,11 +186,12 @@ Nhân viên cũng có thể nhập hoặc sửa câu trả lời thay khách (gh
 
 Tab **Tài liệu** liệt kê và cho tải từng file, hoặc **Tải gói kết quả (.zip)** gồm cả evidence:
 
-- `TKCT_<REQ>.docx`, `TKDB_<REQ>.docx`: thiết kế chi tiết và thiết kế cơ sở dữ liệu.
-- `ULNL_<REQ>.xlsx`: ước lượng nỗ lực theo chức năng và hạng mục phi chức năng.
-- `TestCase_<REQ>.xlsx`: test case, kết quả lần 1 và lần 2, đường dẫn evidence, comment.
+- `TKCT_<REQ>_v<N>.docx`, `TKDB_<REQ>_v<N>.docx`: thiết kế chi tiết và thiết kế cơ sở dữ liệu (TKCT có PHỤ LỤC › "Lịch sử thay đổi" khi đã có yêu cầu thay đổi được chấp nhận).
+- `ULNL_<REQ>_v<N>.xlsx`: ước lượng nỗ lực theo chức năng và hạng mục phi chức năng; chức năng bị hủy vẫn hiện, ghi "Hủy theo CR-NN" và không tính nỗ lực.
+- `TestCase_<REQ>_v<N>.xlsx`: test case, kết quả lần 1 và lần 2, đường dẫn evidence, comment; test case bị hủy ghi "Hủy theo CR-NN" và không tính vào P/F/PE.
+- `<N>` là phiên bản yêu cầu (tăng mỗi khi chấp nhận một yêu cầu thay đổi); các phiên bản cũ được giữ lại. File không có hậu tố `_v<N>` (tạo trước khi có phiên bản) được coi là v1.
 - `evidence/<TC-ID>/`: ảnh chụp, request/response, log chứng minh test case Pass.
-- `report.md`: báo cáo tổng kết (số P/F/PE, bug, MR cuối, giả định còn mở).
+- `report.md`: báo cáo tổng kết (số P/F/PE, bug, MR cuối, giả định còn mở; mục "Các thay đổi trong vòng này" khi vòng lặp có yêu cầu thay đổi).
 - Tài liệu markdown, JSON, sơ đồ `.mmd` cũng được commit lên nhánh `devflow/<REQ>` trong thư mục `docs/devflow/`.
 
 ### Bug trên GitLab

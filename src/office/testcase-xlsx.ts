@@ -1,6 +1,7 @@
 import type ExcelJS from 'exceljs';
 import { loadWorkbook } from './xlsx-load.js';
 import { loadMapping, clearRow, colNo } from './mapping.js';
+import { cancelNote } from './ulnl-xlsx.js';
 
 export interface TcSheetRow {
   id: string;
@@ -13,6 +14,8 @@ export interface TcSheetRow {
   status2?: 'P' | 'F' | 'PE';
   evidence?: string[];
   comment?: string;
+  /** CR that cancelled the test case: the row stays visible, comment "Hủy theo CR-NN", no status (not counted). */
+  cancelledBy?: string;
 }
 
 export async function writeTestCases(templatePath: string, rows: TcSheetRow[], outPath: string): Promise<void> {
@@ -40,12 +43,14 @@ export async function writeTestCases(templatePath: string, rows: TcSheetRow[], o
     row.getCell(col.steps).value = tc.steps;
     row.getCell(col.expected).value = tc.expected;
     if (tc.real_result) row.getCell(col.real).value = tc.real_result;
-    if (tc.status1) row.getCell(col.pre1).value = tc.status1;
-    if (tc.status2) row.getCell(col.pre2).value = tc.status2;
+    const cancelled = tc.cancelledBy !== undefined;
+    if (tc.status1 && !cancelled) row.getCell(col.pre1).value = tc.status1;
+    if (tc.status2 && !cancelled) row.getCell(col.pre2).value = tc.status2;
     if (tc.evidence && tc.evidence.length > 0) {
       row.getCell(col.evidence).value = { text: tc.evidence.join('\n'), hyperlink: tc.evidence[0]! };
     }
-    if (tc.comment) row.getCell(col.comment).value = tc.comment;
+    const comment = cancelled ? [cancelNote(tc.cancelledBy!), tc.comment].filter(Boolean).join('\n') : tc.comment;
+    if (comment) row.getCell(col.comment).value = comment;
   });
 
   // Live COUNTIF formulas as in the template, over the first run (pre1) and second run (pre2) columns.
@@ -57,6 +62,7 @@ export async function writeTestCases(templatePath: string, rows: TcSheetRow[], o
   for (const [letter, key] of runs) {
     const counts = { P: 0, F: 0, PE: 0 };
     for (const tc of rows) {
+      if (tc.cancelledBy !== undefined) continue;
       const s = tc[key];
       if (s) counts[s]++;
     }

@@ -3,6 +3,7 @@ import type { Config } from '../../config.js';
 import type { Repo } from '../../db/repo.js';
 import type { RequestRow } from '../../domain/types.js';
 import { createSurveyLink, surveyUrl } from '../../engine/survey.js';
+import { questionsFileName } from '../../engine/stages/clarify.js';
 import { openQuestions } from '../../engine/stages/common.js';
 import { exportQuestions, importAnswers } from '../../office/questions-xlsx.js';
 import type { WebDeps } from '../server.js';
@@ -41,7 +42,7 @@ export function questionRoutes(app: FastifyInstance, cfg: Config, { repo, pipeli
     const open = openQuestions(repo, id);
     const list = open.length ? open : repo.listQuestions(id);
     const buf = await exportQuestions(id, round, list, repo.latestAnswers(id));
-    reply.header('Content-Disposition', `attachment; filename="Questions_${id}_round${round}.xlsx"`);
+    reply.header('Content-Disposition', `attachment; filename="${questionsFileName(id, round, r.baselineVersion)}"`);
     return reply.type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').send(buf);
   });
 

@@ -3,7 +3,7 @@ import { QuestionsOut, type Question } from '../../domain/types.js';
 import { buildPrompt } from '../prompt.js';
 import type { StageContext, StageOutcome } from '../pipeline.js';
 import { OutputError, readJsonOutput, readTextOutput, runClaudeStep } from './claude-json.js';
-import { MAX_CLARIFY_ROUNDS, answeredQuestions, contextFileVars, missingHeadings, openQuestions, promptExtras, writeAssumptions } from './common.js';
+import { MAX_CLARIFY_ROUNDS, answeredQuestions, contextFileVars, headings, missingHeadings, openQuestions, promptExtras, writeAssumptions } from './common.js';
 
 /** H1 sections of analysis.md that DevFlow relies on (see prompts/analyst.md). */
 const ANALYSIS_HEADINGS: [number, string][] = [[1, 'Chỗ hổng đã phát hiện'], [1, 'Câu hỏi mở và giả định']];
@@ -81,6 +81,12 @@ export async function analysis(ctx: StageContext): Promise<StageOutcome> {
       try {
         const md = await readTextOutput(analysisFile, 10);
         const missing = missingHeadings(md, ANALYSIS_HEADINGS);
+        // After accepted CRs each one needs its own "Thay đổi theo CR-NN" section (spec §4.4).
+        const all = [1, 2, 3].flatMap(l => headings(md, l));
+        for (const { cr } of ctx.changes) {
+          const want = `thay đổi theo ${cr.id.toLowerCase()}`;
+          if (!all.some(h => h === want || (h.startsWith(want) && !/\d/.test(h[want.length] ?? '')))) missing.push(`# Thay đổi theo ${cr.id}`);
+        }
         if (missing.length) errs.push(`File ${analysisFile} thiếu tiêu đề bắt buộc: ${missing.map(h => `"${h}"`).join(', ')}`);
       } catch (e) { errs.push((e as Error).message); }
       let questions: Question[] = [];

@@ -36,3 +36,11 @@ Loại phần mềm của yêu cầu: {{software_types}}. Môi trường mobile:
 3. Không commit, không push, không đổi nhánh. Không ghi bí mật vào evidence (che mật khẩu/token).
 4. Dừng các tiến trình đã khởi động (server, container) trước khi kết thúc.
 5. Mỗi test case được giao có đúng một kết quả trong `results`; `evidence` liệt kê đường dẫn tuyệt đối các file evidence của test case đó.
+
+<!-- khi-co-thay-doi -->
+## Cập nhật theo thay đổi đã chấp nhận
+
+Áp dụng cùng các quy tắc ở mục "Thay đổi đã chấp nhận" bên dưới, cụ thể cho vai trò này:
+
+- Kiểm thử theo nội dung **hiện tại** của test case (có thể đã được sửa theo CR). Không kiểm thử test case đã hủy.
+<!-- /khi-co-thay-doi -->

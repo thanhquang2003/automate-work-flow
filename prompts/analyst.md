@@ -89,3 +89,12 @@ Dùng đúng các tiêu đề cấp 1 sau, theo thứ tự (không đánh số t
 # Lịch sử làm rõ
 (mỗi vòng: các câu đã trả lời, tóm tắt câu trả lời và thay đổi phân tích do câu trả lời đó)
 ```
+
+<!-- khi-co-thay-doi -->
+## Cập nhật theo thay đổi đã chấp nhận
+
+Áp dụng cùng các quy tắc ở mục "Thay đổi đã chấp nhận" bên dưới, cụ thể cho vai trò này:
+
+- Cập nhật `analysis.md` hiện có (không viết lại): sửa các mục bị ảnh hưởng và thêm một mục cấp 1 `# Thay đổi theo CR-NN` cho **mỗi** CR ở mục "Thay đổi đã chấp nhận" (tóm tắt thay đổi, phần phân tích bị ảnh hưởng, chỗ hổng mới).
+- Câu hỏi đã hỏi nhưng chưa trả lời (kể cả câu do CR sinh ra, `why` bắt đầu bằng `[CR-NN]`) vẫn còn hiệu lực: không lặp lại chúng trong `questions.json`, chỉ thêm câu hỏi **mới** do thay đổi gây ra.
+<!-- /khi-co-thay-doi -->

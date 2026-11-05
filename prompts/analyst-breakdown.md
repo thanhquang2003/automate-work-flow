@@ -49,3 +49,13 @@ Chỉ được dùng **chính xác** một mã trong bảng dưới đây (đọ
 - `kind`: `"function"` hoặc `"nonfunction"`.
 
 Tự kiểm tra trước khi ghi: mọi `type_code` có trong bảng; mọi chức năng/use case trong `analysis.md` đã có dòng tương ứng; không có hai dòng trùng phạm vi.
+
+<!-- khi-co-thay-doi -->
+## Cập nhật theo thay đổi đã chấp nhận
+
+Áp dụng cùng các quy tắc ở mục "Thay đổi đã chấp nhận" bên dưới, cụ thể cho vai trò này:
+
+- Cập nhật `features.json` hiện có: giữ nguyên `id`, `code` và nội dung các chức năng không bị ảnh hưởng; ghi đủ mọi chức năng cũ (kể cả đã hủy).
+- Chức năng bị bỏ theo CR: giữ dòng với `"scope_status": "cancelled"` — DevFlow ghi "Hủy theo CR-NN" ở cột ghi chú ULNL và không tính nỗ lực.
+- Chức năng mới: `id`/`code` mới tiếp nối, không dùng lại id/code của chức năng đã hủy.
+<!-- /khi-co-thay-doi -->

@@ -67,4 +67,24 @@ describe('testcase-xlsx', () => {
     expect(v.text).toBe('evidence/TC-LOGIN-01/a.png\nevidence/TC-LOGIN-01/b.png');
     expect(ws.getCell('M13').value ?? null).toBeNull();
   });
+
+  it('cancelled row stays visible with "Hủy theo CR-NN" and is excluded from P/F/PE counts', async () => {
+    const out = join(dir, 'cancel.xlsx');
+    const rs: TcSheetRow[] = [
+      { id: 'TC-A-01', purpose: 'a', data: '', steps: '1.', expected: 'x', status1: 'P' },
+      { id: 'TC-A-02', purpose: 'b', data: '', steps: '1.', expected: 'x', status1: 'F', status2: 'P', comment: 'cũ', cancelledBy: 'CR-01' },
+    ];
+    await writeTestCases(TEMPLATE, rs, out);
+    const ws = (await loadWorkbook(out)).getWorksheet('2. FUNCTIONAL TESTCASE')!;
+    expect(ws.getCell('A13').value).toBe('TC-A-02');
+    expect(String(ws.getCell('N13').value)).toMatch(/^Hủy theo CR-01/);
+    expect(String(ws.getCell('N13').value)).toContain('cũ');
+    expect(ws.getCell('I13').value ?? null).toBeNull();
+    expect(ws.getCell('J13').value ?? null).toBeNull();
+    const f = (a: string) => ws.getCell(a).value as { formula: string; result: number };
+    expect(f('I3').result).toBe(1);
+    expect(f('I4').result ?? 0).toBe(0);
+    expect(f('I6').result).toBe(1);
+    expect(f('J6').result ?? 0).toBe(0);
+  });
 });

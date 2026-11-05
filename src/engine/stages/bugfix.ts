@@ -39,7 +39,9 @@ function bugAssignment(ctx: StageContext, bug: BugRow, attempt: number): string 
 export async function bugfix(ctx: StageContext): Promise<StageOutcome> {
   const { repo, req, ws } = ctx;
   const gl = projectGitLab(ctx);
-  const bugs = repo.listBugs(req.id).filter(b => b.status === 'open' || b.status === 'fixing');
+  // Bugs of test cases cancelled by a change request are not fixed (normally already closed by the CR).
+  const cancelled = new Set(repo.listTestCases(req.id).filter(tc => tc.scopeStatus === 'cancelled').map(tc => tc.id));
+  const bugs = repo.listBugs(req.id).filter(b => (b.status === 'open' || b.status === 'fixing') && !cancelled.has(b.tcId));
   if (!bugs.length) {
     ctx.log('Không còn bug cần sửa → kiểm thử lại');
     return { kind: 'goto', stage: 'TEST' };

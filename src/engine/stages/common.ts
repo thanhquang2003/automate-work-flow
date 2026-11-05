@@ -1,10 +1,10 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Repo } from '../../db/repo.js';
-import type { AnswerSource, QuestionRow, TestCaseRow, TestStatus } from '../../domain/types.js';
+import type { AnswerSource, ChangeRequestRow, QuestionRow, TestCaseRow, TestStatus } from '../../domain/types.js';
 import type { GitLabClient } from '../../gitlab/client.js';
 import type { TcSheetRow } from '../../office/testcase-xlsx.js';
-import type { PromptExtras, PromptOutput } from '../prompt.js';
+import { changesSection, type PromptExtras, type PromptOutput } from '../prompt.js';
 import type { StageContext } from '../pipeline.js';
 import type { Workspace } from '../workspace.js';
 
@@ -13,10 +13,11 @@ export const MAX_CLARIFY_ROUNDS = 5;
 /** Integration branch of a request. */
 export const integrationBranch = (reqId: string): string => `devflow/${reqId}`;
 
-/** Request context, input files and reviewer feedback for buildPrompt. */
+/** Request context, input files, reviewer feedback and accepted change requests for buildPrompt. */
 export function promptExtras(ctx: StageContext, outputs: PromptOutput[]): PromptExtras {
   const { req } = ctx;
   return {
+    changes: ctx.changes.length ? changesSection(ctx) : undefined,
     request: {
       id: req.id, title: req.title, description: req.description, perfReq: req.perfReq, nonfuncReq: req.nonfuncReq,
       softwareTypes: req.softwareTypes, projectKind: req.projectKind,
@@ -221,16 +222,22 @@ export async function prepareIntegration(ctx: StageContext): Promise<string> {
 }
 
 /** Per-request bookkeeping that has no DB column (test run history, issue URLs, bugfix review rounds, final MR). */
-/** One Tester result of a TC. `seq` orders runs against merged fixes (FlowState.clock). */
-export interface TestRun { run: number; seq: number; status: TestStatus; real_result: string; comment: string; evidence: string[] }
+/**
+ * One Tester result of a TC. `seq` orders runs against merges into the integration branch (FlowState.clock);
+ * `baseline` is the request baseline the run was made at (absent in runs recorded before change requests existed).
+ */
+export interface TestRun { run: number; seq: number; status: TestStatus; real_result: string; comment: string; evidence: string[]; baseline?: number }
 export interface FlowState {
   runs: Record<string, TestRun[]>;
   issueUrls: Record<string, string>;
   /** Highest run number per TC whose bug/issue sync is done (TEST reconcile is idempotent). */
   bugSynced: Record<string, number>;
-  /** Monotonic counter shared by test runs and merged fixes. */
+  /** Monotonic counter shared by test runs and merges into the integration branch. */
   clock: number;
-  /** `clock` value of the last merged bug fix (0 = none). */
+  /**
+   * `clock` value of the last merge into devflow/<REQ> — a bug fix, a DEVELOP task or a feedback item (0 = none).
+   * A P result older than this triggers the regression run (the name predates task merges counting).
+   */
   lastFixSeq: number;
   /** Review rounds of work items without a DB column (bug fixes, feedback items), by work key. */
   reviewRounds: Record<string, number>;
@@ -239,6 +246,10 @@ export interface FlowState {
   /** Number of DEVELOP gate-feedback work items done. */
   feedbackItems?: number;
   finalMrUrl?: string;
+  /** Baseline whose iteration summary was already added as a note on the open final MR (DONE is idempotent). */
+  finalMrNotedBaseline?: number;
+  /** Bugs closed by an accepted CR whose GitLab issue TEST already closed (`<TC>@<note>`). */
+  crClosedIssues?: string[];
 }
 
 const flowFile = (ws: Workspace): string => join(ws.root, 'flow-state.json');
@@ -264,7 +275,62 @@ export function sortedTestCases(repo: Repo, reqId: string): TestCaseRow[] {
   return repo.listTestCases(reqId).sort((a, b) => (a.featureId ?? '').localeCompare(b.featureId ?? '') || a.id.localeCompare(b.id));
 }
 
-export const testCaseXlsxName = (reqId: string): string => `TestCase_${reqId}.xlsx`;
+// ---- versioned artifacts (spec §4.4): <KIND>_<REQ>_v<N>.<ext>, N = baseline; older versions are kept ----
+
+export type ArtifactKind = 'TKCT' | 'TKDB' | 'ULNL' | 'TestCase';
+const ARTIFACT_EXT: Record<ArtifactKind, string> = { TKCT: 'docx', TKDB: 'docx', ULNL: 'xlsx', TestCase: 'xlsx' };
+
+/** File name of an artifact at a baseline: `TKCT_REQ-001_v2.docx`. */
+export function artifactName(kind: ArtifactKind, reqId: string, baseline: number): string {
+  return `${kind}_${reqId}_v${baseline}.${ARTIFACT_EXT[kind]}`;
+}
+
+const escRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Absolute path of the newest version of an artifact in ws.artifactsDir, or undefined when there is none.
+ * Names without a version suffix (written before versioning) count as v1; a suffixed v1 wins over the unsuffixed one.
+ */
+export function latestArtifact(ws: Workspace, kind: ArtifactKind, reqId: string): string | undefined {
+  if (!existsSync(ws.artifactsDir)) return undefined;
+  const re = new RegExp(`^${escRe(kind)}_${escRe(reqId)}(?:_v(\\d+))?\\.${ARTIFACT_EXT[kind]}$`);
+  let best: { name: string; v: number; suffixed: boolean } | undefined;
+  for (const name of readdirSync(ws.artifactsDir)) {
+    const m = re.exec(name);
+    if (!m) continue;
+    const cand = { name, v: m[1] ? Number(m[1]) : 1, suffixed: !!m[1] };
+    if (!best || cand.v > best.v || (cand.v === best.v && cand.suffixed && !best.suffixed)) best = cand;
+  }
+  return best && join(ws.artifactsDir, best.name);
+}
+
+// ---- incremental runs after accepted change requests (spec §4.4) ----
+
+/**
+ * True when stages must update earlier outputs instead of replacing them: accepted CRs are pending, or the request
+ * already went through a change (baseline > 1). Cancelled or omitted rows are then never deleted.
+ */
+export const isIncremental = (ctx: StageContext): boolean => ctx.changes.length > 0 || ctx.baseline > 1;
+
+export type ScopeKind = 'feature' | 'task' | 'test_case';
+
+/**
+ * CR responsible for a scope change of an item: the accepted CR whose impact names the item (removed, modified or
+ * affected), else the latest accepted CR. Undefined when there is no accepted change.
+ */
+export function crResponsible(ctx: StageContext, kind: ScopeKind, id: string): string | undefined {
+  for (const { cr, impact } of [...ctx.changes].reverse()) {
+    const names = kind === 'feature'
+      ? [...impact.scope.remove, ...impact.scope.modify.map(m => m.feature_id), ...impact.affected.features]
+      : kind === 'task' ? impact.affected.tasks : impact.affected.test_cases;
+    if (names.includes(id)) return cr.id;
+  }
+  return ctx.changes.at(-1)?.cr.id;
+}
+
+/** Accepted or applied change requests (rejected ones carry baselineFrom too and must be filtered out). */
+export const effectiveChanges = (crs: ChangeRequestRow[]): ChangeRequestRow[] =>
+  crs.filter(c => (c.status === 'accepted' || c.status === 'applied') && c.baselineTo !== null).sort((a, b) => (a.baselineTo! - b.baselineTo!) || a.id.localeCompare(b.id));
 
 export const designFile = (ws: Workspace, name: 'tkct.md' | 'tkdb.md'): string => join(ws.devflowDir, 'design', name);
 
@@ -274,6 +340,7 @@ export function tcSheetRow(tc: TestCaseRow): TcSheetRow {
     id: tc.id, purpose: tc.purpose, data: tc.data, steps: tc.steps, expected: tc.expected,
     real_result: tc.realResult ?? undefined, status1: tc.status1 ?? undefined, status2: tc.status2 ?? undefined,
     evidence: tc.evidence, comment: tc.comment ?? undefined,
+    ...(tc.scopeStatus === 'cancelled' ? { cancelledBy: tc.changedByCr ?? '' } : {}),
   };
 }
 
