@@ -42,7 +42,7 @@ export async function buildServer(cfg: Config, deps: WebDeps): Promise<FastifyIn
     }
     if (!server) { req.user = currentUser(cfg, deps.repo, req); return; }
     if (PUBLIC_PREFIXES.some(p => path.startsWith(p))) return;
-    if (deps.repo.listUsers().length === 0) { if (path !== '/setup') return reply.redirect('/setup'); return; }
+    if (deps.repo.web.listUsers().length === 0) { if (path !== '/setup') return reply.redirect('/setup'); return; }
     req.user = currentUser(cfg, deps.repo, req);
     if (!req.user && !isPublic) return reply.redirect('/login');
   });

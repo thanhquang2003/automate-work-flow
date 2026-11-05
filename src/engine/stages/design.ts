@@ -41,7 +41,7 @@ export function changeHistoryMarkdown(repo: Repo, reqId: string): string {
   const req = repo.getRequest(reqId);
   const crs = effectiveChanges(repo.listChangeRequests(reqId));
   if (!req || !crs.length) return '';
-  const who = (id: number | null): string => (id === null ? 'DevFlow (tự động)' : (repo.getUser(id)?.username ?? `#${id}`));
+  const who = (id: number | null): string => (id === null ? 'DevFlow (tự động)' : (repo.web.getUser(id)?.username ?? `#${id}`));
   return [
     `## ${CHANGE_HISTORY_HEADING}`,
     '',

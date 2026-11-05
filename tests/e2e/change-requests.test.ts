@@ -261,7 +261,7 @@ describe('change requests end-to-end', () => {
     initRepo(ws.repoDir, `devflow/${r.id}`);
     writeProjectInfo(ws, { gitlab: false, branch: `devflow/${r.id}` });
     t.repo.updateRequest(r.id, { stage: 'CLARIFY', status: 'awaiting_customer' });
-    t.repo.createSurveyLink({ token: 'tokcr', requestId: r.id, round: 1, expiresAt: Date.now() + 86_400_000 });
+    t.repo.web.createSurveyLink({ token: 'tokcr', requestId: r.id, round: 1, expiresAt: Date.now() + 86_400_000 });
     const origin = new URL(t.cfg.publicBaseUrl).host;
     const sres = await t.app.inject({
       method: 'POST', url: '/s/tokcr', headers: { origin: t.cfg.publicBaseUrl, host: origin, 'content-type': 'application/x-www-form-urlencoded' },
@@ -271,7 +271,7 @@ describe('change requests end-to-end', () => {
     expect(t.repo.getChangeRequest(r.id, 'CR-01')).toMatchObject({ status: 'proposed', source: 'customer', description: 'Xin thêm xuất báo cáo Excel' });
     expect(t.repo.getRequest(r.id)).toMatchObject({ stage: 'CLARIFY', status: 'awaiting_customer' });
 
-    const u = t.repo.createUser({ username: 'staff', passwordHash: hashPassword('password1'), role: 'admin' });
+    const u = t.repo.web.createUser({ username: 'staff', passwordHash: hashPassword('password1'), role: 'admin' });
     const acc = await t.app.inject({
       method: 'POST', url: `/requests/${r.id}/changes/CR-01/accept-proposal`,
       headers: { origin: t.cfg.publicBaseUrl, host: origin, cookie: `devflow_sid=${signSession(t.cfg.secretKey, u.id)}`, 'content-type': 'application/x-www-form-urlencoded' }, payload: '',

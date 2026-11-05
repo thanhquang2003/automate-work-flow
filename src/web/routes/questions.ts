@@ -21,7 +21,7 @@ export function questionsTabData(repo: Repo, cfg: Config, r: RequestRow): Record
   const must = questions.filter(q => q.priority === 'must');
   return {
     r, questions, latest, SOURCE_LABELS, mode: cfg.mode,
-    surveys: repo.listSurveyLinks(r.id).map(s => ({ ...s, url: surveyUrl(cfg, s.token) })),
+    surveys: repo.web.listSurveyLinks(r.id).map(s => ({ ...s, url: surveyUrl(cfg, s.token) })),
     progress: { must: must.length, mustAnswered: must.filter(q => answered(q.id)).length, total: questions.length, answered: questions.filter(q => answered(q.id)).length },
     now: Date.now(),
   };

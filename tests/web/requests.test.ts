@@ -242,7 +242,7 @@ describe('web: server mode', () => {
     const first = await app.inject({ method: 'GET', url: '/' });
     expect(first.statusCode).toBe(302);
     expect(first.headers.location).toBe('/setup');
-    repo.createUser({ username: 'admin', passwordHash: hashPassword('password123'), role: 'admin' });
+    repo.web.createUser({ username: 'admin', passwordHash: hashPassword('password123'), role: 'admin' });
     const res = await app.inject({ method: 'GET', url: '/' });
     expect(res.statusCode).toBe(302);
     expect(res.headers.location).toBe('/login');
@@ -254,10 +254,10 @@ describe('web: server mode', () => {
     const { app, repo, cfg } = await boot(true);
     const setupRes = await app.inject({ method: 'POST', url: '/setup', payload: 'username=admin&password=password123', headers: form });
     expect(setupRes.statusCode).toBe(302);
-    expect(repo.listUsers()).toHaveLength(1);
-    expect(repo.listUsers()[0]!.role).toBe('admin');
+    expect(repo.web.listUsers()).toHaveLength(1);
+    expect(repo.web.listUsers()[0]!.role).toBe('admin');
     expect((await app.inject({ method: 'POST', url: '/setup', payload: 'username=eve&password=password123', headers: form })).statusCode).toBe(302);
-    expect(repo.listUsers()).toHaveLength(1);
+    expect(repo.web.listUsers()).toHaveLength(1);
 
     const bad = await app.inject({ method: 'POST', url: '/login', payload: 'username=admin&password=nope', headers: form });
     expect(bad.statusCode).toBe(401);
@@ -278,7 +278,7 @@ describe('web: server mode', () => {
 
   it('POST from another origin is rejected (CSRF)', async () => {
     const { app, repo, cfg } = await boot(true);
-    const u = repo.createUser({ username: 'admin', passwordHash: hashPassword('password123'), role: 'admin' });
+    const u = repo.web.createUser({ username: 'admin', passwordHash: hashPassword('password123'), role: 'admin' });
     const cookie = `devflow_sid=${signSession(cfg.secretKey, u.id)}`;
     const r = mkReq(repo);
     const evil = await app.inject({ method: 'POST', url: `/requests/${r.id}/cancel`, headers: { cookie, origin: 'http://evil.example', host: 'localhost:3000' } });
@@ -297,7 +297,7 @@ describe('web: fix round 1', () => {
 
   it('login rate limit: 10 failures per ip+username then 429; success path unaffected for others', async () => {
     const { app, repo } = await boot(true);
-    repo.createUser({ username: 'admin', passwordHash: hashPassword('password123'), role: 'admin' });
+    repo.web.createUser({ username: 'admin', passwordHash: hashPassword('password123'), role: 'admin' });
     for (let i = 0; i < 10; i++) {
       expect((await app.inject({ method: 'POST', url: '/login', payload: 'username=admin&password=bad', headers: form })).statusCode).toBe(401);
     }
@@ -314,7 +314,7 @@ describe('web: fix round 1', () => {
     const s = setup({ mode: 'server', secretKey: 'test-secret', publicBaseUrl: 'https://devflow.example.com' });
     const app = await buildServer(s.cfg, { repo: s.repo, pipeline: s.pipeline });
     apps.push(app);
-    const u = s.repo.createUser({ username: 'admin', passwordHash: hashPassword('password123'), role: 'admin' });
+    const u = s.repo.web.createUser({ username: 'admin', passwordHash: hashPassword('password123'), role: 'admin' });
     const cookie = `devflow_sid=${signSession(s.cfg.secretKey, u.id)}`;
     const r = mkReq(s.repo);
     const viaProxy = await app.inject({ method: 'POST', url: `/requests/${r.id}/pause`, headers: { cookie, origin: 'https://devflow.example.com', host: 'internal:3700' } });

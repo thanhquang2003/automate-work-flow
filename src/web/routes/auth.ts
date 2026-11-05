@@ -29,7 +29,7 @@ export function authRoutes(app: FastifyInstance, cfg: Config, { repo }: WebDeps)
     if (recent.length >= MAX_FAILS) {
       return reply.code(429).type('text/html; charset=utf-8').send(page('login', 'Đăng nhập', { error: 'Quá nhiều lần đăng nhập sai, thử lại sau' }));
     }
-    const u = repo.getUserByUsername(name);
+    const u = repo.web.getUserByUsername(name);
     const okPw = verifyPassword(b.password ?? '', u ? u.passwordHash : DUMMY_HASH);
     if (!u || !okPw) {
       recent.push(now);
@@ -46,18 +46,18 @@ export function authRoutes(app: FastifyInstance, cfg: Config, { repo }: WebDeps)
   });
 
   app.get('/setup', async (_req, reply) => {
-    if (cfg.mode === 'local' || repo.listUsers().length > 0) return reply.redirect('/');
+    if (cfg.mode === 'local' || repo.web.listUsers().length > 0) return reply.redirect('/');
     return reply.type('text/html; charset=utf-8').send(page('setup', 'Thiết lập quản trị viên'));
   });
   app.post('/setup', async (req, reply) => {
-    if (cfg.mode === 'local' || repo.listUsers().length > 0) return reply.redirect('/');
+    if (cfg.mode === 'local' || repo.web.listUsers().length > 0) return reply.redirect('/');
     const b = (req.body ?? {}) as Form;
     const username = (b.username ?? '').trim();
     const password = b.password ?? '';
     if (!/^[\w.@-]{3,64}$/.test(username) || password.length < 8) {
       return reply.code(400).type('text/html; charset=utf-8').send(page('setup', 'Thiết lập quản trị viên', { error: 'Tên đăng nhập 3-64 ký tự (chữ, số, . _ - @) và mật khẩu tối thiểu 8 ký tự.' }));
     }
-    const u = repo.createUser({ username, passwordHash: hashPassword(password), role: 'admin' });
+    const u = repo.web.createUser({ username, passwordHash: hashPassword(password), role: 'admin' });
     setSessionCookie(cfg, reply, u);
     return reply.redirect('/');
   });

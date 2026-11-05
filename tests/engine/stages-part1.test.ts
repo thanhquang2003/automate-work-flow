@@ -253,7 +253,7 @@ describe('stages part 1', () => {
     const texts: string[] = [];
     wb.worksheets[0]!.eachRow(row => texts.push(String(row.getCell(1).value ?? '')));
     expect(texts).toContain('Q-01');
-    const links = repo.listSurveyLinks(r.id);
+    const links = repo.web.listSurveyLinks(r.id);
     expect(links).toHaveLength(1);
     expect(links[0]!.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(links[0]!.round).toBe(1);

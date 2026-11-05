@@ -51,7 +51,7 @@ describe('templates', () => {
     const p = templatePath(cfg, 'tkct');
     expect(p).toBe(join(cfg.dataDir, 'templates', 'tkct.docx'));
     expect(existsSync(p)).toBe(true);
-    expect(repo.getTemplate('tkct')).toBe(p);
+    expect(repo.web.getTemplate('tkct')).toBe(p);
     const xl = await app.inject({ method: 'POST', url: '/templates/ulnl', ...upload('u.xlsx', await zipWith('xl/workbook.xml')) });
     expect(xl.statusCode).toBe(302);
     expect(existsSync(templatePath(cfg, 'ulnl'))).toBe(true);
@@ -64,7 +64,7 @@ describe('templates', () => {
     const rs = await app.inject({ method: 'POST', url: '/templates/tkct/reset', headers: form });
     expect(rs.statusCode).toBe(302);
     expect(templatePath(cfg, 'tkct')).toBe(def);
-    expect(repo.getTemplate('tkct')).toBeUndefined();
+    expect(repo.web.getTemplate('tkct')).toBeUndefined();
   });
 
   it('rejects non-office upload', async () => {
@@ -84,7 +84,7 @@ describe('templates', () => {
 
   it('member can view but not upload templates (server mode)', async () => {
     const { app, repo, cfg } = await boot(true);
-    const m = repo.createUser({ username: 'm', passwordHash: hashPassword('password1'), role: 'member' });
+    const m = repo.web.createUser({ username: 'm', passwordHash: hashPassword('password1'), role: 'member' });
     const cookie = `devflow_sid=${signSession(cfg.secretKey, m.id)}`;
     expect((await app.inject({ method: 'GET', url: '/templates', headers: { cookie } })).statusCode).toBe(200);
     const up = upload('a.docx', await zipWith('word/document.xml'));
@@ -100,10 +100,10 @@ describe('settings', () => {
       payload: enc({ gitlab_url: 'https://gl.example.com', gitlab_token: 'glpat-SECRET123', gitlab_default_group: 'team', max_concurrent_jobs: '3', claude_bin: 'claude2' }),
     });
     expect(res.statusCode).toBe(302);
-    const stored = repo.getSetting('gitlab.token')!;
+    const stored = repo.web.getSetting('gitlab.token')!;
     expect(stored).not.toContain('SECRET123');
     expect(decrypt(stored, getSecretKey(cfg))).toBe('glpat-SECRET123');
-    expect(repo.getSetting('gitlab.url')).toBe('https://gl.example.com');
+    expect(repo.web.getSetting('gitlab.url')).toBe('https://gl.example.com');
     expect(existsSync(join(cfg.dataDir, 'secret.key'))).toBe(true);
     const page = await app.inject({ method: 'GET', url: '/settings' });
     expect(page.body).not.toContain('SECRET123');
@@ -113,12 +113,12 @@ describe('settings', () => {
     // live cfg updated for new jobs
     expect(cfg.maxConcurrentJobs).toBe(3);
     expect(cfg.claudeBin).toBe('claude'); // CLAUDE_BIN is env-only: a posted claude_bin is ignored
-    expect(repo.getSetting('claudeBin')).toBeUndefined();
+    expect(repo.web.getSetting('claudeBin')).toBeUndefined();
     expect(page.body).not.toContain('name="claude_bin"');
     expect(cfg.gitlab.token).toBe('glpat-SECRET123');
     // blank token keeps the stored one
     await app.inject({ method: 'POST', url: '/settings', headers: form, payload: enc({ gitlab_url: 'https://gl2.example.com', gitlab_token: '', max_concurrent_jobs: '2' }) });
-    expect(decrypt(repo.getSetting('gitlab.token')!, getSecretKey(cfg))).toBe('glpat-SECRET123');
+    expect(decrypt(repo.web.getSetting('gitlab.token')!, getSecretKey(cfg))).toBe('glpat-SECRET123');
     expect(cfg.gitlab.url).toBe('https://gl2.example.com');
     // invalid concurrency rejected
     const bad = await app.inject({ method: 'POST', url: '/settings', headers: form, payload: enc({ max_concurrent_jobs: '0' }) });
@@ -127,11 +127,11 @@ describe('settings', () => {
 
   it('admin only in server mode', async () => {
     const { app, repo, cfg } = await boot(true);
-    const m = repo.createUser({ username: 'm', passwordHash: hashPassword('password1'), role: 'member' });
+    const m = repo.web.createUser({ username: 'm', passwordHash: hashPassword('password1'), role: 'member' });
     const cookie = `devflow_sid=${signSession(cfg.secretKey, m.id)}`;
     expect((await app.inject({ method: 'GET', url: '/settings', headers: { cookie } })).statusCode).toBe(403);
     expect((await app.inject({ method: 'POST', url: '/settings', headers: { ...form, cookie }, payload: enc({ gitlab_url: 'x' }) })).statusCode).toBe(403);
-    expect(repo.getSetting('gitlab.url')).toBeUndefined();
+    expect(repo.web.getSetting('gitlab.url')).toBeUndefined();
   });
 
   it('effectiveConfig: DB overrides env; getSecretKey prefers SECRET_KEY, else key file', () => {
@@ -144,19 +144,19 @@ describe('settings', () => {
     expect(getSecretKey(cfg)).toBe(key);
     expect(readFileSync(join(dir, 'secret.key'), 'utf8').trim()).toBe(key);
     expect(getSecretKey({ ...cfg, secretKey: 'abc' })).toBe('abc');
-    repo.setSetting('gitlab.url', 'https://db');
-    repo.setSetting('gitlab.token', encrypt('dbtok', key));
-    repo.setSetting('gitlab.defaultGroup', 'g');
-    repo.setSetting('maxConcurrentJobs', '4');
-    repo.setSetting('claudeBin', 'cl');
+    repo.web.setSetting('gitlab.url', 'https://db');
+    repo.web.setSetting('gitlab.token', encrypt('dbtok', key));
+    repo.web.setSetting('gitlab.defaultGroup', 'g');
+    repo.web.setSetting('maxConcurrentJobs', '4');
+    repo.web.setSetting('claudeBin', 'cl');
     const e = effectiveConfig(cfg, repo);
     expect(e.gitlab).toEqual({ url: 'https://db', token: 'dbtok', defaultGroup: 'g' });
     expect(e.maxConcurrentJobs).toBe(4);
     expect(e.claudeBin).toBe('claude'); // a legacy DB value never overrides CLAUDE_BIN
     expect(cfg.gitlab.url).toBe('https://env'); // input untouched
     // per-user token takes precedence for the request creator
-    const u = repo.createUser({ username: 'u', passwordHash: 'x', role: 'member' });
-    repo.setUserGitlabToken(u.id, encrypt('usertok', key));
+    const u = repo.web.createUser({ username: 'u', passwordHash: 'x', role: 'member' });
+    repo.web.setUserGitlabToken(u.id, encrypt('usertok', key));
     const r = repo.createRequest({ title: 't', description: 'd', perfReq: '', nonfuncReq: '', projectKind: 'new', gitlabProject: null, softwareTypes: [], runMode: 'auto', createdBy: u.id });
     const own = gitlabFor(cfg, repo, r) as unknown as { token: string; baseUrl: string };
     expect(JSON.stringify(own)).toContain('usertok');
@@ -180,8 +180,8 @@ describe('secret key file', () => {
 describe('users', () => {
   async function adminSetup() {
     const b = await boot(true);
-    const admin = b.repo.createUser({ username: 'admin', passwordHash: hashPassword('password1'), role: 'admin' });
-    const member = b.repo.createUser({ username: 'mem', passwordHash: hashPassword('password1'), role: 'member' });
+    const admin = b.repo.web.createUser({ username: 'admin', passwordHash: hashPassword('password1'), role: 'admin' });
+    const member = b.repo.web.createUser({ username: 'mem', passwordHash: hashPassword('password1'), role: 'member' });
     const ck = (id: number) => `devflow_sid=${signSession(b.cfg.secretKey, id)}`;
     return { ...b, admin, member, adminCookie: ck(admin.id), memberCookie: ck(member.id) };
   }
@@ -191,7 +191,7 @@ describe('users', () => {
     expect((await app.inject({ method: 'GET', url: '/users', headers: { cookie: memberCookie } })).statusCode).toBe(403);
     const res = await app.inject({ method: 'POST', url: '/users', headers: { ...form, cookie: memberCookie }, payload: enc({ username: 'evil', password: 'password12', role: 'admin' }) });
     expect(res.statusCode).toBe(403);
-    expect(repo.getUserByUsername('evil')).toBeUndefined();
+    expect(repo.web.getUserByUsername('evil')).toBeUndefined();
   });
 
   it('admin lists, creates, resets password, deletes', async () => {
@@ -202,7 +202,7 @@ describe('users', () => {
     expect(page.body).toContain('mem');
     expect(page.body).not.toContain(admin.passwordHash);
     await app.inject({ method: 'POST', url: '/users', headers: h, payload: enc({ username: 'new.user', password: 'password12', role: 'member' }) });
-    const nu = repo.getUserByUsername('new.user')!;
+    const nu = repo.web.getUserByUsername('new.user')!;
     expect(nu.role).toBe('member');
     expect(verifyPassword('password12', nu.passwordHash)).toBe(true);
     // validation + duplicates
@@ -210,15 +210,15 @@ describe('users', () => {
       const r = await app.inject({ method: 'POST', url: '/users', headers: h, payload: enc(p) });
       expect(decodeURIComponent(String(r.headers.location))).toContain('err=');
     }
-    expect(repo.listUsers()).toHaveLength(3);
+    expect(repo.web.listUsers()).toHaveLength(3);
     await app.inject({ method: 'POST', url: `/users/${member.id}/password`, headers: h, payload: enc({ password: 'newpassword1' }) });
-    expect(verifyPassword('newpassword1', repo.getUser(member.id)!.passwordHash)).toBe(true);
+    expect(verifyPassword('newpassword1', repo.web.getUser(member.id)!.passwordHash)).toBe(true);
     await app.inject({ method: 'POST', url: `/users/${nu.id}/delete`, headers: h });
-    expect(repo.getUser(nu.id)).toBeUndefined();
+    expect(repo.web.getUser(nu.id)).toBeUndefined();
     // cannot delete self
     const self = await app.inject({ method: 'POST', url: `/users/${admin.id}/delete`, headers: h });
     expect(decodeURIComponent(String(self.headers.location))).toContain('err=');
-    expect(repo.getUser(admin.id)).toBeDefined();
+    expect(repo.web.getUser(admin.id)).toBeDefined();
   });
 
   it('deleted user session is rejected; their requests are kept and shown as -', async () => {
@@ -239,14 +239,14 @@ describe('users', () => {
     const { app, memberCookie, repo, member, cfg } = await adminSetup();
     const res = await app.inject({ method: 'POST', url: '/me', headers: { ...form, cookie: memberCookie }, payload: enc({ gitlab_token: 'glpat-MINE999' }) });
     expect(res.statusCode).toBe(302);
-    const enc1 = repo.getUser(member.id)!.gitlabTokenEnc!;
+    const enc1 = repo.web.getUser(member.id)!.gitlabTokenEnc!;
     expect(enc1).not.toContain('MINE999');
     expect(decrypt(enc1, getSecretKey(cfg))).toBe('glpat-MINE999');
     const page = await app.inject({ method: 'GET', url: '/me', headers: { cookie: memberCookie } });
     expect(page.body).not.toContain('MINE999');
     expect(page.body).toContain('đã lưu ••••');
     await app.inject({ method: 'POST', url: '/me', headers: { ...form, cookie: memberCookie }, payload: enc({ clear_token: '1' }) });
-    expect(repo.getUser(member.id)!.gitlabTokenEnc).toBeNull();
+    expect(repo.web.getUser(member.id)!.gitlabTokenEnc).toBeNull();
   });
 
   it('local mode allows everything', async () => {

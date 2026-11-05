@@ -34,7 +34,7 @@ async function seedSurvey() {
     Q('Q-02', { type: 'single', options: ['Có', 'Không'], suggested_answer: 'Có', priority: 'should' }),
     Q('Q-03', { type: 'multi', options: ['A', 'B', 'C'], category: 'Dữ liệu' }),
   ]);
-  b.repo.createSurveyLink({ token: 'tok123', requestId: r.id, round: 1, expiresAt: Date.now() + 86_400_000 });
+  b.repo.web.createSurveyLink({ token: 'tok123', requestId: r.id, round: 1, expiresAt: Date.now() + 86_400_000 });
   return { ...b, r };
 }
 
@@ -75,11 +75,11 @@ describe('survey + questions tab', () => {
 
   it('survey link creation (server only) shows full url', async () => {
     const { app, repo, r, cfg } = await seedSurvey();
-    const u = repo.createUser({ username: 'a', passwordHash: hashPassword('password1'), role: 'admin' });
+    const u = repo.web.createUser({ username: 'a', passwordHash: hashPassword('password1'), role: 'admin' });
     const cookie = `devflow_sid=${signSession(cfg.secretKey, u.id)}`;
     const res = await app.inject({ method: 'POST', url: `/requests/${r.id}/survey-link`, headers: { ...form, cookie } });
     expect(res.statusCode).toBe(302);
-    const links = repo.listSurveyLinks(r.id);
+    const links = repo.web.listSurveyLinks(r.id);
     expect(links).toHaveLength(2);
     const page = await app.inject({ method: 'GET', url: `/requests/${r.id}?tab=questions`, headers: { cookie } });
     expect(page.body).toContain(`${cfg.publicBaseUrl}/s/${links[1]!.token}`);
@@ -87,7 +87,7 @@ describe('survey + questions tab', () => {
     const lr = mkReq(local.repo);
     const lres = await local.app.inject({ method: 'POST', url: `/requests/${lr.id}/survey-link`, headers: form });
     expect(decodeURIComponent(String(lres.headers.location))).toContain('server');
-    expect(local.repo.listSurveyLinks(lr.id)).toHaveLength(0);
+    expect(local.repo.web.listSurveyLinks(lr.id)).toHaveLength(0);
   });
 
   it('survey renders questions', async () => {
@@ -116,16 +116,16 @@ describe('survey + questions tab', () => {
     expect(saved.statusCode).toBe(200);
     expect(saved.body).toContain('Bản nháp');
     expect(repo.latestAnswers(r.id).get('Q-01')).toBe('Bản nháp');
-    expect(repo.getSurveyLink('tok123')!.submittedAt).toBeNull();
+    expect(repo.web.getSurveyLink('tok123')!.submittedAt).toBeNull();
     // server-side must validation: Q-03 missing
     const bad = await post({ action: 'submit', 'a_Q-01': 'Đủ' });
     expect(bad.statusCode).toBe(400);
     expect(bad.body).toContain('Vui lòng trả lời');
-    expect(repo.getSurveyLink('tok123')!.submittedAt).toBeNull();
+    expect(repo.web.getSurveyLink('tok123')!.submittedAt).toBeNull();
     const ok = await post({ action: 'submit', 'a_Q-01': 'Đủ', 'a_Q-02': 'Không', 'a_Q-03': ['A', 'C', 'ZZZ'] });
     expect(ok.statusCode).toBe(200);
     expect(ok.body).toContain('Cảm ơn');
-    expect(repo.getSurveyLink('tok123')!.submittedAt).not.toBeNull();
+    expect(repo.web.getSurveyLink('tok123')!.submittedAt).not.toBeNull();
     expect(repo.latestAnswers(r.id).get('Q-01')).toBe('Đủ');
     expect(repo.latestAnswers(r.id).get('Q-03')).toBe('A; C');
     expect(repo.listAnswers(r.id).every(a => a.source === 'web')).toBe(true);
@@ -136,7 +136,7 @@ describe('survey + questions tab', () => {
 
   it('rejects expired token', async () => {
     const { app, repo, r } = await seedSurvey();
-    repo.createSurveyLink({ token: 'old', requestId: r.id, round: 1, expiresAt: Date.now() - 1000 });
+    repo.web.createSurveyLink({ token: 'old', requestId: r.id, round: 1, expiresAt: Date.now() - 1000 });
     const res = await app.inject({ method: 'GET', url: '/s/old' });
     expect(res.statusCode).toBe(410);
     expect(res.body).toContain('Liên kết đã hết hạn');
@@ -166,7 +166,7 @@ describe('survey + questions tab', () => {
   it('local mode survey 404', async () => {
     const { app, repo } = await boot();
     const r = mkReq(repo);
-    repo.createSurveyLink({ token: 'tk', requestId: r.id, round: 1, expiresAt: Date.now() + 1000 });
+    repo.web.createSurveyLink({ token: 'tk', requestId: r.id, round: 1, expiresAt: Date.now() + 1000 });
     expect((await app.inject({ method: 'GET', url: '/s/tk' })).statusCode).toBe(404);
     expect((await app.inject({ method: 'POST', url: '/s/tk', headers: form, payload: enc({ action: 'save' }) })).statusCode).toBe(404);
   });
@@ -225,7 +225,7 @@ describe('survey + questions tab', () => {
     const b = await boot(true);
     const r = mkReq(b.repo);
     b.repo.upsertQuestions(r.id, 1, [Q('Q-01', { type: 'multi', options: ['A; B', 'C', 'D'] })]);
-    b.repo.createSurveyLink({ token: 'semi', requestId: r.id, round: 1, expiresAt: Date.now() + 1e6 });
+    b.repo.web.createSurveyLink({ token: 'semi', requestId: r.id, round: 1, expiresAt: Date.now() + 1e6 });
     await b.app.inject({ method: 'POST', url: '/s/semi', headers: form, payload: enc({ action: 'save', 'a_Q-01': ['D', 'A; B', 'bogus'] }) });
     expect(b.repo.latestAnswers(r.id).get('Q-01')).toBe('A; B; D');
     const page = await b.app.inject({ method: 'GET', url: '/s/semi' });

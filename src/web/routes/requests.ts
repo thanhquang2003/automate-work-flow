@@ -95,7 +95,7 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
   // ---- dashboard ----
   app.get('/', async (req, reply) => {
     const q = req.query as { status?: string; q?: string };
-    const users = new Map(repo.listUsers().map(u => [u.id, u.username]));
+    const users = new Map(repo.web.listUsers().map(u => [u.id, u.username]));
     const needle = (q.q ?? '').trim().toLowerCase();
     const rows = repo.listRequests()
       .filter(r => !q.status || r.status === q.status)

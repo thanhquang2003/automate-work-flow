@@ -75,7 +75,7 @@ export function adminRoutes(app: FastifyInstance, cfg: Config, { repo }: WebDeps
     const tmp = `${dest}.${process.pid}.tmp`;
     writeFileSync(tmp, buf);
     renameSync(tmp, dest);
-    repo.setTemplate(t.kind, dest);
+    repo.web.setTemplate(t.kind, dest);
     return go(reply, '/templates', 'ok', `Đã cập nhật mẫu ${t.kind.toUpperCase()}.`);
   });
 
@@ -84,14 +84,14 @@ export function adminRoutes(app: FastifyInstance, cfg: Config, { repo }: WebDeps
     if (!t) return reply.callNotFound();
     if (!isAdmin(req)) return forbid(req, reply);
     rmSync(join(tplDir, `${t.kind}.${t.ext}`), { force: true });
-    repo.deleteTemplate(t.kind);
+    repo.web.deleteTemplate(t.kind);
     return go(reply, '/templates', 'ok', `Đã khôi phục mẫu mặc định cho ${t.kind.toUpperCase()}.`);
   });
 
   // ---- settings ----
   app.get('/settings', async (req, reply) => {
     if (!isAdmin(req)) return forbid(req, reply);
-    const g = (k: string) => repo.getSetting(k) ?? '';
+    const g = (k: string) => repo.web.getSetting(k) ?? '';
     const values = {
       gitlabUrl: g(SETTING_KEYS.gitlabUrl) || cfg.gitlab.url, gitlabDefaultGroup: g(SETTING_KEYS.gitlabDefaultGroup) || cfg.gitlab.defaultGroup,
       maxConcurrentJobs: g(SETTING_KEYS.maxConcurrentJobs) || String(cfg.maxConcurrentJobs),
@@ -108,11 +108,11 @@ export function adminRoutes(app: FastifyInstance, cfg: Config, { repo }: WebDeps
     const url = t('gitlab_url');
     if (url && !/^https?:\/\/\S+$/i.test(url)) return go(reply, '/settings', 'err', 'GitLab URL phải bắt đầu bằng http:// hoặc https://.');
     repo.tx(() => {
-      repo.setSetting(SETTING_KEYS.gitlabUrl, url);
-      repo.setSetting(SETTING_KEYS.gitlabDefaultGroup, t('gitlab_default_group'));
-      repo.setSetting(SETTING_KEYS.maxConcurrentJobs, jobs);
-      if (b.clear_token) repo.setSetting(SETTING_KEYS.gitlabToken, '');
-      else if (t('gitlab_token')) repo.setSetting(SETTING_KEYS.gitlabToken, encrypt(t('gitlab_token'), getSecretKey(cfg)));
+      repo.web.setSetting(SETTING_KEYS.gitlabUrl, url);
+      repo.web.setSetting(SETTING_KEYS.gitlabDefaultGroup, t('gitlab_default_group'));
+      repo.web.setSetting(SETTING_KEYS.maxConcurrentJobs, jobs);
+      if (b.clear_token) repo.web.setSetting(SETTING_KEYS.gitlabToken, '');
+      else if (t('gitlab_token')) repo.web.setSetting(SETTING_KEYS.gitlabToken, encrypt(t('gitlab_token'), getSecretKey(cfg)));
     });
     applySettings(cfg, repo);
     return go(reply, '/settings', 'ok', 'Đã lưu cài đặt.');
@@ -122,7 +122,7 @@ export function adminRoutes(app: FastifyInstance, cfg: Config, { repo }: WebDeps
   if (server) {
     app.get('/users', async (req, reply) => {
       if (!isAdmin(req)) return forbid(req, reply);
-      const users = repo.listUsers().map(u => ({ id: u.id, username: u.username, role: u.role, createdAt: u.createdAt, hasToken: u.gitlabTokenEnc !== null }));
+      const users = repo.web.listUsers().map(u => ({ id: u.id, username: u.username, role: u.role, createdAt: u.createdAt, hasToken: u.gitlabTokenEnc !== null }));
       return html(reply, render('users', layout(req, 'Người dùng', flashOf(req)), { users, selfId: req.user?.id ?? null }));
     });
 
@@ -134,8 +134,8 @@ export function adminRoutes(app: FastifyInstance, cfg: Config, { repo }: WebDeps
       const role: UserRole = b.role === 'admin' ? 'admin' : 'member';
       if (!USERNAME_RE.test(username)) return go(reply, '/users', 'err', 'Tên đăng nhập 3-64 ký tự (chữ, số, . _ - @).');
       if (password.length < MIN_PASSWORD) return go(reply, '/users', 'err', `Mật khẩu tối thiểu ${MIN_PASSWORD} ký tự.`);
-      if (repo.getUserByUsername(username)) return go(reply, '/users', 'err', 'Tên đăng nhập đã tồn tại.');
-      repo.createUser({ username, passwordHash: hashPassword(password), role });
+      if (repo.web.getUserByUsername(username)) return go(reply, '/users', 'err', 'Tên đăng nhập đã tồn tại.');
+      repo.web.createUser({ username, passwordHash: hashPassword(password), role });
       return go(reply, '/users', 'ok', `Đã tạo người dùng ${username}.`);
     });
 
@@ -143,37 +143,37 @@ export function adminRoutes(app: FastifyInstance, cfg: Config, { repo }: WebDeps
       if (!isAdmin(req)) return forbid(req, reply);
       const id = Number((req.params as { id: string }).id);
       const password = ((req.body ?? {}) as Form).password ?? '';
-      if (!repo.getUser(id)) return go(reply, '/users', 'err', 'Không tìm thấy người dùng.');
+      if (!repo.web.getUser(id)) return go(reply, '/users', 'err', 'Không tìm thấy người dùng.');
       if (password.length < MIN_PASSWORD) return go(reply, '/users', 'err', `Mật khẩu tối thiểu ${MIN_PASSWORD} ký tự.`);
-      repo.setUserPassword(id, hashPassword(password));
+      repo.web.setUserPassword(id, hashPassword(password));
       return go(reply, '/users', 'ok', 'Đã đặt lại mật khẩu.');
     });
 
     app.post('/users/:id/delete', async (req, reply) => {
       if (!isAdmin(req)) return forbid(req, reply);
       const id = Number((req.params as { id: string }).id);
-      const u = repo.getUser(id);
+      const u = repo.web.getUser(id);
       if (!u) return go(reply, '/users', 'err', 'Không tìm thấy người dùng.');
       if (req.user?.id === id) return go(reply, '/users', 'err', 'Không thể tự xóa tài khoản đang đăng nhập.');
-      if (u.role === 'admin' && repo.listUsers().filter(x => x.role === 'admin').length <= 1) return go(reply, '/users', 'err', 'Không thể xóa quản trị viên cuối cùng.');
-      repo.deleteUser(id);
+      if (u.role === 'admin' && repo.web.listUsers().filter(x => x.role === 'admin').length <= 1) return go(reply, '/users', 'err', 'Không thể xóa quản trị viên cuối cùng.');
+      repo.web.deleteUser(id);
       return go(reply, '/users', 'ok', `Đã xóa người dùng ${u.username}.`);
     });
   }
 
   // ---- /me: own GitLab token ----
   app.get('/me', async (req, reply) => {
-    const u = req.user?.id != null ? repo.getUser(req.user.id) : undefined;
+    const u = req.user?.id != null ? repo.web.getUser(req.user.id) : undefined;
     return html(reply, render('me', layout(req, 'Tài khoản', flashOf(req)), { tokenSet: !!u?.gitlabTokenEnc, canSet: !!u }));
   });
 
   app.post('/me', async (req, reply) => {
-    const u = req.user?.id != null ? repo.getUser(req.user.id) : undefined;
+    const u = req.user?.id != null ? repo.web.getUser(req.user.id) : undefined;
     if (!u) return go(reply, '/me', 'err', 'Chế độ local không có tài khoản riêng; hãy dùng trang Cài đặt.');
     const b = (req.body ?? {}) as Form;
     const tok = (b.gitlab_token ?? '').trim();
-    if (b.clear_token) repo.setUserGitlabToken(u.id, null);
-    else if (tok) repo.setUserGitlabToken(u.id, encrypt(tok, getSecretKey(cfg)));
+    if (b.clear_token) repo.web.setUserGitlabToken(u.id, null);
+    else if (tok) repo.web.setUserGitlabToken(u.id, encrypt(tok, getSecretKey(cfg)));
     else return go(reply, '/me', 'err', 'Vui lòng nhập token.');
     return go(reply, '/me', 'ok', 'Đã lưu token GitLab cá nhân.');
   });

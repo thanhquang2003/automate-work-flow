@@ -5,3 +5,4 @@ data/
 .env
 coverage/
 session-autosave.md
+graphify-out/

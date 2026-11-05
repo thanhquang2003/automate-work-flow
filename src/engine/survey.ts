@@ -10,6 +10,6 @@ export const surveyUrl = (cfg: Config, token: string): string => `${cfg.publicBa
 export function createSurveyLink(repo: Repo, cfg: Config, reqId: string, round: number): { token: string; url: string; expiresAt: number } {
   const token = randomBytes(32).toString('base64url');
   const expiresAt = Date.now() + cfg.surveyTtlDays * DAY_MS;
-  repo.createSurveyLink({ token, requestId: reqId, round, expiresAt });
+  repo.web.createSurveyLink({ token, requestId: reqId, round, expiresAt });
   return { token, expiresAt, url: surveyUrl(cfg, token) };
 }

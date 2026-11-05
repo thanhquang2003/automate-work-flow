@@ -43,7 +43,7 @@ export function currentUser(cfg: Config, repo: Repo, req: FastifyRequest): Sessi
   if (cfg.mode === 'local') return LOCAL_USER;
   const uid = verifySession(cfg.secretKey, req.cookies?.[COOKIE]);
   if (uid === undefined) return undefined;
-  const u = repo.getUser(uid);
+  const u = repo.web.getUser(uid);
   return u ? { id: u.id, username: u.username, role: u.role } : undefined;
 }
 

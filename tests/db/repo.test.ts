@@ -124,20 +124,20 @@ describe('Repo stage runs, tasks, tc, bugs, survey, users, settings, templates',
 
   it('survey links, users, settings, templates', () => {
     repo.createRequest(base);
-    repo.createSurveyLink({ token: 'tok', requestId: 'REQ-001', round: 1, expiresAt: 9 });
-    expect(repo.getSurveyLink('tok')?.submittedAt).toBeNull();
-    repo.markSurveySubmitted('tok', 5);
-    expect(repo.getSurveyLink('tok')?.submittedAt).toBe(5);
-    const u = repo.createUser({ username: 'a', passwordHash: 'h', role: 'admin' });
-    expect(repo.getUserByUsername('a')?.id).toBe(u.id);
-    repo.setUserGitlabToken(u.id, 'enc');
-    expect(repo.getUser(u.id)?.gitlabTokenEnc).toBe('enc');
-    expect(repo.listUsers()).toHaveLength(1);
-    expect(repo.getSetting('k')).toBeUndefined();
-    repo.setSetting('k', 'v'); repo.setSetting('k', 'v2');
-    expect(repo.getSetting('k')).toBe('v2');
-    repo.setTemplate('tkct', 'p.docx');
-    expect(repo.getTemplate('tkct')).toBe('p.docx');
-    expect(repo.listTemplates()).toEqual([{ kind: 'tkct', path: 'p.docx' }]);
+    repo.web.createSurveyLink({ token: 'tok', requestId: 'REQ-001', round: 1, expiresAt: 9 });
+    expect(repo.web.getSurveyLink('tok')?.submittedAt).toBeNull();
+    repo.web.markSurveySubmitted('tok', 5);
+    expect(repo.web.getSurveyLink('tok')?.submittedAt).toBe(5);
+    const u = repo.web.createUser({ username: 'a', passwordHash: 'h', role: 'admin' });
+    expect(repo.web.getUserByUsername('a')?.id).toBe(u.id);
+    repo.web.setUserGitlabToken(u.id, 'enc');
+    expect(repo.web.getUser(u.id)?.gitlabTokenEnc).toBe('enc');
+    expect(repo.web.listUsers()).toHaveLength(1);
+    expect(repo.web.getSetting('k')).toBeUndefined();
+    repo.web.setSetting('k', 'v'); repo.web.setSetting('k', 'v2');
+    expect(repo.web.getSetting('k')).toBe('v2');
+    repo.web.setTemplate('tkct', 'p.docx');
+    expect(repo.web.getTemplate('tkct')).toBe('p.docx');
+    expect(repo.web.listTemplates()).toEqual([{ kind: 'tkct', path: 'p.docx' }]);
   });
 });

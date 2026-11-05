@@ -19,7 +19,7 @@ export const SETTING_KEYS = {
 
 /** Config with settings stored in the DB layered over the env-derived `cfg` (empty DB values are ignored). Does not mutate `cfg`. */
 export function effectiveConfig(cfg: Config, repo: Repo): Config {
-  const s = (k: string): string => (repo.getSetting(k) ?? '').trim();
+  const s = (k: string): string => (repo.web.getSetting(k) ?? '').trim();
   let token = cfg.gitlab.token;
   const enc = s(SETTING_KEYS.gitlabToken);
   if (enc) {
@@ -54,7 +54,7 @@ export function gitlabFor(cfg: Config, repo: Repo, req: RequestRow): GitLabClien
   const eff = effectiveConfig(bases.get(cfg) ?? cfg, repo);
   let token = eff.gitlab.token;
   if (req.createdBy !== null) {
-    const enc = repo.getUser(req.createdBy)?.gitlabTokenEnc;
+    const enc = repo.web.getUser(req.createdBy)?.gitlabTokenEnc;
     if (enc) {
       try { token = decrypt(enc, getSecretKey(cfg)); } catch { warnOnce(`user.${req.createdBy}`, `Không giải mã được token GitLab cá nhân của người dùng #${req.createdBy}; dùng token chung.`); }
     }

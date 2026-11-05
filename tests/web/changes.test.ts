@@ -135,7 +135,7 @@ describe('change requests web', () => {
     const { app, repo, pipeline } = await boot(true);
     const r = mkReq(repo);
     repo.updateRequest(r.id, { status: 'awaiting_customer', stage: 'CLARIFY' });
-    repo.createSurveyLink({ token: 'tok9', requestId: r.id, round: 1, expiresAt: Date.now() + 86_400_000 });
+    repo.web.createSurveyLink({ token: 'tok9', requestId: r.id, round: 1, expiresAt: Date.now() + 86_400_000 });
     const sub = vi.spyOn(pipeline, 'submitChange');
     const res = await app.inject({ method: 'POST', url: '/s/tok9', headers: form, payload: enc({ action: 'save', proposal: '<img src=x onerror=1> thêm báo cáo' }) });
     expect(res.statusCode).toBe(200);
@@ -182,7 +182,7 @@ describe('change requests web', () => {
     const { app, repo } = await boot(true);
     const r = mkReq(repo);
     repo.updateRequest(r.id, { status: 'awaiting_customer', stage: 'CLARIFY' });
-    repo.createSurveyLink({ token: 'tokd', requestId: r.id, round: 1, expiresAt: Date.now() + 86_400_000 });
+    repo.web.createSurveyLink({ token: 'tokd', requestId: r.id, round: 1, expiresAt: Date.now() + 86_400_000 });
     for (let i = 0; i < 2; i++) await app.inject({ method: 'POST', url: '/s/tokd', headers: form, payload: enc({ action: 'save', proposal: 'thêm báo cáo' }) });
     expect(repo.listChangeRequests(r.id)).toHaveLength(1);
   });
@@ -224,7 +224,7 @@ describe('change requests web', () => {
 
   it('server mode requires auth and Origin for CR routes', async () => {
     const { app, repo } = await boot(true);
-    const u = repo.createUser({ username: 'a', passwordHash: hashPassword('password123'), role: 'admin' });
+    const u = repo.web.createUser({ username: 'a', passwordHash: hashPassword('password123'), role: 'admin' });
     const r = mkReq(repo);
     const cr = repo.createChangeRequest(r.id, { title: 'P', description: 'd', kind: 'other', source: 'customer', status: 'proposed' });
     const routes = [`/requests/${r.id}/changes`, `/requests/${r.id}/changes/${cr.id}/decide`, `/requests/${r.id}/changes/${cr.id}/accept-proposal`, `/requests/${r.id}/changes/${cr.id}/reject-proposal`];

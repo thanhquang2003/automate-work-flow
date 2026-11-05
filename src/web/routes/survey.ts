@@ -74,7 +74,7 @@ export function surveyRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
 
   /** Resolves an active link, or sends the matching error/thank-you page and returns undefined. */
   const resolve = (token: string, reply: FastifyReply, post: boolean): SurveyLinkRow | undefined => {
-    const link = repo.getSurveyLink(token);
+    const link = repo.web.getSurveyLink(token);
     if (!link) { void notFound(reply); return undefined; }
     if (link.submittedAt !== null) {
       if (post) void msgPage(reply, 409, 'Đã gửi', 'Khảo sát này đã được gửi nên không thể chỉnh sửa. Cảm ơn Quý khách.');
@@ -128,7 +128,7 @@ export function surveyRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
         const v = values.get(q.id) ?? '';
         if (v !== (prev.get(q.id) ?? '')) repo.saveAnswer(link.requestId, q.id, v, 'web');
       }
-      if (submit) repo.markSurveySubmitted(link.token);
+      if (submit) repo.web.markSurveySubmitted(link.token);
     });
     let proposalNote = '';
     const dup = proposal && repo.listChangeRequests(link.requestId).some(c => c.source === 'customer' && c.status === 'proposed' && c.description === proposal);
