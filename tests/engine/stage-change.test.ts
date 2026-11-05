@@ -183,6 +183,120 @@ describe('CHANGE stage', () => {
     expect(repo.listChangeRequests(r.id).map(c => c.status)).toEqual(['awaiting_decision', 'awaiting_decision']);
   });
 
+  it('dirty task branch is stashed before switching to the integration branch', async () => {
+    const { repo, pipeline, worker, r, ws } = prepare();
+    git(ws.repoDir, 'checkout', '-q', '-b', `devflow/${r.id}-T-01`);
+    writeFileSync(join(ws.repoDir, 'wip.ts'), 'export const x = 1;\n');
+    mockClaude({ 'change-analyst': writeImpacts() });
+    pipeline.submitChange(r.id, cr('OTP'));
+    await worker.drain();
+    expect(git(ws.repoDir, 'branch', '--show-current')).toBe(`devflow/${r.id}`);
+    const msg = `devflow:${r.id}:interrupted-by:CR-01:devflow/${r.id}-T-01`;
+    expect(git(ws.repoDir, 'stash', 'list')).toContain(msg);
+    expect(existsSync(join(ws.repoDir, 'wip.ts'))).toBe(false);
+    expect(repo.listEvents(r.id).some(e => e.level === 'warn' && e.message.includes(`Đã cất thay đổi dở dang vào git stash: ${msg}`))).toBe(true);
+    expect(repo.getChangeRequest(r.id, 'CR-01')!.status).toBe('awaiting_decision');
+  });
+
+  it('exception in the handler: the retry analyses the CR again', async () => {
+    const { repo, pipeline, worker, r } = prepare();
+    let n = 0;
+    mockClaude({
+      'change-analyst': (dir, call) => {
+        if (n++ === 0) throw new Error('mất kết nối');
+        writeImpacts()(dir, call);
+      },
+    });
+    pipeline.submitChange(r.id, cr('OTP'));
+    await worker.drain();
+    expect(calls).toHaveLength(2);
+    expect(repo.getChangeRequest(r.id, 'CR-01')!.status).toBe('awaiting_decision');
+  });
+
+  it('leftover analyzing CR and stale [CR-NN] questions are re-analysed cleanly', async () => {
+    const { repo, pipeline, worker, r } = prepare();
+    pipeline.submitChange(r.id, cr('OTP'));
+    // Left by an earlier, unfinished analysis: CR analyzing, its unanswered question Q-05 stale; answered Q-04 kept.
+    repo.updateChangeRequest(r.id, 'CR-01', { status: 'analyzing' });
+    repo.upsertQuestions(r.id, 1, [q('Q-04', 'must', { why: '[CR-01] đã hỏi' }), q('Q-05', 'must', { why: '[CR-01] cũ' }), q('Q-02', 'should', { why: '[CR-07] khác' })]);
+    repo.saveAnswer(r.id, 'Q-04', 'Có', 'customer');
+    mockClaude({ 'change-analyst': writeImpacts(() => ({ questions: [q('Q-05', 'should', { why: 'mới' })] })) });
+    await worker.drain();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.prompt).not.toContain('Câu hỏi Q-05?'); // stale question not shown as existing
+    const qs = repo.listQuestions(r.id);
+    expect(qs.map(x => x.id).sort()).toEqual(['Q-02', 'Q-04', 'Q-05']);
+    expect(qs.find(x => x.id === 'Q-05')!.why).toBe('[CR-01] mới');
+    expect(repo.getChangeRequest(r.id, 'CR-01')!.status).toBe('awaiting_decision');
+  });
+
+  it('re-run after a failed analysis is idempotent', async () => {
+    const { repo, pipeline, worker, r, ws } = prepare();
+    const src = mkdtempSync(join(tmpdir(), 'devflow-cra-'));
+    writeFileSync(join(src, 'a.txt'), 'A');
+    let good = false;
+    mockClaude({ 'change-analyst': writeImpacts(() => (good ? {} : { affected: { features: ['F-01'], tasks: ['T-99'], test_cases: [] } })) });
+    pipeline.submitChange(r.id, cr('OTP'));
+    repo.addCrAttachment(r.id, 'CR-01', 'a.txt', join(src, 'a.txt'));
+    await worker.drain();
+    expect(repo.getRequest(r.id)!.status).toBe('failed');
+    expect(repo.getChangeRequest(r.id, 'CR-01')!.status).toBe('pending');
+    good = true;
+    pipeline.rerunStage(r.id, 'CHANGE');
+    await worker.drain();
+    expect(repo.getChangeRequest(r.id, 'CR-01')!.status).toBe('awaiting_decision');
+    expect(readFileSync(join(ws.inputsDir, 'changes', 'CR-01', 'a.txt'), 'utf8')).toBe('A');
+    expect(git(ws.repoDir, 'log', '--format=%s').split('\n').filter(l => l.includes('phân tích tác động'))).toHaveLength(1);
+  });
+
+  it('cancelled items and modify without affected.features are rejected', async () => {
+    const { repo, pipeline, worker, r } = prepare();
+    repo.setScope('feature', r.id, 'F-02', 'cancelled', 'CR-00');
+    repo.setScope('task', r.id, 'T-02', 'cancelled', 'CR-00');
+    let n = 0;
+    mockClaude({
+      'change-analyst': writeImpacts(() => (n++ === 0
+        ? { scope: { add: [], modify: [{ feature_id: 'F-01', change: 'x' }], remove: ['F-02'] }, affected: { features: [], tasks: ['T-02'], test_cases: [] } }
+        : {})),
+    });
+    pipeline.submitChange(r.id, cr('OTP'));
+    await worker.drain();
+    expect(calls).toHaveLength(2);
+    const fix = calls[1]!.prompt;
+    expect(fix).toMatch(/scope\.remove: chức năng "F-02" không tồn tại hoặc đã hủy/);
+    expect(fix).toMatch(/affected\.tasks: task "T-02" không tồn tại hoặc đã hủy/);
+    expect(fix).toMatch(/"F-01" có trong scope\.modify\/scope\.remove nên phải có trong affected\.features/);
+    expect(calls[0]!.prompt).toMatch(/F-02 .*ĐÃ HỦY theo CR-00/);
+    expect(repo.getChangeRequest(r.id, 'CR-01')!.status).toBe('awaiting_decision');
+  });
+
+  it('all features cancelled is not "before BREAKDOWN"', async () => {
+    const { repo, pipeline, worker, r } = prepare();
+    repo.setScope('feature', r.id, 'F-01', 'cancelled', 'CR-00');
+    repo.setScope('feature', r.id, 'F-02', 'cancelled', 'CR-00');
+    mockClaude({ 'change-analyst': writeImpacts(() => ({ scope: { add: [{ name: 'Mới', description: 'x' }], modify: [], remove: [] }, affected: { features: [], tasks: [], test_cases: [] }, reenter: 'BREAKDOWN' })) });
+    pipeline.submitChange(r.id, cr('OTP'));
+    await worker.drain();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.prompt).not.toMatch(/chưa có danh sách chức năng/i);
+    expect(repo.getChangeRequest(r.id, 'CR-01')).toMatchObject({ status: 'awaiting_decision', reenterStage: 'BREAKDOWN' });
+  });
+
+  it('works without a git repo (no commit)', async () => {
+    register();
+    const { repo, pipeline, worker, cfg } = setup();
+    const r = mkReq(repo, { runMode: 'review' });
+    const ws = Workspace.for(cfg, r.id).ensure();
+    seedScope(repo, r.id);
+    repo.updateRequest(r.id, { stage: 'DESIGN', status: 'awaiting_approval' });
+    mockClaude({ 'change-analyst': writeImpacts() });
+    pipeline.submitChange(r.id, cr('OTP'));
+    await worker.drain();
+    expect(existsSync(join(ws.repoDir, '.git'))).toBe(false);
+    expect(existsSync(join(ws.devflowDir, 'changes', 'CR-01', 'impact.json'))).toBe(true);
+    expect(repo.getChangeRequest(r.id, 'CR-01')!.status).toBe('awaiting_decision');
+  });
+
   it('impact.md missing required sections and cr_id mismatch are reported', async () => {
     const { pipeline, worker, r, repo } = prepare();
     let n = 0;

@@ -43,6 +43,18 @@ describe('Git', () => {
     expect(readFileSync(join(dir, '.git', 'config'), 'utf8')).not.toContain('SECRETTOKEN');
     expect(existsSync(join(dir, 'README.md'))).toBe(true);
   });
+  it('stashAll stashes tracked and untracked changes; false when clean', async () => {
+    const dir = join(root, 'stash');
+    const git = new Git(dir);
+    await git.clone(remote, '', dir);
+    expect(await git.stashAll('nothing')).toBe(false);
+    writeFileSync(join(dir, 'README.md'), 'changed\n');
+    writeFileSync(join(dir, 'new.txt'), 'n');
+    expect(await git.stashAll('devflow:REQ-1:interrupted-by:CR-01:main')).toBe(true);
+    expect(g(dir, 'status', '--porcelain')).toBe('');
+    expect(existsSync(join(dir, 'new.txt'))).toBe(false);
+    expect(g(dir, 'stash', 'list')).toContain('devflow:REQ-1:interrupted-by:CR-01:main');
+  });
   it('commitAll returns false when clean', async () => {
     const dir = join(root, 'work3');
     const git = new Git(dir);

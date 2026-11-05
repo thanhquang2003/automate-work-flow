@@ -101,6 +101,16 @@ export class Git {
     return true;
   }
 
+  /**
+   * Stashes every uncommitted change, untracked (not ignored) files included, under `msg`.
+   * Returns false (and does nothing) when the working tree is clean.
+   */
+  async stashAll(msg: string): Promise<boolean> {
+    if (!(await this.run(['status', '--porcelain'])).trim()) return false;
+    await this.run([...(await this.identityArgs()), 'stash', 'push', '-u', '-m', msg]);
+    return true;
+  }
+
   /** Untracked, not ignored files (repo-relative, forward slashes). */
   async untracked(): Promise<string[]> {
     const out = await this.run(['ls-files', '--others', '--exclude-standard', '-z']);

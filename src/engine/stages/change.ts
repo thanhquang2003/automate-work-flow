@@ -129,13 +129,13 @@ function existingQuestionsText(ctx: StageContext): string {
   }).join('\n');
 }
 
-interface Refs { features: Set<string>; tasks: Set<string>; tcs: Set<string>; existingQ: Set<string>; answeredQ: Set<string>; maxQ: number }
+interface Refs { /** Any feature row exists (BREAKDOWN has run), cancelled ones included. */ hasFeatures: boolean; features: Set<string>; tasks: Set<string>; tcs: Set<string>; existingQ: Set<string>; answeredQ: Set<string>; maxQ: number }
 
 function checkImpact(path: string, crId: string, i: ImpactOutT, refs: Refs, seenQ: Set<string>): string[] {
   const errs: string[] = [];
   if (i.cr_id !== crId) errs.push(`cr_id là "${i.cr_id}" nhưng file thuộc ${crId}`);
   if (!Number.isFinite(i.effort_delta_mh)) errs.push('effort_delta_mh phải là số');
-  if (!refs.features.size) {
+  if (!refs.hasFeatures) {
     if (i.scope.modify.length || i.scope.remove.length || i.affected.features.length) {
       errs.push('yêu cầu chưa có danh sách chức năng (chưa qua BREAKDOWN): scope.modify, scope.remove và affected.features phải để trống');
     }
@@ -146,6 +146,9 @@ function checkImpact(path: string, crId: string, i: ImpactOutT, refs: Refs, seen
     bad(i.scope.remove, 'scope.remove');
     bad(i.affected.features, 'affected.features');
     for (const m of i.scope.modify) if (i.scope.remove.includes(m.feature_id)) errs.push(`chức năng "${m.feature_id}" không được vừa sửa (modify) vừa bỏ (remove)`);
+    for (const id of new Set([...i.scope.modify.map(m => m.feature_id), ...i.scope.remove])) {
+      if (!i.affected.features.includes(id)) errs.push(`chức năng "${id}" có trong scope.modify/scope.remove nên phải có trong affected.features`);
+    }
   }
   for (const id of i.affected.tasks) if (!refs.tasks.has(id)) errs.push(`affected.tasks: task "${id}" không tồn tại hoặc đã hủy`);
   for (const id of i.affected.test_cases) if (!refs.tcs.has(id)) errs.push(`affected.test_cases: test case "${id}" không tồn tại hoặc đã hủy`);
@@ -166,7 +169,8 @@ function checkImpact(path: string, crId: string, i: ImpactOutT, refs: Refs, seen
 export async function change(ctx: StageContext): Promise<StageOutcome> {
   const { ws, req, repo } = ctx;
   const all = repo.listChangeRequests(req.id);
-  const crs = all.filter(c => c.status === 'pending');
+  // 'analyzing' leftovers of an interrupted/failed run are taken again (the pipeline also resets them to pending).
+  const crs = all.filter(c => c.status === 'pending' || c.status === 'analyzing');
   if (!crs.length) {
     ctx.log('Không có yêu cầu thay đổi nào đang chờ phân tích');
     return { kind: 'next' };
@@ -177,7 +181,16 @@ export async function change(ctx: StageContext): Promise<StageOutcome> {
 
   const hasGit = existsSync(join(ws.repoDir, '.git'));
   const branch = integrationBranch(req.id);
-  if (hasGit) await ensureOnBranch(ctx, branch);
+  if (hasGit) {
+    // A stage interrupted mid-edit (DEVELOP/BUGFIX) may leave a dirty task branch that would block the checkout:
+    // stash it (never popped automatically — the CR may change what that work should be; the stash stays recoverable).
+    const cur = await ctx.git.currentBranch().catch(() => '');
+    if (cur !== branch) {
+      const msg = `devflow:${req.id}:interrupted-by:${[...crIds].join(',')}:${cur || '?'}`;
+      if (await ctx.git.stashAll(msg)) ctx.log(`Đã cất thay đổi dở dang vào git stash: ${msg}`, 'warn');
+    }
+    await ensureOnBranch(ctx, branch);
+  }
 
   // Unanswered questions left by an earlier, unfinished analysis of these CRs are stale: drop them before numbering.
   const answeredIds = new Set(answeredQuestions(repo, req.id).map(a => a.id));
@@ -188,6 +201,7 @@ export async function change(ctx: StageContext): Promise<StageOutcome> {
 
   const features = repo.listFeatures(req.id).filter(f => f.scopeStatus === 'active');
   const refs: Refs = {
+    hasFeatures: repo.listFeatures(req.id).length > 0,
     features: new Set(features.map(f => f.id)),
     tasks: new Set(repo.listTasks(req.id).filter(t => t.scopeStatus === 'active').map(t => t.id)),
     tcs: new Set(repo.listTestCases(req.id).filter(t => t.scopeStatus === 'active').map(t => t.id)),
@@ -218,8 +232,8 @@ export async function change(ctx: StageContext): Promise<StageOutcome> {
   const currentStage = o
     ? `${STAGE_LABELS[o.stage]} (\`${o.stage}\`)${o.status && STATUS_NOTE[o.status] ? ` — ${STATUS_NOTE[o.status]}` : ''}`
     : '(không xác định)';
-  const breakdownNote = refs.features.size
-    ? 'Yêu cầu đã có danh sách chức năng: dùng đúng ID chức năng/task/test case ở mục "Phạm vi hiện tại". Không chọn `reenter` muộn hơn giai đoạn đang thực hiện (DevFlow sẽ tự giới hạn).'
+  const breakdownNote = refs.hasFeatures
+    ? 'Yêu cầu đã có danh sách chức năng: dùng đúng ID chức năng/task/test case ở mục "Phạm vi hiện tại". Chọn `reenter` là giai đoạn sớm nhất có tài liệu/kết quả phải thay đổi; nếu giai đoạn đó muộn hơn giai đoạn yêu cầu đã tới, DevFlow sẽ tự giới hạn về giai đoạn yêu cầu đã tới.'
     : '**Lưu ý: yêu cầu CHƯA có danh sách chức năng (chưa qua bước BREAKDOWN).** Vì vậy `scope.modify`, `scope.remove`, `affected.features`, `affected.tasks`, `affected.test_cases` phải để trống (`[]`); mọi phạm vi mới hoặc khác đi mô tả trong `scope.add` và trong impact.md; `reenter` bắt buộc là `"ANALYSIS"`.';
 
   const cat = await readUlnlCatalog(templatePath(ctx.cfg, 'ulnl'));
