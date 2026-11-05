@@ -183,6 +183,11 @@ export class Pipeline {
     this.setStatus(reqId, req.stage, 'cancelled');
     for (const j of this.repo.listJobs(reqId)) if (j.status === 'queued' || j.status === 'paused') this.repo.failJob(j.id, 'cancelled');
     this.controllers.get(reqId)?.abort();
+    for (const c of this.repo.listChangeRequests(reqId)) {
+      if (['proposed', 'pending', 'analyzing', 'awaiting_decision'].includes(c.status)) {
+        this.repo.updateChangeRequest(reqId, c.id, { status: 'rejected', decisionNote: 'Hủy yêu cầu', decidedAt: this.now() });
+      }
+    }
     this.log(reqId, 'warn', 'Yêu cầu đã bị hủy');
   }
 

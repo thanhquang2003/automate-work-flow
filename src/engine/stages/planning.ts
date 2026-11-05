@@ -107,26 +107,38 @@ export function mergePlan(ctx: StageContext, tasks: TaskOut[], tcs: TestCaseOut[
     if (wanted !== 'cancelled') ctx.log(`${id} đã bị hủy${old.changedByCr ? ` theo ${old.changedByCr}` : ''}, giữ trạng thái hủy (phần việc làm lại phải dùng id mới)`, 'warn');
     return true;
   };
+  // Rows of a cancelled feature are cancelled with it, whatever Claude wrote.
+  const cancelledFeature = new Map(repo.listFeatures(req.id).filter(f => f.scopeStatus === 'cancelled').map(f => [f.id, f]));
+  const forced = <S extends string>(featureId: string | null, id: string, scope: S): S | 'cancelled' => {
+    const f = featureId ? cancelledFeature.get(featureId) : undefined;
+    if (!f) return scope;
+    if (scope !== 'cancelled') ctx.log(`${id} thuộc chức năng ${f.id} đã hủy${f.changedByCr ? ` theo ${f.changedByCr}` : ''}: ép trạng thái hủy`, 'warn');
+    return 'cancelled';
+  };
   const taskRows: TaskRow[] = tasks.map(t => {
     const old = prevT.get(t.id);
-    const base = { id: t.id, title: t.title, featureId: t.feature_id, dependsOn: t.depends_on, scopeStatus: t.scope_status };
-    if (!old) return { ...base, status: 'todo', reviewRounds: 0, branch: null, mrIid: null, changedByCr: crResponsible(ctx, 'task', t.id) ?? null };
-    if (keepCancelled(t.id, old, t.scope_status)) return { ...old, ...base, scopeStatus: 'cancelled' };
-    const changedByCr = t.scope_status !== old.scopeStatus ? (crResponsible(ctx, 'task', t.id) ?? old.changedByCr) : old.changedByCr;
+    const sc = forced(t.feature_id, t.id, t.scope_status);
+    const cr = (): string | null => (sc !== t.scope_status ? cancelledFeature.get(t.feature_id ?? '')?.changedByCr : undefined) ?? crResponsible(ctx, 'task', t.id) ?? null;
+    const base = { id: t.id, title: t.title, featureId: t.feature_id, dependsOn: t.depends_on, scopeStatus: sc };
+    if (!old) return { ...base, status: 'todo', reviewRounds: 0, branch: null, mrIid: null, changedByCr: cr() };
+    if (keepCancelled(t.id, old, sc)) return { ...old, ...base, scopeStatus: 'cancelled' };
+    const changedByCr = sc !== old.scopeStatus ? (cr() ?? old.changedByCr) : old.changedByCr;
     return { ...old, ...base, changedByCr };
   });
   const cancelledTcs: string[] = [];
   const tcRows: TestCaseRow[] = tcs.map(t => {
     const old = prevC.get(t.id);
-    const base = { id: t.id, featureId: t.feature_id, purpose: t.purpose, data: t.data, steps: t.steps, expected: t.expected, scopeStatus: t.scope_status };
+    const sc = forced(t.feature_id, t.id, t.scope_status);
+    const cr = (): string | null => (sc !== t.scope_status ? cancelledFeature.get(t.feature_id ?? '')?.changedByCr : undefined) ?? crResponsible(ctx, 'test_case', t.id) ?? null;
+    const base = { id: t.id, featureId: t.feature_id, purpose: t.purpose, data: t.data, steps: t.steps, expected: t.expected, scopeStatus: sc };
     if (!old) {
-      return { ...base, status1: null, status2: null, realResult: null, evidence: [], comment: null, baseline: null, changedByCr: crResponsible(ctx, 'test_case', t.id) ?? null };
+      return { ...base, status1: null, status2: null, realResult: null, evidence: [], comment: null, baseline: null, changedByCr: cr() };
     }
-    if (keepCancelled(t.id, old, t.scope_status)) return { ...old, ...base, scopeStatus: 'cancelled' };
-    const scopeChanged = t.scope_status !== old.scopeStatus;
-    if (scopeChanged && t.scope_status === 'cancelled') cancelledTcs.push(t.id);
+    if (keepCancelled(t.id, old, sc)) return { ...old, ...base, scopeStatus: 'cancelled' };
+    const scopeChanged = sc !== old.scopeStatus;
+    if (scopeChanged && sc === 'cancelled') cancelledTcs.push(t.id);
     const contentChanged = tcContent(base) !== tcContent(old);
-    const changedByCr = scopeChanged || contentChanged ? (crResponsible(ctx, 'test_case', t.id) ?? old.changedByCr) : old.changedByCr;
+    const changedByCr = scopeChanged || contentChanged ? (cr() ?? old.changedByCr) : old.changedByCr;
     return { ...old, ...base, changedByCr, baseline: contentChanged ? null : old.baseline };
   });
   const seenT = new Set(tasks.map(t => t.id));

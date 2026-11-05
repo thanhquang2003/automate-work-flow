@@ -13,7 +13,11 @@ import type { ImpactOutT } from '../../src/domain/types.js';
 import { clearStages, Pipeline } from '../../src/engine/pipeline.js';
 import { registerAllStages } from '../../src/engine/stages/index.js';
 import { Worker } from '../../src/engine/worker.js';
+import { hashPassword } from '../../src/security/crypto.js';
+import { signSession } from '../../src/web/auth.js';
 import { buildServer } from '../../src/web/server.js';
+import { Workspace } from '../../src/engine/workspace.js';
+import { writeProjectInfo } from '../../src/engine/stages/common.js';
 import { fakeGitLab } from '../fixtures/fake-gitlab.js';
 import { e2eMock } from '../fixtures/mock-claude.js';
 import { git, initRepo, outputPaths, roleOf } from '../engine/stage-helpers.js';
@@ -115,8 +119,11 @@ const multipart = (fields: string[][]) => {
   return { payload: fields.map(([k, v]) => `--${b}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`).join('') + `--${b}--\r\n`, headers: { ...HEADERS, 'content-type': `multipart/form-data; boundary=${b}` } };
 };
 
-async function boot(impacts: Impacts) {
-  const cfg: Config = { ...loadConfig({ DEVFLOW_MODE: 'local', CLAUDE_MOCK: '1' }), dataDir: tempDir('devflow-cr-') };
+async function boot(impacts: Impacts, server = false) {
+  const cfg: Config = {
+    ...loadConfig({ DEVFLOW_MODE: 'local', CLAUDE_MOCK: '1' }), dataDir: tempDir('devflow-cr-'),
+    ...(server ? { mode: 'server' as const, secretKey: 'test-secret', host: '0.0.0.0' } : {}),
+  };
   const root = tempDir('devflow-cr-remote-');
   const bare = join(root, 'app.git');
   git(root, 'init', '-q', '--bare', '-b', 'main', bare);
@@ -168,7 +175,7 @@ describe('change requests end-to-end', () => {
   it('add (auto-accepted mid-DEVELOP) → remove (gated, new iteration) → reject on done', async () => {
     const t = await boot({
       'CR-01': impact({ summary: 'Thêm thông báo', scope: { add: [{ name: 'Thông báo', description: 'Gửi email' }], modify: [], remove: [] } }),
-      'CR-02': impact({ summary: 'Bỏ báo cáo', scope: { add: [], modify: [], remove: ['F-02'] }, affected: { features: ['F-02'], tasks: ['T-02'], test_cases: ['TC-BAOCAO-01'] }, effort_delta_mh: -10, reenter: 'DESIGN' }),
+      'CR-02': impact({ summary: 'Bỏ báo cáo', scope: { add: [], modify: [], remove: ['F-02'] }, affected: { features: ['F-02'], tasks: ['T-02'], test_cases: ['TC-BAOCAO-01'] }, effort_delta_mh: -10, reenter: 'BREAKDOWN' }),
       'CR-03': impact({ summary: 'Đổi ý', scope: { add: [], modify: [{ feature_id: 'F-01', change: 'x' }], remove: [] }, affected: { features: ['F-01'], tasks: [], test_cases: [] }, effort_delta_mh: 100, reenter: 'DESIGN' }),
     });
     const created = await t.app.inject({
@@ -218,9 +225,13 @@ describe('change requests end-to-end', () => {
     expect(t.repo.listTasks(id).find(x => x.id === 'T-04')).toMatchObject({ status: 'done', scopeStatus: 'active' });
     expect(taskHeads(t.mock.prompts.slice(devAfterA))).toEqual(['T-04']);
     expect(existsSync(join(art, `TKCT_${id}_v3.docx`))).toBe(true);
-    const ulnl = await JSZip.loadAsync(readFileSync(join(art, `TestCase_${id}_v3.xlsx`)));
-    const ulnlText = (await Promise.all(Object.keys(ulnl.files).filter(n => /comments|sharedStrings/.test(n)).map(n => ulnl.file(n)!.async('string')))).join('');
-    expect(ulnlText).toContain('Hủy theo CR-02');
+    const xlsxText = async (f: string): Promise<string> => {
+      const zip = await JSZip.loadAsync(readFileSync(join(art, f)));
+      return (await Promise.all(Object.keys(zip.files).filter(n => /comments|sharedStrings/.test(n)).map(n => zip.file(n)!.async('string')))).join('');
+    };
+    expect(existsSync(join(art, `ULNL_${id}_v3.xlsx`))).toBe(true);
+    expect(await xlsxText(`ULNL_${id}_v3.xlsx`)).toContain('Hủy theo CR-02');
+    expect(await xlsxText(`TestCase_${id}_v3.xlsx`)).toContain('Hủy theo CR-02');
     // One final MR for the whole life, noted for the second iteration.
     const finals = [...t.gl.mrs.values()].filter(m => m.target === 'main');
     expect(finals).toHaveLength(1);
@@ -240,4 +251,35 @@ describe('change requests end-to-end', () => {
     expect(t.repo.listJobs(id).filter(j => j.status === 'queued')).toEqual([]);
     expect([...t.gl.mrs.values()].filter(m => m.target === 'main')).toHaveLength(1);
   }, 55_000);
+
+  it('customer proposal via the public survey → staff accepts → CHANGE auto-accepts → request continues', async () => {
+    const t = await boot({ 'CR-01': impact({ summary: 'Đề xuất nhỏ', reenter: 'ANALYSIS' }) }, true);
+    const r = t.repo.createRequest({
+      title: 'Kho', description: 'Quản lý kho', perfReq: '', nonfuncReq: '', projectKind: 'new', gitlabProject: null, softwareTypes: ['web'], runMode: 'auto', createdBy: null,
+    });
+    const ws = Workspace.for(t.cfg, r.id).ensure();
+    initRepo(ws.repoDir, `devflow/${r.id}`);
+    writeProjectInfo(ws, { gitlab: false, branch: `devflow/${r.id}` });
+    t.repo.updateRequest(r.id, { stage: 'CLARIFY', status: 'awaiting_customer' });
+    t.repo.createSurveyLink({ token: 'tokcr', requestId: r.id, round: 1, expiresAt: Date.now() + 86_400_000 });
+    const origin = new URL(t.cfg.publicBaseUrl).host;
+    const sres = await t.app.inject({
+      method: 'POST', url: '/s/tokcr', headers: { origin: t.cfg.publicBaseUrl, host: origin, 'content-type': 'application/x-www-form-urlencoded' },
+      payload: new URLSearchParams({ action: 'draft', proposal: 'Xin thêm xuất báo cáo Excel' }).toString(),
+    });
+    expect(sres.statusCode).toBe(200);
+    expect(t.repo.getChangeRequest(r.id, 'CR-01')).toMatchObject({ status: 'proposed', source: 'customer', description: 'Xin thêm xuất báo cáo Excel' });
+    expect(t.repo.getRequest(r.id)).toMatchObject({ stage: 'CLARIFY', status: 'awaiting_customer' });
+
+    const u = t.repo.createUser({ username: 'staff', passwordHash: hashPassword('password1'), role: 'admin' });
+    const acc = await t.app.inject({
+      method: 'POST', url: `/requests/${r.id}/changes/CR-01/accept-proposal`,
+      headers: { origin: t.cfg.publicBaseUrl, host: origin, cookie: `devflow_sid=${signSession(t.cfg.secretKey, u.id)}`, 'content-type': 'application/x-www-form-urlencoded' }, payload: '',
+    });
+    expect(acc.statusCode).toBe(302);
+    await t.until(r.id, () => t.repo.getChangeRequest(r.id, 'CR-01')!.status === 'accepted' && t.repo.getRequest(r.id)!.stage !== 'CHANGE');
+    expect(t.repo.getChangeRequest(r.id, 'CR-01')).toMatchObject({ baselineFrom: 1, baselineTo: 2, decisionNote: 'Tự động chấp nhận' });
+    expect(t.repo.getRequest(r.id)).toMatchObject({ baselineVersion: 2 });
+    expect(t.mock.roles).toContain('change-analyst');
+  }, 30_000);
 });

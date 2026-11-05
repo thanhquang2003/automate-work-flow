@@ -305,6 +305,40 @@ describe('incremental stages after accepted CRs', () => {
     expect(p.repo.listEvents(p.r.id).some(e => e.level === 'warn' && e.message.includes('TC-DANGNHAP-01'))).toBe(true);
   });
 
+  it('planning forces tasks and TCs of a cancelled feature to cancelled and closes their bugs', async () => {
+    const p = prep({
+      stubs: ['DEVELOP'],
+      features: [...FEATURES, feature('F-03', 'XOA', { scopeStatus: 'cancelled', changedByCr: 'CR-09' })],
+      tasks: [task('T-01', 'F-01', { status: 'done' })],
+      testCases: [tcRow('TC-XOA-01', 'F-03', { status1: 'F' })],
+    });
+    p.repo.upsertBug(p.r.id, { tcId: 'TC-XOA-01', gitlabIid: null, fixAttempts: 2, status: 'open' });
+    acceptCr(p.repo, p.ws, p.r.id, {});
+    mockClaude({
+      planner: dir => {
+        writeFileSync(join(dir, 'tasks.json'), JSON.stringify({ tasks: [
+          { id: 'T-01', title: 'Task T-01', feature_id: 'F-01', depends_on: [] },
+          { id: 'T-02', title: 'Task T-02', feature_id: 'F-02', depends_on: [] },
+          { id: 'T-05', title: 'Làm lại XOA', feature_id: 'F-03', depends_on: [] },
+        ] }));
+        writeFileSync(join(dir, 'testcases.json'), JSON.stringify({ test_cases: [
+          { id: 'TC-DANGNHAP-01', feature_id: 'F-01', purpose: 'p', data: '', steps: '1. Làm', expected: 'Đúng' },
+          { id: 'TC-BAOCAO-01', feature_id: 'F-02', purpose: 'p', data: '', steps: '1. Làm', expected: 'Đúng' },
+          { id: 'TC-XOA-01', feature_id: 'F-03', purpose: 'Mục đích TC-XOA-01', data: '', steps: '1. Làm', expected: 'Đúng', scope_status: 'active' },
+          { id: 'TC-XOA-02', feature_id: 'F-03', purpose: 'mới', data: '', steps: '1. Làm', expected: 'Đúng' },
+        ] }));
+      },
+    });
+    startAt(p.pipeline, p.r.id, 'PLANNING');
+    await p.worker.drain();
+    expect(p.repo.getTask(p.r.id, 'T-05')).toMatchObject({ scopeStatus: 'cancelled', changedByCr: 'CR-09' });
+    expect(p.repo.getTestCase(p.r.id, 'TC-XOA-01')).toMatchObject({ scopeStatus: 'cancelled', changedByCr: 'CR-09' });
+    expect(p.repo.getTestCase(p.r.id, 'TC-XOA-02')).toMatchObject({ scopeStatus: 'cancelled', changedByCr: 'CR-09' });
+    expect(p.repo.getBug(p.r.id, 'TC-XOA-01')).toMatchObject({ status: 'closed', note: 'Đóng do CR-09', fixAttempts: 0 });
+    expect(p.repo.getTestCase(p.r.id, 'TC-DANGNHAP-01')).toMatchObject({ scopeStatus: 'active' });
+    expect(p.repo.listEvents(p.r.id).some(e => e.level === 'warn' && e.message.includes('T-05') && e.message.includes('CR-09'))).toBe(true);
+  });
+
   it('develop skips cancelled tasks and redoes a reopened task on a fresh branch', async () => {
     const p = prep({
       stubs: ['TEST'],

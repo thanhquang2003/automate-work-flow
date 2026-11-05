@@ -464,6 +464,18 @@ describe('pipeline change control', () => {
     expect(repo.listChangeRequests(r.id)).toHaveLength(0);
   });
 
+  it('cancel rejects the open change requests with a note', () => {
+    registerAll();
+    const { repo, pipeline } = setup();
+    const r = mkReq(repo, { runMode: 'review' });
+    place(repo, r.id, 'CLARIFY', 'awaiting_customer');
+    const prop = pipeline.proposeChange(r.id, cr('đề xuất'));
+    const done = repo.createChangeRequest(r.id, { ...cr('đã xong'), source: 'staff', status: 'applied' });
+    pipeline.cancel(r.id);
+    expect(repo.getChangeRequest(r.id, prop.id)).toMatchObject({ status: 'rejected', decisionNote: 'Hủy yêu cầu' });
+    expect(repo.getChangeRequest(r.id, done.id)!.status).toBe('applied');
+  });
+
   it('proposal does nothing until accepted', async () => {
     registerAll();
     const { repo, pipeline, worker } = setup();
@@ -533,11 +545,16 @@ describe('changes helpers', () => {
     expect(computeReentry([imp('DESIGN')], false, 'CLARIFY')).toBe('CLARIFY');
     // request had not reached ANALYSIS yet: continue from where it was
     expect(computeReentry([imp('DESIGN')], false, 'INTAKE')).toBe('INTAKE');
+    // add/remove always needs BREAKDOWN, even when Claude picked a later stage
+    const scoped = (reenter: Stage, k: 'add' | 'remove'): ImpactOutT => ({ ...imp(reenter), scope: { add: k === 'add' ? [{ name: 'n', description: 'd' }] : [], modify: [], remove: k === 'remove' ? ['F-01'] : [] } });
+    expect(computeReentry([scoped('DESIGN', 'add')], false, 'TEST')).toBe('BREAKDOWN');
+    expect(computeReentry([scoped('DEVELOP', 'remove')], false, 'DONE')).toBe('BREAKDOWN');
+    expect(computeReentry([scoped('DESIGN', 'remove')], false, 'CLARIFY')).toBe('CLARIFY');
   });
 
   it('restorePrevious maps the interrupted status to a restore plan', () => {
     expect(restorePrevious('DEVELOP', 'running')).toEqual({ stage: 'DEVELOP', status: 'running', enqueue: true });
-    expect(restorePrevious('DEVELOP', 'failed')).toEqual({ stage: 'DEVELOP', status: 'running', enqueue: true });
+    expect(restorePrevious('DEVELOP', 'failed')).toEqual({ stage: 'DEVELOP', status: 'failed', enqueue: false });
     expect(restorePrevious('DEVELOP', 'paused')).toEqual({ stage: 'DEVELOP', status: 'paused', enqueue: true });
     expect(restorePrevious('CLARIFY', 'awaiting_customer')).toEqual({ stage: 'CLARIFY', status: 'awaiting_customer', enqueue: false });
     expect(restorePrevious('DONE', 'done')).toEqual({ stage: 'DONE', status: 'done', enqueue: false });

@@ -30,11 +30,13 @@ const idx = (s: Stage): number => STAGES.indexOf(s);
 /**
  * Stage to re-enter after accepting CRs (spec §4.3): the earliest `reenter` of the accepted impacts, or ANALYSIS when
  * an accepted CR raised a new `must` question; never earlier than ANALYSIS; never later than the interrupted stage
- * (DONE/BUGFIX/CHANGE count as TEST). When the request had not reached ANALYSIS yet it simply continues from there.
+ * (DONE/BUGFIX/CHANGE count as TEST). A CR that adds or removes features re-enters at BREAKDOWN at the latest. When the request had not reached ANALYSIS yet it simply continues from there.
  */
 export function computeReentry(impacts: ImpactOutT[], hasNewMust: boolean, prevStage: Stage): Stage {
   const wanted: Stage[] = impacts.map(i => i.reenter);
   if (hasNewMust) wanted.push('ANALYSIS');
+  // Adding or removing a feature changes the feature list / ULNL, which only BREAKDOWN regenerates.
+  if (impacts.some(i => i.scope.add.length || i.scope.remove.length)) wanted.push('BREAKDOWN');
   let target: Stage = wanted.length ? wanted.reduce((a, b) => (idx(b) < idx(a) ? b : a)) : 'TEST';
   if (idx(target) < idx('ANALYSIS')) target = 'ANALYSIS';
   const bound: Stage = prevStage === 'DONE' || prevStage === 'BUGFIX' || prevStage === 'CHANGE' ? 'TEST' : prevStage;
@@ -44,14 +46,16 @@ export function computeReentry(impacts: ImpactOutT[], hasNewMust: boolean, prevS
 export interface RestorePlan { stage: Stage; status: RequestStatus; enqueue: boolean }
 
 /**
- * Where a request goes back to when every CR of a batch is rejected: a stage that was running (or failed) is run again;
+ * Where a request goes back to when every CR of a batch is rejected: a stage that was running is run again; a failed one stays failed;
  * a paused one is run again once resumed (the job is parked); waiting/finished states are restored as they were.
  */
 export function restorePrevious(stage: Stage, status: RequestStatus): RestorePlan {
   switch (status) {
     case 'running':
-    case 'failed':
       return { stage, status: 'running', enqueue: true };
+    case 'failed':
+      // A failed stage stays failed (needs a human retry); nothing is enqueued.
+      return { stage, status: 'failed', enqueue: false };
     case 'paused':
       return { stage, status: 'paused', enqueue: true };
     default:
@@ -70,7 +74,8 @@ function closeBug(repo: Repo, reqId: string, tcId: string, crId: string): void {
 /**
  * Applies an accepted CR's scope to the DB (spec §4.3). remove → the feature and its tasks/test cases are cancelled
  * (never deleted); modify → affected tasks go back to `todo` with review rounds reset, affected test cases lose their
- * baseline so TEST re-runs them (result history is kept) and their bugs are closed; add → nothing (BREAKDOWN creates it).
+ * baseline so TEST re-runs them (result history is kept; baseline:null only matters for v1-era runs without
+ * run.baseline — otherwise every active test case is re-tested at the new version anyway) and their bugs are closed; add → nothing (BREAKDOWN creates it).
  */
 export function applyAcceptedChange(repo: Repo, req: Pick<RequestRow, 'id'>, cr: Pick<ChangeRequestRow, 'id'>, impact: ImpactOutT): void {
   const reqId = req.id;

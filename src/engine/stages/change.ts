@@ -153,6 +153,9 @@ function checkImpact(path: string, crId: string, i: ImpactOutT, refs: Refs, seen
   for (const id of i.affected.tasks) if (!refs.tasks.has(id)) errs.push(`affected.tasks: task "${id}" không tồn tại hoặc đã hủy`);
   for (const id of i.affected.test_cases) if (!refs.tcs.has(id)) errs.push(`affected.test_cases: test case "${id}" không tồn tại hoặc đã hủy`);
   if (!(CR_REENTER_STAGES as readonly string[]).includes(i.reenter)) errs.push(`reenter "${i.reenter}" không hợp lệ`);
+  else if ((i.scope.add.length || i.scope.remove.length) && i.reenter !== 'ANALYSIS' && i.reenter !== 'BREAKDOWN') {
+    errs.push(`CR có thêm/bỏ chức năng (scope.add/scope.remove) nên reenter phải là "ANALYSIS" hoặc "BREAKDOWN" (đang là "${i.reenter}"), vì chỉ BREAKDOWN cập nhật danh sách chức năng và ULNL`);
+  }
   for (const q of i.questions) {
     const n = qNum(q.id);
     if (n === undefined || !/^Q-\d{2,}$/.test(q.id)) errs.push(`câu hỏi ${q.id}: id phải có dạng Q-NN`);

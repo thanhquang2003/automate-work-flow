@@ -130,6 +130,22 @@ describe('CHANGE stage', () => {
     expect(repo.getChangeRequest(r.id, 'CR-01')).toMatchObject({ status: 'awaiting_decision', reenterStage: 'ANALYSIS' });
   });
 
+  it('add/remove with a reenter later than BREAKDOWN is rejected, then retried', async () => {
+    const { repo, pipeline, worker, r } = prepare();
+    let n = 0;
+    mockClaude({
+      'change-analyst': writeImpacts(() => ({
+        scope: { add: [{ name: 'OTP', description: 'x' }], modify: [], remove: [] }, affected: { features: [], tasks: [], test_cases: [] },
+        reenter: n++ === 0 ? 'DESIGN' : 'BREAKDOWN',
+      })),
+    });
+    pipeline.submitChange(r.id, cr('Thêm OTP'));
+    await worker.drain();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.prompt).toMatch(/reenter phải là "ANALYSIS" hoặc "BREAKDOWN"/);
+    expect(repo.getChangeRequest(r.id, 'CR-01')).toMatchObject({ status: 'awaiting_decision', reenterStage: 'BREAKDOWN' });
+  });
+
   it('new questions upserted with CR prefix', async () => {
     const { repo, pipeline, worker, r } = prepare();
     repo.upsertQuestions(r.id, 1, [q('Q-01', 'must'), q('Q-02', 'should')]);
