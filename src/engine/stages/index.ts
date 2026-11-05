@@ -2,6 +2,7 @@ import { registerStage } from '../pipeline.js';
 import { analysis } from './analysis.js';
 import { breakdown } from './breakdown.js';
 import { bugfix } from './bugfix.js';
+import { change } from './change.js';
 import { clarify } from './clarify.js';
 import { codebaseScan } from './codebase-scan.js';
 import { design } from './design.js';
@@ -25,4 +26,6 @@ export function registerAllStages(): void {
   registerStage('TEST', test, { gate: false });
   registerStage('BUGFIX', bugfix, { gate: false });
   registerStage('DONE', done, { gate: false });
+  // The pipeline owns the CHANGE gate (per-CR decisions or auto-accept, see Pipeline.afterChange).
+  registerStage('CHANGE', change, { gate: false });
 }

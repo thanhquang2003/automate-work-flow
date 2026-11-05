@@ -17,7 +17,7 @@ const FEATURES_EXAMPLE = {
 
 const cell = (s: string): string => s.replace(/\|/g, '/').replace(/\s+/g, ' ').trim();
 
-function typeTable(cat: UlnlCatalog): string {
+export function typeTable(cat: UlnlCatalog): string {
   if (!cat.types.length) return '(mẫu ULNL không có bảng loại chức năng — dùng mã ngắn mô tả loại, ví dụ CN_WEB1)';
   return ['| Mã | Tên | Nhóm | Giải thích (tiêu chí chọn) |', '|---|---|---|---|',
     ...cat.types.map(t => `| ${cell(t.code)} | ${cell(t.name)} | ${cell(t.group)} | ${cell(t.explain)} |`)].join('\n');

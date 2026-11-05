@@ -11,7 +11,7 @@ export function safeFileName(name: string): string {
 }
 
 /** "a.txt" → "a-2.txt", "a-3.txt"… until the (case-insensitive) name is unused. */
-function uniqueName(name: string, used: Set<string>): string {
+export function uniqueName(name: string, used: Set<string>): string {
   const ext = extname(name);
   const stem = ext ? name.slice(0, -ext.length) : name;
   let out = name;

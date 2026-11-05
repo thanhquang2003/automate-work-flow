@@ -1,14 +1,10 @@
 import { fileURLToPath } from 'node:url';
 import { Eta } from 'eta';
-import { STAGES } from '../domain/types.js';
+import { STAGES, STAGE_LABELS } from '../domain/types.js';
 
 export const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 
-export const STAGE_LABELS: Record<string, string> = {
-  INTAKE: 'Tiếp nhận', CODEBASE_SCAN: 'Đọc hiểu dự án', ANALYSIS: 'Phân tích', CLARIFY: 'Làm rõ yêu cầu',
-  BREAKDOWN: 'Bóc tách chức năng', DESIGN: 'Thiết kế', PLANNING: 'Lập kế hoạch & Test case',
-  DEVELOP: 'Phát triển & Review', TEST: 'Kiểm thử', BUGFIX: 'Sửa lỗi', DONE: 'Hoàn thành', CHANGE: 'Thay đổi yêu cầu',
-};
+export { STAGE_LABELS };
 export const STATUS_LABELS: Record<string, string> = {
   running: 'Đang chạy', awaiting_approval: 'Chờ duyệt', awaiting_customer: 'Chờ khách hàng', paused: 'Tạm dừng',
   needs_human: 'Cần người xử lý', failed: 'Lỗi', done: 'Hoàn thành', cancelled: 'Đã hủy',

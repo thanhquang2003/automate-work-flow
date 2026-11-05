@@ -3,6 +3,13 @@ import { z } from 'zod';
 export const STAGES = ['INTAKE', 'CODEBASE_SCAN', 'ANALYSIS', 'CLARIFY', 'BREAKDOWN', 'DESIGN', 'PLANNING', 'DEVELOP', 'TEST', 'BUGFIX', 'DONE', 'CHANGE'] as const;
 export type Stage = (typeof STAGES)[number];
 
+/** Vietnamese stage names (UI, prompts). */
+export const STAGE_LABELS: Record<Stage, string> = {
+  INTAKE: 'Tiếp nhận', CODEBASE_SCAN: 'Đọc hiểu dự án', ANALYSIS: 'Phân tích', CLARIFY: 'Làm rõ yêu cầu',
+  BREAKDOWN: 'Bóc tách chức năng', DESIGN: 'Thiết kế', PLANNING: 'Lập kế hoạch & Test case',
+  DEVELOP: 'Phát triển & Review', TEST: 'Kiểm thử', BUGFIX: 'Sửa lỗi', DONE: 'Hoàn thành', CHANGE: 'Thay đổi yêu cầu',
+};
+
 export type RequestStatus = 'running' | 'awaiting_approval' | 'awaiting_customer' | 'paused' | 'needs_human' | 'failed' | 'done' | 'cancelled';
 export type ProjectKind = 'new' | 'existing';
 export type RunMode = 'auto' | 'review';
