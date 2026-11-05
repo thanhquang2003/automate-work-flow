@@ -1,0 +1,42 @@
+<% const r = it.r; const idx = it.STAGES.indexOf(r.stage); const tabLabels = { overview: 'Tổng quan', analysis: 'Phân tích', questions: 'Câu hỏi', docs: 'Tài liệu', tasks: 'Task', tests: 'Test', bugs: 'Bug' }; %>
+<div class="head">
+  <div>
+    <h1><%= r.id %> - <%= r.title %></h1>
+    <p class="muted"><%= it.RUN_MODE_LABELS[r.runMode] %> · tạo <%= it.fmtTime(r.createdAt) %> · <span class="badge st-<%= r.status %>"><%= it.STATUS_LABELS[r.status] %></span></p>
+  </div>
+  <a class="btn" href="/requests/<%= r.id %>/bundle.zip">Tải gói kết quả (.zip)</a>
+</div>
+
+<ol class="progress" aria-label="Tiến trình">
+  <% for (let i = 0; i < it.STAGES.length; i++) { const s = it.STAGES[i]; const cls = i < idx || r.status === 'done' ? 'done' : i === idx ? 'current st-' + r.status : ''; %>
+  <li class="<%= cls %>"><span><%= it.STAGE_LABELS[s] %></span></li>
+  <% } %>
+</ol>
+
+<div class="actions card">
+  <%~ include('./partials/actions', it) %>
+</div>
+
+<nav class="tabs">
+  <% for (const t of it.TABS) { %>
+  <a href="/requests/<%= r.id %>?tab=<%= t %>" class="<%= it.tab === t ? 'active' : '' %>"><%= tabLabels[t] %></a>
+  <% } %>
+</nav>
+
+<section class="card">
+<% if (it.tab === 'overview') { %>
+  <%~ include('./partials/overview', it) %>
+<% } else if (it.tab === 'analysis') { %>
+  <% if (it.analysisHtml) { %><div class="md"><%~ it.analysisHtml %></div><% } else { %><p class="muted">Chưa có kết quả phân tích.</p><% } %>
+<% } else if (it.tab === 'questions') { %>
+  <%~ it.questionsHtml %>
+<% } else if (it.tab === 'docs') { %>
+  <%~ include('./partials/docs', it) %>
+<% } else if (it.tab === 'tasks') { %>
+  <%~ include('./partials/tasks', it) %>
+<% } else if (it.tab === 'tests') { %>
+  <%~ include('./partials/tests', it) %>
+<% } else if (it.tab === 'bugs') { %>
+  <%~ include('./partials/bugs', it) %>
+<% } %>
+</section>

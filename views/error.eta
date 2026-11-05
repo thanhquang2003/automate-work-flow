@@ -1,0 +1,5 @@
+<div class="card narrow">
+  <h1><%= it.code %></h1>
+  <p><%= it.message %></p>
+  <a class="btn" href="/">Về trang chủ</a>
+</div>

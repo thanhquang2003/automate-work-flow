@@ -1,0 +1,24 @@
+<div class="grid2">
+  <div>
+    <h3>Log trực tiếp</h3>
+    <pre id="log" class="log" data-events="/requests/<%= it.r.id %>/events" aria-live="polite"></pre>
+  </div>
+  <div>
+    <h3>Mô tả</h3>
+    <p class="pre-wrap"><%= it.r.description %></p>
+    <% if (it.r.perfReq) { %><h3>Yêu cầu hiệu năng</h3><p class="pre-wrap"><%= it.r.perfReq %></p><% } %>
+    <% if (it.r.nonfuncReq) { %><h3>Yêu cầu phi chức năng</h3><p class="pre-wrap"><%= it.r.nonfuncReq %></p><% } %>
+    <p class="muted">Dự án: <%= it.r.projectKind === 'new' ? 'mới' : 'có sẵn' %><% if (it.r.gitlabProject) { %> · <%= it.r.gitlabProject %><% } %>
+    <% if (it.r.softwareTypes.length) { %> · Loại: <%= it.r.softwareTypes.join(', ') %><% } %></p>
+    <h3>Tệp đính kèm</h3>
+    <% if (it.attachments.length === 0) { %><p class="muted">Không có.</p><% } else { %>
+    <ul><% for (const a of it.attachments) { %><li><%= a.filename %> <span class="muted">(<%= it.fmtSize(a.size) %>)</span></li><% } %></ul>
+    <% } %>
+    <h3>Lịch sử giai đoạn</h3>
+    <% if (it.stageRuns.length === 0) { %><p class="muted">Chưa có.</p><% } else { %>
+    <ul class="runs"><% for (const s of it.stageRuns) { %>
+      <li><%= it.STAGE_LABELS[s.stage] %> #<%= s.attempt %> - <%= s.status %> <span class="muted"><%= it.fmtTime(s.startedAt) %></span><% if (s.error) { %><br><span class="err"><%= s.error %></span><% } %></li>
+    <% } %></ul>
+    <% } %>
+  </div>
+</div>

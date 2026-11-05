@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title><%= it.title %> - DevFlow</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/htmx.min.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/">DevFlow</a>
+  <% if (it.user) { %>
+  <nav>
+    <a href="/">Yêu cầu</a>
+    <a href="/templates">Mẫu tài liệu</a>
+    <a href="/settings">Cài đặt</a>
+    <% if (it.mode === 'server') { %><a href="/users">Người dùng</a><% } %>
+  </nav>
+  <div class="who">
+    <span><%= it.user.username %></span>
+    <% if (it.mode === 'server') { %>
+    <form method="post" action="/logout" class="inline"><button class="link" type="submit">Đăng xuất</button></form>
+    <% } %>
+  </div>
+  <% } %>
+</header>
+<main class="container">
+<% if (it.flash) { %><div class="flash <%= it.flashKind === 'error' ? 'flash-error' : 'flash-ok' %>"><%= it.flash %></div><% } %>
+<%~ it.body %>
+</main>
+</body>
+</html>

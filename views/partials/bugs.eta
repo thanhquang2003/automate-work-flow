@@ -1,0 +1,12 @@
+<% if (it.bugs.length === 0) { %><p class="muted">Chưa có bug nào.</p><% } else { %>
+<table class="list">
+  <thead><tr><th>Test case</th><th>Issue GitLab</th><th>Số lần sửa</th><th>Trạng thái</th></tr></thead>
+  <tbody>
+  <% for (const b of it.bugs) { %>
+  <tr><td><%= b.tcId %></td>
+  <td><% if (b.gitlabIid) { %><% if (it.gitlabBase && it.r.gitlabProject) { %><a href="<%= it.gitlabBase %>/<%= it.r.gitlabProject %>/-/issues/<%= b.gitlabIid %>" target="_blank" rel="noopener">#<%= b.gitlabIid %></a><% } else { %>#<%= b.gitlabIid %><% } %><% } %></td>
+  <td><%= b.fixAttempts %></td><td><span class="badge"><%= b.status %></span></td></tr>
+  <% } %>
+  </tbody>
+</table>
+<% } %>

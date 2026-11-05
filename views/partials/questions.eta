@@ -1,0 +1,18 @@
+<% /* Placeholder: Task 11 replaces this partial with import/export/survey/continue actions. */ %>
+<% if (it.questions.length === 0) { %>
+<p class="muted">Chưa có câu hỏi nào.</p>
+<% } else { %>
+<table class="list">
+  <thead><tr><th>Mã</th><th>Nhóm</th><th>Câu hỏi</th><th>Ưu tiên</th><th>Trả lời</th></tr></thead>
+  <tbody>
+  <% for (const q of it.questions) { %>
+  <tr>
+    <td><%= q.id %></td><td><%= q.category %></td>
+    <td><%= q.question %><br><span class="muted"><%= q.why %></span></td>
+    <td><%= q.priority === 'must' ? 'Bắt buộc' : 'Nên có' %></td>
+    <td class="pre-wrap"><%= it.answers.get(q.id) || '' %></td>
+  </tr>
+  <% } %>
+  </tbody>
+</table>
+<% } %>

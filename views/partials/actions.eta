@@ -1,0 +1,33 @@
+<% const r = it.r; const base = '/requests/' + r.id; %>
+<% if (r.status === 'awaiting_approval') { %>
+  <p>Giai đoạn <strong><%= it.STAGE_LABELS[r.stage] %></strong> đã xong, đang chờ duyệt.</p>
+  <div class="row">
+    <form method="post" action="<%= base %>/approve"><button class="btn primary" type="submit">Duyệt (Approve)</button></form>
+    <form method="post" action="<%= base %>/reject" class="stack grow">
+      <textarea name="feedback" rows="2" placeholder="Phản hồi để làm lại giai đoạn này" required></textarea>
+      <div><button class="btn danger" type="submit">Từ chối (Reject)</button></div>
+    </form>
+  </div>
+<% } else if (r.status === 'running') { %>
+  <div class="row">
+    <form method="post" action="<%= base %>/pause"><button class="btn" type="submit">Tạm dừng</button></form>
+    <form method="post" action="<%= base %>/cancel" data-confirm="Hủy yêu cầu này?"><button class="btn danger" type="submit">Hủy</button></form>
+  </div>
+<% } else if (r.status === 'paused') { %>
+  <div class="row">
+    <form method="post" action="<%= base %>/resume"><button class="btn primary" type="submit">Tiếp tục</button></form>
+    <form method="post" action="<%= base %>/cancel" data-confirm="Hủy yêu cầu này?"><button class="btn danger" type="submit">Hủy</button></form>
+  </div>
+<% } else if (r.status === 'failed' || r.status === 'needs_human') { %>
+  <p><%= r.status === 'failed' ? 'Giai đoạn bị lỗi.' : 'Cần người xử lý.' %> Xem log bên dưới.</p>
+  <div class="row">
+    <form method="post" action="<%= base %>/rerun"><button class="btn primary" type="submit">Chạy lại bước</button></form>
+    <form method="post" action="<%= base %>/cancel" data-confirm="Hủy yêu cầu này?"><button class="btn danger" type="submit">Hủy</button></form>
+  </div>
+<% } else if (r.status === 'awaiting_customer') { %>
+  <p>Đang chờ câu trả lời của khách hàng. <a href="<%= base %>?tab=questions">Mở tab Câu hỏi</a></p>
+<% } else if (r.status === 'done') { %>
+  <p>Yêu cầu đã hoàn thành. <a href="<%= base %>?tab=docs">Xem tài liệu</a></p>
+<% } else { %>
+  <p class="muted">Yêu cầu đã bị hủy.</p>
+<% } %>

@@ -1,0 +1,18 @@
+<% const id = it.r.id; %>
+<h3>Tài liệu</h3>
+<% if (it.docs.length === 0) { %><p class="muted">Chưa có tài liệu nào.</p><% } else { %>
+<ul class="files">
+<% for (const f of it.docs) { %>
+  <li><a href="/requests/<%= id %>/files/<%= f.rel.split('/').map(encodeURIComponent).join('/') %>"><%= f.rel %></a> <span class="muted">(<%= it.fmtSize(f.size) %>)</span></li>
+<% } %>
+</ul>
+<% } %>
+<% if (it.evidence.length) { %>
+<h3>Evidence</h3>
+<ul class="files">
+<% for (const f of it.evidence) { %>
+  <li><a href="/requests/<%= id %>/files/<%= f.rel.split('/').map(encodeURIComponent).join('/') %>"><%= f.rel %></a> <span class="muted">(<%= it.fmtSize(f.size) %>)</span></li>
+<% } %>
+</ul>
+<% } %>
+<p><a class="btn" href="/requests/<%= id %>/bundle.zip">Tải gói kết quả (.zip)</a></p>

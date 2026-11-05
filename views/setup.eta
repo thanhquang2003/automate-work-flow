@@ -1,0 +1,9 @@
+<div class="card narrow">
+  <h1>Thiết lập quản trị viên</h1>
+  <p class="muted">Chưa có người dùng nào. Tạo tài khoản quản trị viên đầu tiên.</p>
+  <form method="post" action="/setup" class="stack">
+    <label>Tên đăng nhập <input name="username" required minlength="3" autocomplete="username"></label>
+    <label>Mật khẩu (tối thiểu 8 ký tự) <input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
+    <button class="btn primary" type="submit">Tạo quản trị viên</button>
+  </form>
+</div>

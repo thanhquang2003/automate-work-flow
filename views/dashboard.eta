@@ -1,0 +1,36 @@
+<div class="head">
+  <h1>Yêu cầu</h1>
+  <a class="btn primary" href="/requests/new">+ Tạo yêu cầu mới</a>
+</div>
+<form method="get" action="/" class="filters">
+  <input name="q" value="<%= it.filterQ %>" placeholder="Tìm theo mã hoặc tiêu đề">
+  <select name="status">
+    <option value="">Tất cả trạng thái</option>
+    <% for (const [k, v] of Object.entries(it.STATUS_LABELS)) { %>
+    <option value="<%= k %>" <%= it.filterStatus === k ? 'selected' : '' %>><%= v %></option>
+    <% } %>
+  </select>
+  <button class="btn" type="submit">Lọc</button>
+</form>
+<% if (it.rows.length === 0) { %>
+<div class="card"><p class="muted">Chưa có yêu cầu nào.</p></div>
+<% } else { %>
+<div class="table-wrap">
+<table class="list">
+  <thead><tr><th>Mã</th><th>Tiêu đề</th><th>Giai đoạn</th><th>Chế độ</th><th>Trạng thái</th><th>Người tạo</th><th>Tạo lúc</th></tr></thead>
+  <tbody>
+  <% for (const r of it.rows) { %>
+  <tr>
+    <td><a href="/requests/<%= r.id %>"><%= r.id %></a></td>
+    <td><a href="/requests/<%= r.id %>"><%= r.title %></a></td>
+    <td><%= it.STAGE_LABELS[r.stage] %></td>
+    <td><%= it.RUN_MODE_LABELS[r.runMode] %></td>
+    <td><span class="badge st-<%= r.status %>"><%= it.STATUS_LABELS[r.status] %></span></td>
+    <td><%= r.creator %></td>
+    <td><%= it.fmtTime(r.createdAt) %></td>
+  </tr>
+  <% } %>
+  </tbody>
+</table>
+</div>
+<% } %>

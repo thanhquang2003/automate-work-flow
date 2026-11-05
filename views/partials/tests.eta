@@ -1,0 +1,22 @@
+<% const id = it.r.id; %>
+<% if (it.tests.length === 0) { %><p class="muted">Chưa có test case nào.</p><% } else { %>
+<div class="table-wrap"><table class="list">
+  <thead><tr><th>Mã</th><th>Mục đích</th><th>Lần 1</th><th>Lần 2</th><th>Kết quả thực tế</th><th>Evidence</th><th>Ghi chú</th></tr></thead>
+  <tbody>
+  <% for (const t of it.tests) { %>
+  <tr>
+    <td><%= t.id %></td><td><%= t.purpose %></td>
+    <td><span class="badge ts-<%= t.status1 || 'none' %>"><%= t.status1 || '-' %></span></td>
+    <td><span class="badge ts-<%= t.status2 || 'none' %>"><%= t.status2 || '-' %></span></td>
+    <td class="pre-wrap"><%= t.realResult || '' %></td>
+    <td>
+      <% for (const e of t.evidenceLinks) { const href = '/requests/' + id + '/files/' + e.rel.split('/').map(encodeURIComponent).join('/'); %>
+        <% if (e.image) { %><a href="<%= href %>" target="_blank"><img class="thumb" src="<%= href %>" alt="<%= e.name %>"></a><% } else { %><a href="<%= href %>" target="_blank"><%= e.name %></a><br><% } %>
+      <% } %>
+    </td>
+    <td class="pre-wrap"><%= t.comment || '' %></td>
+  </tr>
+  <% } %>
+  </tbody>
+</table></div>
+<% } %>
