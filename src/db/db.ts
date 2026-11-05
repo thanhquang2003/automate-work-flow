@@ -6,7 +6,7 @@ const SCHEMA = `
 create table if not exists users(
   id integer primary key autoincrement,
   username text not null unique,
-  password_hash text not null,
+  password_hash text not null default '',
   role text not null default 'member',
   gitlab_token_enc text,
   created_at integer not null
@@ -171,6 +171,58 @@ create table if not exists cr_attachments(
   filename text not null,
   path text not null
 );
+create table if not exists departments(
+  id integer primary key autoincrement,
+  code text not null unique,
+  name text not null
+);
+create table if not exists projects(
+  id integer primary key autoincrement,
+  key text not null unique,
+  name text not null,
+  path text not null unique,
+  department_id integer not null,
+  gitlab_project text,
+  default_branch text not null default 'main',
+  created_by integer,
+  created_at integer not null,
+  archived integer not null default 0
+);
+create table if not exists project_members(
+  project_id integer not null,
+  user_id integer not null,
+  roles text not null default '[]',
+  added_by integer,
+  added_at integer not null,
+  primary key(project_id, user_id)
+);
+create table if not exists request_assignees(
+  request_id text not null,
+  role text not null,
+  user_id integer not null,
+  position integer not null default 0,
+  primary key(request_id, role, user_id)
+);
+create table if not exists approvals(
+  id integer primary key autoincrement,
+  request_id text not null,
+  stage text not null,
+  part text not null default '',
+  user_id integer not null,
+  decision text not null,
+  at integer not null
+);
+create index if not exists idx_approvals_req on approvals(request_id, stage);
+create table if not exists audit_log(
+  id integer primary key autoincrement,
+  project_id integer,
+  request_id text,
+  user_id integer,
+  action text not null,
+  detail text not null default '',
+  at integer not null
+);
+create index if not exists idx_audit_project on audit_log(project_id, id);
 create table if not exists settings(key text primary key, value text not null);
 create table if not exists templates(kind text primary key, path text not null);
 `;
@@ -187,7 +239,29 @@ const ADD_COLUMNS: [table: string, column: string, ddl: string][] = [
   ['test_cases', 'baseline', 'integer'],
   ['bugs', 'note', 'text'],
   ['change_requests', 'interrupted_run_after', 'integer'],
+  // v3 multi-user
+  ['users', 'email', 'text'],
+  ['users', 'google_sub', 'text'],
+  ['users', 'display_name', "text not null default ''"],
+  ['users', 'sys_role', "text not null default 'member'"],
+  ['users', 'department_id', 'integer'],
+  ['users', 'can_be_pm', 'integer not null default 0'],
+  ['users', 'os_user', 'text'],
+  ['users', 'disabled', 'integer not null default 0'],
+  ['requests', 'project_id', 'integer'],
+  ['requests', 'code', 'text'],
+  ['tasks', 'assignee_id', 'integer'],
+  ['jobs', 'seat_user_id', 'integer'],
 ];
+
+const INDEXES = `
+create unique index if not exists idx_users_email on users(email) where email is not null;
+create unique index if not exists idx_users_google_sub on users(google_sub) where google_sub is not null;
+create unique index if not exists idx_requests_project_code on requests(project_id, code) where project_id is not null and code is not null;
+create index if not exists idx_assignees_req on request_assignees(request_id, role, position);
+`;
+
+const SEED_DEPARTMENTS: [code: string, name: string][] = [['DEV', 'Phòng DEV'], ['SGLOBAL', 'Phòng SGLOBAL']];
 
 /** Idempotent `alter table add column`, guarded by pragma table_info. */
 function migrate(db: DatabaseSync): void {
@@ -204,5 +278,8 @@ export function openDb(file: string): DatabaseSync {
   db.exec('pragma journal_mode = WAL; pragma busy_timeout = 5000;');
   db.exec(SCHEMA);
   migrate(db);
+  db.exec(INDEXES);
+  const seed = db.prepare('insert or ignore into departments(code,name) values(?,?)');
+  for (const [code, name] of SEED_DEPARTMENTS) seed.run(code, name);
   return db;
 }

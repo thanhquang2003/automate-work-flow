@@ -3,11 +3,27 @@ import type {
   AnswerRow, AnswerSource, AttachmentRow, BugRow, EventRow, FeatureRow, JobRow, NewRequest, Question, QuestionRow,
   ChangeRequestRow, CrAttachmentRow, CrKind, CrSource, CrStatus, ScopeStatus,
   RequestPatch, RequestRow, Stage, StageRunRow, TaskRow, TestCaseRow,
+  ApprovalDecision, ApprovalRow, NewProject, ProjectMemberRow, ProjectRole, ProjectRow, RequestAssigneeRow,
 } from '../domain/types.js';
 import { WebRepo } from './web-repo.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>;
+
+const toProject = (r: Row): ProjectRow => ({
+  id: r.id, key: r.key, name: r.name, path: r.path, departmentId: r.department_id, gitlabProject: r.gitlab_project ?? null,
+  defaultBranch: r.default_branch, createdBy: r.created_by ?? null, createdAt: r.created_at, archived: !!r.archived,
+});
+const toMember = (r: Row): ProjectMemberRow => ({
+  projectId: r.project_id, userId: r.user_id, roles: parse(r.roles, []), addedBy: r.added_by ?? null, addedAt: r.added_at,
+});
+const toAssignee = (r: Row): RequestAssigneeRow => ({ requestId: r.request_id, role: r.role, userId: r.user_id, position: r.position });
+const toApproval = (r: Row): ApprovalRow => ({
+  id: r.id, requestId: r.request_id, stage: r.stage, part: r.part, userId: r.user_id, decision: r.decision, at: r.at,
+});
+
+/** Request codes: PM-entered, unique per project. Also used as the branch suffix `devflow/<code>`. */
+export const REQUEST_CODE_RE = /^[A-Za-z0-9._-]{1,40}$/;
 
 const json = (v: unknown): string => JSON.stringify(v);
 const parse = <T>(s: unknown, def: T): T => {
@@ -21,6 +37,7 @@ const toRequest = (r: Row): RequestRow => ({
   runMode: r.run_mode, stage: r.stage, status: r.status, clarifyRound: r.clarify_round,
   baselineVersion: r.baseline_version ?? 1, iteration: r.iteration ?? 1,
   createdBy: r.created_by ?? null, createdAt: r.created_at, updatedAt: r.updated_at,
+  projectId: r.project_id ?? null, code: r.code ?? null,
 });
 const toStageRun = (r: Row): StageRunRow => ({
   id: r.id, requestId: r.request_id, stage: r.stage, attempt: r.attempt, status: r.status, feedback: r.feedback ?? null,
@@ -28,7 +45,7 @@ const toStageRun = (r: Row): StageRunRow => ({
 });
 const toJob = (r: Row): JobRow => ({
   id: r.id, requestId: r.request_id ?? null, kind: r.kind, payload: parse(r.payload, {}), status: r.status,
-  runAfter: r.run_after, attempts: r.attempts, lastError: r.last_error ?? null,
+  runAfter: r.run_after, attempts: r.attempts, lastError: r.last_error ?? null, seatUserId: r.seat_user_id ?? null,
 });
 const toQuestion = (r: Row): QuestionRow => ({
   requestId: r.request_id, id: r.id, round: r.round, category: r.category, question: r.question, why: r.why, type: r.type,
@@ -41,7 +58,7 @@ const toFeature = (r: Row): FeatureRow => ({
 const toTask = (r: Row): TaskRow => ({
   id: r.id, title: r.title, featureId: r.feature_id ?? null, dependsOn: parse(r.depends_on, []), status: r.status,
   reviewRounds: r.review_rounds, branch: r.branch ?? null, mrIid: r.mr_iid ?? null,
-  scopeStatus: r.scope_status ?? 'active', changedByCr: r.changed_by_cr ?? null,
+  scopeStatus: r.scope_status ?? 'active', changedByCr: r.changed_by_cr ?? null, assigneeId: r.assignee_id ?? null,
 });
 const toTestCase = (r: Row): TestCaseRow => ({
   id: r.id, featureId: r.feature_id ?? null, purpose: r.purpose, data: r.data, steps: r.steps, expected: r.expected,
@@ -102,11 +119,30 @@ export class Repo {
     const id = this.nextRequestId();
     const now = Date.now();
     this.run(
-      `insert into requests(id,title,description,perf_req,nonfunc_req,project_kind,gitlab_project,software_types,run_mode,stage,status,clarify_round,created_by,created_at,updated_at)
-       values(?,?,?,?,?,?,?,?,?,'INTAKE','running',0,?,?,?)`,
+      `insert into requests(id,title,description,perf_req,nonfunc_req,project_kind,gitlab_project,software_types,run_mode,stage,status,clarify_round,created_by,created_at,updated_at,project_id,code)
+       values(?,?,?,?,?,?,?,?,?,'INTAKE','running',0,?,?,?,?,?)`,
       id, r.title, r.description, r.perfReq, r.nonfuncReq, r.projectKind, r.gitlabProject, json(r.softwareTypes), r.runMode, r.createdBy, now, now,
+      r.projectId ?? null, r.code ?? null,
     );
     return this.getRequest(id)!;
+  }
+
+  /** True when `code` is already used by another request of the project. */
+  isRequestCodeTaken(projectId: number, code: string): boolean {
+    return !!this.one('select 1 x from requests where project_id=? and code=?', projectId, code);
+  }
+  /** `<KEY>-NNN`: one above the highest existing numeric `<KEY>-N` code in the project (ERP-001, then ERP-002). */
+  suggestRequestCode(projectId: number): string {
+    const p = this.getProject(projectId);
+    if (!p) throw new Error(`Project not found: ${projectId}`);
+    const esc = p.key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`^${esc}-(\\d+)$`);
+    let max = 0;
+    for (const r of this.all('select code from requests where project_id=? and code is not null', projectId)) {
+      const m = re.exec(r.code);
+      if (m) max = Math.max(max, Number(m[1]));
+    }
+    return `${p.key}-${String(max + 1).padStart(3, '0')}`;
   }
 
   getRequest(id: string): RequestRow | undefined {
@@ -211,9 +247,9 @@ export class Repo {
   }
 
   // ---- jobs ----
-  enqueueJob(requestId: string | null, kind: string, payload: unknown, runAfter = 0): JobRow {
-    const info = this.run('insert into jobs(request_id,kind,payload,status,run_after) values(?,?,?,?,?)',
-      requestId, kind, json(payload ?? {}), 'queued', runAfter);
+  enqueueJob(requestId: string | null, kind: string, payload: unknown, runAfter = 0, seatUserId: number | null = null): JobRow {
+    const info = this.run('insert into jobs(request_id,kind,payload,status,run_after,seat_user_id) values(?,?,?,?,?,?)',
+      requestId, kind, json(payload ?? {}), 'queued', runAfter, seatUserId);
     return this.getJob(Number(info.lastInsertRowid))!;
   }
   getJob(id: number): JobRow | undefined {
@@ -232,6 +268,7 @@ export class Repo {
       return this.getJob(r.id);
     });
   }
+  setJobSeat(id: number, seatUserId: number | null): void { this.run('update jobs set seat_user_id=? where id=?', seatUserId, id); }
   finishJob(id: number): void { this.run("update jobs set status='done', last_error=null where id=?", id); }
   failJob(id: number, error: string): void { this.run("update jobs set status='failed', last_error=? where id=?", error, id); }
   pauseJob(id: number, until: number): void { this.run("update jobs set status='paused', run_after=? where id=?", until, id); }
@@ -264,12 +301,16 @@ export class Repo {
   // ---- tasks ----
   upsertTask(reqId: string, t: TaskRow): void {
     this.run(
-      `insert into tasks(request_id,id,title,feature_id,depends_on,status,review_rounds,branch,mr_iid,scope_status,changed_by_cr) values(?,?,?,?,?,?,?,?,?,?,?)
+      `insert into tasks(request_id,id,title,feature_id,depends_on,status,review_rounds,branch,mr_iid,scope_status,changed_by_cr,assignee_id) values(?,?,?,?,?,?,?,?,?,?,?,?)
        on conflict(request_id,id) do update set title=excluded.title,feature_id=excluded.feature_id,depends_on=excluded.depends_on,
        status=excluded.status,review_rounds=excluded.review_rounds,branch=excluded.branch,mr_iid=excluded.mr_iid,
-       scope_status=excluded.scope_status,changed_by_cr=excluded.changed_by_cr`,
-      reqId, t.id, t.title, t.featureId, json(t.dependsOn), t.status, t.reviewRounds, t.branch, t.mrIid, t.scopeStatus ?? 'active', t.changedByCr ?? null,
+       scope_status=excluded.scope_status,changed_by_cr=excluded.changed_by_cr,assignee_id=coalesce(excluded.assignee_id,tasks.assignee_id)`,
+      reqId, t.id, t.title, t.featureId, json(t.dependsOn), t.status, t.reviewRounds, t.branch, t.mrIid, t.scopeStatus ?? 'active', t.changedByCr ?? null, t.assigneeId ?? null,
     );
+  }
+  /** Set or clear (null) the Dev assigned to a task. */
+  setTaskAssignee(reqId: string, taskId: string, userId: number | null): void {
+    this.run('update tasks set assignee_id=? where request_id=? and id=?', userId, reqId, taskId);
   }
   updateTask(reqId: string, id: string, patch: Partial<Omit<TaskRow, 'id'>>): void {
     const cur = this.getTask(reqId, id);
@@ -416,5 +457,98 @@ export class Repo {
   private txOuter<T>(fn: () => T): T {
     this.db.exec('begin immediate');
     try { const v = fn(); this.db.exec('commit'); return v; } catch (e) { this.db.exec('rollback'); throw e; }
+  }
+
+  // ---- projects ----
+  createProject(p: NewProject): ProjectRow {
+    const info = this.run('insert into projects(key,name,path,department_id,gitlab_project,default_branch,created_by,created_at) values(?,?,?,?,?,?,?,?)',
+      p.key, p.name, p.path, p.departmentId, p.gitlabProject ?? null, p.defaultBranch ?? 'main', p.createdBy, Date.now());
+    return this.getProject(Number(info.lastInsertRowid))!;
+  }
+  getProject(id: number): ProjectRow | undefined {
+    const r = this.one('select * from projects where id=?', id);
+    return r && toProject(r);
+  }
+  getProjectByKey(key: string): ProjectRow | undefined {
+    const r = this.one('select * from projects where key=?', key);
+    return r && toProject(r);
+  }
+  getProjectByPath(path: string): ProjectRow | undefined {
+    const r = this.one('select * from projects where path=?', path);
+    return r && toProject(r);
+  }
+  listProjects(opts: { departmentId?: number; includeArchived?: boolean } = {}): ProjectRow[] {
+    const where: string[] = [];
+    const p: SQLInputValue[] = [];
+    if (opts.departmentId !== undefined) { where.push('department_id=?'); p.push(opts.departmentId); }
+    if (!opts.includeArchived) where.push('archived=0');
+    return this.all(`select * from projects ${where.length ? 'where ' + where.join(' and ') : ''} order by key`, ...p).map(toProject);
+  }
+  /** Projects the user is a member of. */
+  listProjectsForUser(userId: number): ProjectRow[] {
+    return this.all('select p.* from projects p join project_members m on m.project_id=p.id where m.user_id=? and p.archived=0 order by p.key', userId).map(toProject);
+  }
+  setProjectArchived(id: number, archived: boolean): void { this.run('update projects set archived=? where id=?', archived ? 1 : 0, id); }
+  setProjectDefaultBranch(id: number, branch: string): void { this.run('update projects set default_branch=? where id=?', branch, id); }
+
+  // ---- project members ----
+  /** Insert or replace a member's roles in the project. */
+  setProjectMember(projectId: number, userId: number, roles: ProjectRole[], addedBy: number | null): void {
+    this.run(`insert into project_members(project_id,user_id,roles,added_by,added_at) values(?,?,?,?,?)
+      on conflict(project_id,user_id) do update set roles=excluded.roles`, projectId, userId, json(roles), addedBy, Date.now());
+  }
+  removeProjectMember(projectId: number, userId: number): void {
+    this.run('delete from project_members where project_id=? and user_id=?', projectId, userId);
+  }
+  getProjectMember(projectId: number, userId: number): ProjectMemberRow | undefined {
+    const r = this.one('select * from project_members where project_id=? and user_id=?', projectId, userId);
+    return r && toMember(r);
+  }
+  listProjectMembers(projectId: number): ProjectMemberRow[] {
+    return this.all('select * from project_members where project_id=? order by added_at, user_id', projectId).map(toMember);
+  }
+  /** Members holding `role` in the project, in the order they were added. */
+  listProjectMembersWithRole(projectId: number, role: ProjectRole): ProjectMemberRow[] {
+    return this.listProjectMembers(projectId).filter(m => m.roles.includes(role));
+  }
+
+  // ---- request assignees ----
+  /** Replace the ordered list of people for `role` on a request; the first (position 0) is the runner. */
+  setRequestAssignees(requestId: string, role: ProjectRole, userIds: number[]): void {
+    this.db.exec('begin');
+    try {
+      this.run('delete from request_assignees where request_id=? and role=?', requestId, role);
+      [...new Set(userIds)].forEach((u, i) => this.run('insert into request_assignees(request_id,role,user_id,position) values(?,?,?,?)', requestId, role, u, i));
+      this.db.exec('commit');
+    } catch (e) { this.db.exec('rollback'); throw e; }
+  }
+  listRequestAssignees(requestId: string, role?: ProjectRole): RequestAssigneeRow[] {
+    const rows = role
+      ? this.all('select * from request_assignees where request_id=? and role=? order by position, user_id', requestId, role)
+      : this.all('select * from request_assignees where request_id=? order by role, position, user_id', requestId);
+    return rows.map(toAssignee);
+  }
+  /** The runner for a role: the assignee with the lowest position. */
+  getRunner(requestId: string, role: ProjectRole): number | undefined {
+    return this.listRequestAssignees(requestId, role)[0]?.userId;
+  }
+  removeRequestAssigneeEverywhere(userId: number, projectId: number): void {
+    this.run('delete from request_assignees where user_id=? and request_id in (select id from requests where project_id=?)', userId, projectId);
+  }
+
+  // ---- approvals ----
+  addApproval(a: { requestId: string; stage: string; part?: string; userId: number; decision: ApprovalDecision }): ApprovalRow {
+    const info = this.run('insert into approvals(request_id,stage,part,user_id,decision,at) values(?,?,?,?,?,?)',
+      a.requestId, a.stage, a.part ?? '', a.userId, a.decision, Date.now());
+    return toApproval(this.one('select * from approvals where id=?', Number(info.lastInsertRowid))!);
+  }
+  listApprovals(requestId: string, stage?: string): ApprovalRow[] {
+    return (stage
+      ? this.all('select * from approvals where request_id=? and stage=? order by id', requestId, stage)
+      : this.all('select * from approvals where request_id=? order by id', requestId)).map(toApproval);
+  }
+  clearApprovals(requestId: string, stage: string, part?: string): void {
+    if (part === undefined) this.run('delete from approvals where request_id=? and stage=?', requestId, stage);
+    else this.run('delete from approvals where request_id=? and stage=? and part=?', requestId, stage, part);
   }
 }

@@ -20,7 +20,7 @@
         "admin:store users departments projects roles"
       ],
       "complexity": "large",
-      "status": "planned",
+      "status": "in-progress",
       "layer": "Full-stack",
       "dependencies": [],
       "evidence": null,

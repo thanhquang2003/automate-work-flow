@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { parseEnv } from 'node:util';
+import { DEPARTMENT_CODES, type DepartmentCode } from './domain/types.js';
 
 export interface Config {
   mode: 'local' | 'server';
@@ -24,6 +25,22 @@ export interface Config {
   trustProxy: boolean | number;
   /** Per-file upload cap in bytes (default 50MB); overridable for tests. */
   maxUploadBytes?: number;
+  /** v3: Google SSO (required in server mode). */
+  google: { clientId: string; clientSecret: string };
+  /** Lower-cased e-mail domains allowed to sign in (ALLOWED_EMAIL_DOMAINS, comma separated). */
+  allowedEmailDomains: string[];
+  adminEmails: string[];
+  ctoEmails: string[];
+  headEmails: Record<DepartmentCode, string[]>;
+  deputyEmails: Record<DepartmentCode, string[]>;
+  /** Absolute folders under which projects may live (PROJECT_ROOTS, comma separated). */
+  projectRoots: string[];
+  /** Concurrent Claude jobs per user seat (SEAT_CONCURRENCY, default 1). */
+  seatConcurrency: number;
+  /** Path to the privileged dfctl helper (DFCTL_PATH). */
+  dfctlPath: string;
+  /** Break-glass local admin username (BREAKGLASS_ADMIN); empty = disabled. */
+  breakglassAdmin: string;
 }
 
 type Env = Record<string, string | undefined>;
@@ -54,6 +71,25 @@ function parseTrustProxy(v: string | undefined): boolean | number {
   throw new Error(`Invalid TRUST_PROXY: ${v}`);
 }
 
+function list(v: string | undefined): string[] {
+  return (v ?? '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+}
+
+/** `DEV:a@x,b@x;SGLOBAL:c@x` -> per-department e-mail lists. Unknown department code throws. */
+export function parseDeptEmails(v: string | undefined): Record<DepartmentCode, string[]> {
+  const out: Record<DepartmentCode, string[]> = { DEV: [], SGLOBAL: [] };
+  for (const part of (v ?? '').split(';')) {
+    const t = part.trim();
+    if (!t) continue;
+    const i = t.indexOf(':');
+    if (i < 0) throw new Error(`Invalid department emails entry: ${t}`);
+    const code = t.slice(0, i).trim();
+    if (!(DEPARTMENT_CODES as readonly string[]).includes(code)) throw new Error(`Unknown department code: ${code}`);
+    out[code as DepartmentCode].push(...list(t.slice(i + 1)));
+  }
+  return out;
+}
+
 export function loadConfig(env: Env = process.env): Config {
   const modeRaw = (env.DEVFLOW_MODE || 'local').toLowerCase();
   if (modeRaw !== 'local' && modeRaw !== 'server') throw new Error(`DEVFLOW_MODE must be local|server, got ${modeRaw}`);
@@ -62,6 +98,10 @@ export function loadConfig(env: Env = process.env): Config {
   if (mode === 'server' && !secretKey) throw new Error('SECRET_KEY is required in server mode');
   const publicBaseUrl = (env.PUBLIC_BASE_URL ?? '').trim();
   if (mode === 'server' && !publicBaseUrl) throw new Error('PUBLIC_BASE_URL is required in server mode (e.g. https://devflow.example.com)');
+  const google = { clientId: (env.GOOGLE_CLIENT_ID ?? '').trim(), clientSecret: (env.GOOGLE_CLIENT_SECRET ?? '').trim() };
+  if (mode === 'server' && (!google.clientId || !google.clientSecret)) throw new Error('GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are required in server mode');
+  const seatConcurrency = int(env.SEAT_CONCURRENCY, 1);
+  if (seatConcurrency < 1) throw new Error(`Invalid SEAT_CONCURRENCY: ${env.SEAT_CONCURRENCY}`);
   const stageTimeoutMin = int(env.STAGE_TIMEOUT_MIN, 120);
   if (stageTimeoutMin < 0) throw new Error(`Invalid STAGE_TIMEOUT_MIN: ${env.STAGE_TIMEOUT_MIN}`);
   const crAutoAcceptMaxMh = int(env.CR_AUTO_ACCEPT_MAX_MH, 40);
@@ -76,7 +116,7 @@ export function loadConfig(env: Env = process.env): Config {
     claudeBin: env.CLAUDE_BIN || 'claude',
     claudeBinArgs: parseArgs(env.CLAUDE_BIN_ARGS),
     claudeMock: env.CLAUDE_MOCK === '1' || env.CLAUDE_MOCK === 'true',
-    maxConcurrentJobs: int(env.MAX_CONCURRENT_JOBS, mode === 'server' ? 2 : 1),
+    maxConcurrentJobs: int(env.MAX_CONCURRENT_JOBS, mode === 'server' ? 4 : 1),
     surveyTtlDays: int(env.SURVEY_TTL_DAYS, 14),
     publicBaseUrl: publicBaseUrl || `http://localhost:${port}`,
     gitlab: { url: env.GITLAB_URL ?? '', token: env.GITLAB_TOKEN ?? '', defaultGroup: env.GITLAB_DEFAULT_GROUP ?? '' },
@@ -84,6 +124,16 @@ export function loadConfig(env: Env = process.env): Config {
     stageTimeoutMin,
     trustProxy: parseTrustProxy(env.TRUST_PROXY),
     crAutoAcceptMaxMh,
+    google,
+    allowedEmailDomains: list(env.ALLOWED_EMAIL_DOMAINS).map(d => d.replace(/^@/, '')),
+    adminEmails: list(env.ADMIN_EMAILS),
+    ctoEmails: list(env.CTO_EMAILS),
+    headEmails: parseDeptEmails(env.HEAD_EMAILS),
+    deputyEmails: parseDeptEmails(env.DEPUTY_EMAILS),
+    projectRoots: (env.PROJECT_ROOTS ?? '').split(',').map(x => x.trim()).filter(Boolean),
+    seatConcurrency,
+    dfctlPath: (env.DFCTL_PATH ?? '').trim(),
+    breakglassAdmin: (env.BREAKGLASS_ADMIN ?? '').trim(),
   };
 }
 

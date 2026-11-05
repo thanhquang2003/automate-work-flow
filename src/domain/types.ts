@@ -10,7 +10,7 @@ export const STAGE_LABELS: Record<Stage, string> = {
   DEVELOP: 'Phát triển & Review', TEST: 'Kiểm thử', BUGFIX: 'Sửa lỗi', DONE: 'Hoàn thành', CHANGE: 'Thay đổi yêu cầu',
 };
 
-export type RequestStatus = 'running' | 'awaiting_approval' | 'awaiting_customer' | 'paused' | 'needs_human' | 'failed' | 'done' | 'cancelled';
+export type RequestStatus = 'running' | 'awaiting_seat' | 'awaiting_approval' | 'awaiting_customer' | 'paused' | 'needs_human' | 'failed' | 'done' | 'cancelled';
 export type ProjectKind = 'new' | 'existing';
 export type RunMode = 'auto' | 'review';
 export type SoftwareType = 'web' | 'mobile' | 'api' | 'background';
@@ -18,6 +18,29 @@ export type JobStatus = 'queued' | 'running' | 'done' | 'failed' | 'paused';
 export type AnswerSource = 'excel' | 'web' | 'staff';
 export type TestStatus = 'P' | 'F' | 'PE';
 export type UserRole = 'admin' | 'member';
+
+// ---- v3 multi-user ----
+export type SysRole = 'admin' | 'cto' | 'head' | 'deputy' | 'member';
+export const SYS_ROLES: readonly SysRole[] = ['admin', 'cto', 'head', 'deputy', 'member'];
+export type ProjectRole = 'PM' | 'BA' | 'SE' | 'DEV' | 'REVIEWER' | 'TESTER';
+export const PROJECT_ROLES: readonly ProjectRole[] = ['PM', 'BA', 'SE', 'DEV', 'REVIEWER', 'TESTER'];
+export type DepartmentCode = 'DEV' | 'SGLOBAL';
+export const DEPARTMENT_CODES: readonly DepartmentCode[] = ['DEV', 'SGLOBAL'];
+export type ApprovalDecision = 'approve' | 'reject';
+
+export interface DepartmentRow { id: number; code: DepartmentCode; name: string }
+export interface ProjectRow {
+  id: number; key: string; name: string; path: string; departmentId: number; gitlabProject: string | null;
+  defaultBranch: string; createdBy: number | null; createdAt: number; archived: boolean;
+}
+export interface NewProject {
+  key: string; name: string; path: string; departmentId: number; gitlabProject?: string | null;
+  defaultBranch?: string; createdBy: number | null;
+}
+export interface ProjectMemberRow { projectId: number; userId: number; roles: ProjectRole[]; addedBy: number | null; addedAt: number }
+export interface RequestAssigneeRow { requestId: string; role: ProjectRole; userId: number; position: number }
+export interface ApprovalRow { id: number; requestId: string; stage: string; part: string; userId: number; decision: ApprovalDecision; at: number }
+export interface AuditRow { id: number; projectId: number | null; requestId: string | null; userId: number | null; action: string; detail: string; at: number }
 export type CrKind = 'add' | 'modify' | 'remove' | 'nfr' | 'other';
 export type CrSource = 'staff' | 'customer';
 export type CrStatus = 'proposed' | 'pending' | 'analyzing' | 'awaiting_decision' | 'accepted' | 'rejected' | 'applied';
@@ -124,6 +147,9 @@ export interface NewRequest {
   softwareTypes: SoftwareType[];
   runMode: RunMode;
   createdBy: number | null;
+  /** v3: owning project and PM-entered request code (unique per project). Null for v2/local requests. */
+  projectId?: number | null;
+  code?: string | null;
 }
 
 export interface RequestRow extends NewRequest {
@@ -139,7 +165,14 @@ export interface RequestRow extends NewRequest {
 
 export type RequestPatch = Partial<Omit<RequestRow, 'id' | 'createdAt'>>;
 
-export interface UserRow { id: number; username: string; passwordHash: string; role: UserRole; gitlabTokenEnc: string | null; createdAt: number }
+export interface UserRow {
+  id: number; username: string; passwordHash: string;
+  /** v2 role; only meaningful for local mode and the break-glass admin. v3 code uses sysRole. */
+  role: UserRole;
+  gitlabTokenEnc: string | null; createdAt: number;
+  email: string | null; googleSub: string | null; displayName: string; sysRole: SysRole;
+  departmentId: number | null; canBePm: boolean; osUser: string | null; disabled: boolean;
+}
 
 export interface AttachmentRow { id: number; requestId: string; filename: string; path: string; size: number; createdAt: number }
 
@@ -151,6 +184,8 @@ export interface StageRunRow {
 export interface JobRow {
   id: number; requestId: string | null; kind: string; payload: unknown; status: JobStatus;
   runAfter: number; attempts: number; lastError: string | null;
+  /** v3: user whose Claude seat runs this job (null in local mode). */
+  seatUserId: number | null;
 }
 
 export interface QuestionRow extends Question { requestId: string; round: number }
@@ -165,6 +200,8 @@ export interface FeatureRow {
 export interface TaskRow {
   id: string; title: string; featureId: string | null; dependsOn: string[]; status: string; reviewRounds: number; branch: string | null; mrIid: number | null;
   scopeStatus: ScopeStatus; changedByCr: string | null;
+  /** v3: assigned Dev (null = fallback to first DEV of the request). */
+  assigneeId?: number | null;
 }
 export interface TestCaseRow {
   id: string; featureId: string | null; purpose: string; data: string; steps: string; expected: string;
