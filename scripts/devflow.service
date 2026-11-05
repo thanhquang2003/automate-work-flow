@@ -1,0 +1,38 @@
+# Mẫu systemd unit cho DevFlow (chế độ server).
+#
+# Cài đặt:
+#   sudo useradd --system --create-home --home-dir /opt/devflow --shell /usr/sbin/nologin devflow
+#   sudo -u devflow git clone <repo> /opt/devflow/app && cd /opt/devflow/app && sudo -u devflow npm ci && sudo -u devflow npm run build
+#   # Đăng nhập Claude Code bằng chính user này (gói subscription) và cài plugin superpowers:
+#   sudo -u devflow -H claude login
+#   sudo -u devflow -H claude plugin install superpowers@claude-plugins-official
+#   sudo cp /opt/devflow/app/.env.example /etc/devflow.env && sudo chmod 600 /etc/devflow.env   # rồi sửa nội dung
+#   sudo cp scripts/devflow.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now devflow
+#
+# Xem log: journalctl -u devflow -f
+
+[Unit]
+Description=DevFlow - tu dong hoa quy trinh phat trien phan mem bang Claude Code
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=devflow
+Group=devflow
+WorkingDirectory=/opt/devflow/app
+EnvironmentFile=/etc/devflow.env
+# Nếu node cài qua nvm/fnm, thay bằng đường dẫn đầy đủ của node 24.
+ExecStart=/usr/bin/node dist/index.js
+Restart=on-failure
+RestartSec=5
+# Cho phép dừng êm (DevFlow tự chạy lại job dở dang khi khởi động).
+TimeoutStopSec=15
+# Claude Code chạy bypassPermissions trong workspace: chỉ cho phép ghi vào thư mục của DevFlow.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/devflow
+
+[Install]
+WantedBy=multi-user.target

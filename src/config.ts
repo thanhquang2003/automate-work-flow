@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { parseEnv } from 'node:util';
+
 export interface Config {
   mode: 'local' | 'server';
   host: string;
@@ -70,4 +73,17 @@ export function loadConfig(env: Env = process.env): Config {
     rateLimitPauseMin: int(env.RATE_LIMIT_PAUSE_MIN, 30),
     trustProxy: parseTrustProxy(env.TRUST_PROXY),
   };
+}
+
+/**
+ * Loads KEY=VALUE pairs from a .env file into `env` without overriding variables that are already set
+ * (so systemd's EnvironmentFile or the shell win). A missing file is fine.
+ */
+export function loadDotEnv(file = '.env', env: Env = process.env): void {
+  let text: string;
+  try { text = readFileSync(file, 'utf8'); } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw e;
+  }
+  for (const [k, v] of Object.entries(parseEnv(text))) if (env[k] === undefined) env[k] = v;
 }

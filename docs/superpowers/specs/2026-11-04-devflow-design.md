@@ -54,7 +54,7 @@ Mỗi yêu cầu (`Request`, mã `REQ-NNN`) đi qua các stage sau. Ở chế đ
 | 5 | BREAKDOWN | Analyst | `features.json` + file ULNL .xlsx đã điền | ⏸ |
 | 6 | DESIGN | Architect | `design/tech-stack.md`, TKCT .docx (tổng quan, thiết kế tổng thể, thiết kế chi tiết từng chức năng, phụ lục câu hỏi mở và giả định), TKDB .docx, sơ đồ `.mmd` | ⏸ |
 | 7 | PLANNING | Planner + Test designer | `tasks.json` (task dev có phụ thuộc, map tới feature), test case .xlsx (trạng thái trống) | ⏸ |
-| 8 | DEVELOP (lặp theo task) | Developer → Reviewer | commit trên nhánh `devflow/<REQ>/<TASK>`, MR vào `devflow/<REQ>`; review comment ghi lên MR; tối đa 3 vòng review/sửa mỗi task | ⏸ (sau khi xong tất cả task) |
+| 8 | DEVELOP (lặp theo task) | Developer → Reviewer | commit trên nhánh `devflow/<REQ>-<TASK>`, MR vào `devflow/<REQ>`; review comment ghi lên MR; tối đa 3 vòng review/sửa mỗi task | ⏸ (sau khi xong tất cả task) |
 | 9 | TEST | Tester | chạy test tự động + thủ công qua công cụ, evidence ở `evidence/<TC-ID>/`, test case .xlsx được điền | |
 | 10 | BUGFIX (lặp) | Developer → Reviewer → Tester | GitLab Issue cho mỗi TC fail; sửa; test lại (cột lần 2, rồi lần 3+ ghi vào Comment); đếm số lần sửa mỗi bug | |
 | 11 | DONE / NEEDS_HUMAN / FAILED | — | Báo cáo tổng kết `report.md` | |
@@ -86,7 +86,7 @@ Browser (khách hàng) ─► /s/<token> (chỉ server mode)
 
 - Cấu hình: `GITLAB_URL`, `GITLAB_TOKEN` (PAT scope `api`, `write_repository`); server mode cho phép mỗi user nhập token riêng.
 - Dự án có sẵn: chọn project (id/path) → clone bằng HTTPS + token. Dự án mới: tạo project mới trong group cấu hình (`GITLAB_DEFAULT_GROUP`) hoặc dùng project trống đã có.
-- Nhánh: `devflow/<REQ>` tách từ nhánh mặc định; mỗi task một nhánh `devflow/<REQ>/<TASK>` → MR vào `devflow/<REQ>`, Reviewer ghi nhận xét lên MR (discussion), DevFlow merge MR task sau khi review đạt. Cuối cùng mở MR `devflow/<REQ>` → nhánh mặc định và **không merge**.
+- Nhánh: `devflow/<REQ>` tách từ nhánh mặc định; mỗi task một nhánh `devflow/<REQ>-<TASK>` → MR vào `devflow/<REQ>`, Reviewer ghi nhận xét lên MR (discussion), DevFlow merge MR task sau khi review đạt. Cuối cùng mở MR `devflow/<REQ>` → nhánh mặc định và **không merge**. Sửa bug dùng nhánh `devflow/<REQ>-fix-<TC>` → MR vào `devflow/<REQ>` (không dùng `devflow/<REQ>/...` vì xung đột git ref với nhánh `devflow/<REQ>`).
 - Bug: `POST /projects/:id/issues` với title `[<REQ>][<TC-ID>] <mô tả>`, description gồm bước tái hiện, mong đợi/thực tế, evidence (upload qua `/uploads`), link MR; label `bug`, `devflow`, `<REQ>`. Mỗi lần sửa/test lại thì thêm comment. Pass → đóng issue. Quá 3 lần → label `needs-human`.
 - Cột Comment của test case ghi link issue; issue ghi mã TC → liên kết hai chiều.
 

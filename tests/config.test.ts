@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { loadConfig } from '../src/config.js';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { loadConfig, loadDotEnv } from '../src/config.js';
 
 describe('loadConfig', () => {
   it('local defaults', () => {
@@ -28,5 +31,17 @@ describe('loadConfig', () => {
     expect(c.claudeBinArgs).toEqual(['a.js', '--x']);
     expect(c.port).toBe(4000);
     expect(c.gitlab.url).toBe('http://g');
+  });
+});
+
+describe('loadDotEnv', () => {
+  it('reads .env without overriding variables that are already set; missing file is fine', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'devflow-env-'));
+    const file = join(dir, '.env');
+    writeFileSync(file, '# ghi chú\nPORT=3999\nDEVFLOW_MODE=server\nSECRET_KEY="abc def"\n');
+    const env: Record<string, string | undefined> = { DEVFLOW_MODE: 'local' };
+    loadDotEnv(file, env);
+    expect(env).toEqual({ DEVFLOW_MODE: 'local', PORT: '3999', SECRET_KEY: 'abc def' });
+    expect(() => loadDotEnv(join(dir, 'none.env'), {})).not.toThrow();
   });
 });

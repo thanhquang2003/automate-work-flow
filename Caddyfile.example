@@ -1,0 +1,22 @@
+# Mẫu Caddy làm reverse proxy HTTPS cho DevFlow (chế độ server).
+# Thay devflow.example.com bằng tên miền đã trỏ A/AAAA về VPS (cổng 80 và 443 phải mở để Caddy tự lấy chứng chỉ Let's Encrypt).
+#
+# Trong /etc/devflow.env đặt tương ứng:
+#   DEVFLOW_MODE=server
+#   PUBLIC_BASE_URL=https://devflow.example.com
+#   TRUST_PROXY=1
+#   HOST=127.0.0.1        # chỉ cho Caddy truy cập, không mở cổng 3700 ra ngoài
+
+devflow.example.com {
+	encode zstd gzip
+
+	# Giới hạn tải lên: DevFlow cho phép 50MB mỗi file, nhiều file một lần.
+	request_body {
+		max_size 210MB
+	}
+
+	reverse_proxy 127.0.0.1:3700 {
+		# Luồng log realtime (SSE): đẩy dữ liệu ngay, không đệm.
+		flush_interval -1
+	}
+}

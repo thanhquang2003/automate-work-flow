@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { loadConfig } from './config.js';
+import { loadConfig, loadDotEnv } from './config.js';
 import { openDb } from './db/db.js';
 import { Repo } from './db/repo.js';
 import { Pipeline } from './engine/pipeline.js';
@@ -10,6 +10,7 @@ import { applySettings, gitlabFor } from './settings.js';
 import { buildServer } from './web/server.js';
 
 async function main(): Promise<void> {
+  loadDotEnv();
   const cfg = loadConfig();
   cfg.dataDir = resolve(cfg.dataDir);
   mkdirSync(cfg.dataDir, { recursive: true });
