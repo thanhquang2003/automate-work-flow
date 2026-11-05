@@ -243,7 +243,7 @@ async function commitTesterOutput(ctx: StageContext, baseline: string[], msg: st
   return ctx.git.commitPaths([...tracked, ...created].filter(isTesterPath), msg);
 }
 
-type Plan ={ kind: 'test'; targets: TestCaseRow[]; regression: boolean } | { kind: 'bugfix'; failing: string[] } | { kind: 'done' };
+type Plan = { kind: 'test'; targets: TestCaseRow[]; regression: boolean } | { kind: 'bugfix'; failing: string[] } | { kind: 'done' };
 
 /**
  * What TEST does next, from the run history:

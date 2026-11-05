@@ -71,7 +71,7 @@ export function gitlabToken(gl: GitLabClient | undefined): string {
   return typeof t === 'string' ? t : '';
 }
 
-const FAR_FUTURE =8_640_000_000_000_000; // max JS date; paused-by-user jobs never come due
+const FAR_FUTURE = 8_640_000_000_000_000; // max JS date; paused-by-user jobs never come due
 const MAX_EXCEPTION_RETRIES = 1; // one retry after an exception
 const MAX_LOG_LINE = 500;
 
