@@ -186,6 +186,7 @@ const ADD_COLUMNS: [table: string, column: string, ddl: string][] = [
   ['test_cases', 'changed_by_cr', 'text'],
   ['test_cases', 'baseline', 'integer'],
   ['bugs', 'note', 'text'],
+  ['change_requests', 'interrupted_run_after', 'integer'],
 ];
 
 /** Idempotent `alter table add column`, guarded by pragma table_info. */

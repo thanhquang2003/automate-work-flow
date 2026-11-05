@@ -173,7 +173,18 @@ export interface BugRow {
 export interface ChangeRequestRow {
   id: string; requestId: string; title: string; description: string; kind: CrKind; source: CrSource; status: CrStatus;
   createdBy: number | null; createdAt: number; decidedBy: number | null; decidedAt: number | null; decisionNote: string | null;
-  baselineFrom: number | null; baselineTo: number | null; reenterStage: Stage | null;
-  interruptedStage: Stage | null; interruptedStatus: RequestStatus | null; impactSummary: string | null;
+  /**
+   * Baseline the CR was decided against. NOTE: rejected CRs also carry baselineFrom — it is the pipeline's
+   * "decision finalized" marker, not proof the CR changed the baseline. Consumers listing CRs of a baseline must
+   * filter by status (`accepted`/`applied`) or by `baselineTo != null`.
+   */
+  baselineFrom: number | null;
+  /** Baseline produced by accepting this CR (null unless accepted and finalized). */
+  baselineTo: number | null;
+  reenterStage: Stage | null;
+  interruptedStage: Stage | null; interruptedStatus: RequestStatus | null;
+  /** run_after of the interrupted request's parked job (rate-limit pause), reused when a paused origin is restored. */
+  interruptedRunAfter: number | null;
+  impactSummary: string | null;
 }
 export interface CrAttachmentRow { crId: string; requestId: string; filename: string; path: string }

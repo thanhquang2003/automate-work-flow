@@ -195,6 +195,125 @@ describe('pipeline change control', () => {
     expect(repo.getRequest(r.id)!.status).toBe('awaiting_approval');
   });
 
+  it('effort exactly at the threshold auto-accepts', async () => {
+    impacts['CR-01'] = { effort_delta_mh: 40, reenter: 'TEST' };
+    registerAll();
+    const { repo, pipeline, worker } = setup({ crAutoAcceptMaxMh: 40 });
+    const r = mkReq(repo);
+    place(repo, r.id, 'TEST', 'needs_human');
+    pipeline.submitChange(r.id, cr()); await worker.drain();
+    expect(stages()).toEqual(['CHANGE', 'TEST', 'DONE']);
+    expect(repo.getChangeRequest(r.id, 'CR-01')).toMatchObject({ status: 'applied', decisionNote: 'Tự động chấp nhận' });
+  });
+
+  it('pause() leaves the CHANGE decision gate alone; decisions still work', async () => {
+    registerAll();
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo, { runMode: 'review' });
+    place(repo, r.id, 'DEVELOP', 'needs_human');
+    pipeline.submitChange(r.id, cr()); await worker.drain();
+    pipeline.pause(r.id);
+    expect(repo.getRequest(r.id)).toMatchObject({ stage: 'CHANGE', status: 'awaiting_approval' });
+    pipeline.decideChange(r.id, 'CR-01', 'reject');
+    expect(repo.getRequest(r.id)).toMatchObject({ stage: 'DEVELOP', status: 'needs_human' });
+    place(repo, r.id, 'CLARIFY', 'awaiting_customer');
+    pipeline.pause(r.id);
+    expect(repo.getRequest(r.id)!.status).toBe('awaiting_customer');
+  });
+
+  it('CHANGE marked running without a live job (old pause→resume at the gate): a new CR re-enqueues CHANGE', async () => {
+    registerAll();
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo, { runMode: 'review' });
+    place(repo, r.id, 'DEVELOP', 'needs_human');
+    pipeline.submitChange(r.id, cr('A')); await worker.drain();
+    place(repo, r.id, 'CHANGE', 'running'); // what pause()+resume() used to leave behind: running, no job
+    pipeline.submitChange(r.id, cr('B'));
+    expect(repo.listJobs(r.id).filter(j => j.status === 'queued')).toHaveLength(1);
+    await worker.drain();
+    expect(stages()).toEqual(['CHANGE', 'CHANGE']);
+    expect(repo.getRequest(r.id)).toMatchObject({ stage: 'CHANGE', status: 'awaiting_approval' });
+    pipeline.decideChange(r.id, 'CR-01', 'reject'); pipeline.decideChange(r.id, 'CR-02', 'reject');
+    expect(repo.getRequest(r.id)).toMatchObject({ stage: 'DEVELOP', status: 'needs_human' });
+  });
+
+  it('CHANGE that skips a pending CR fails naming it instead of looping', async () => {
+    registerAll({ CHANGE: async () => ({ kind: 'next' }) });
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo);
+    place(repo, r.id, 'DEVELOP', 'needs_human');
+    pipeline.submitChange(r.id, cr()); await worker.drain();
+    expect(stages()).toEqual(['CHANGE']);
+    expect(repo.getRequest(r.id)).toMatchObject({ stage: 'CHANGE', status: 'failed' });
+    expect(repo.latestStageRun(r.id, 'CHANGE')!.error).toMatch(/không xử lý yêu cầu thay đổi CR-01/);
+  });
+
+  it('CRs arriving during every CHANGE run: at most 2 re-runs, then fails', async () => {
+    let pipe!: { submitChange: (id: string, i: ReturnType<typeof cr>) => unknown };
+    registerAll({ CHANGE: async ctx => { const o = await fakeChange(ctx); pipe.submitChange(ctx.req.id, cr('thêm')); return o; } });
+    const { repo, pipeline, worker } = setup();
+    pipe = pipeline;
+    const r = mkReq(repo);
+    place(repo, r.id, 'DEVELOP', 'needs_human');
+    pipeline.submitChange(r.id, cr()); await worker.drain();
+    expect(stages()).toEqual(['CHANGE', 'CHANGE', 'CHANGE']);
+    expect(repo.getRequest(r.id)).toMatchObject({ stage: 'CHANGE', status: 'failed' });
+    expect(repo.latestStageRun(r.id, 'CHANGE')!.error).toMatch(/CR-04.*2 lần/);
+    expect(repo.listChangeRequests(r.id).map(c => c.status)).toEqual(['awaiting_decision', 'awaiting_decision', 'pending', 'pending']);
+  });
+
+  it('non-next CHANGE outcome puts analysing CRs back to pending', async () => {
+    registerAll({ CHANGE: async ctx => { await fakeChange(ctx); return { kind: 'needs_human', reason: 'x' }; } });
+    const { repo, pipeline, worker } = setup();
+    const r = mkReq(repo);
+    place(repo, r.id, 'DEVELOP', 'needs_human');
+    pipeline.submitChange(r.id, cr()); await worker.drain();
+    expect(repo.getRequest(r.id)).toMatchObject({ stage: 'CHANGE', status: 'needs_human' });
+    expect(repo.getChangeRequest(r.id, 'CR-01')!.status).toBe('pending');
+  });
+
+  it('reject restores a rate-limit pause with its original due time', async () => {
+    let t = 1_000_000;
+    registerAll();
+    const { repo, pipeline, worker } = setup({}, () => t);
+    const r = mkReq(repo, { runMode: 'review' });
+    place(repo, r.id, 'PLANNING', 'paused');
+    const j = repo.enqueueJob(r.id, 'run_stage', { stage: 'PLANNING', gen: 0 });
+    repo.pauseJob(j.id, t + 60_000);
+    expect(pipeline.submitChange(r.id, cr()).interruptedRunAfter).toBe(t + 60_000);
+    await worker.drain();
+    pipeline.decideChange(r.id, 'CR-01', 'reject');
+    expect(repo.getRequest(r.id)).toMatchObject({ stage: 'PLANNING', status: 'paused' });
+    await worker.drain();
+    expect(stages()).toEqual(['CHANGE']);
+    t += 61_000;
+    await worker.drain();
+    expect(stages()).toEqual(['CHANGE', 'PLANNING']);
+  });
+
+  it('busy guard logs once and gives up after STAGE_TIMEOUT_MIN', async () => {
+    let t = 1_000_000;
+    let release!: () => void; let started!: () => void;
+    const s = new Promise<void>(res => { started = res; }); const gate = new Promise<void>(res => { release = res; });
+    let first = true;
+    registerAll({ DEVELOP: async () => { if (first) { first = false; started(); await gate; } return { kind: 'next' }; } });
+    const { repo, pipeline, worker } = setup({ maxConcurrentJobs: 2, stageTimeoutMin: 1 }, () => t);
+    const r = mkReq(repo);
+    place(repo, r.id, 'DEVELOP', 'running');
+    pipeline.rerunStage(r.id, 'DEVELOP');
+    await worker.tick(); await s;
+    pipeline.submitChange(r.id, cr());
+    await worker.tick(); await new Promise(res => setTimeout(res, 5));
+    t += 30_000; await worker.tick(); await new Promise(res => setTimeout(res, 5));
+    t += 31_000; await worker.tick(); await new Promise(res => setTimeout(res, 5));
+    expect(repo.listEvents(r.id).filter(e => e.message.startsWith('Chờ giai đoạn bị ngắt')).length).toBe(1);
+    expect(repo.getRequest(r.id)).toMatchObject({ stage: 'CHANGE', status: 'failed' });
+    expect(repo.listEvents(r.id).some(e => e.level === 'error' && /không dừng sau 1 phút/.test(e.message))).toBe(true);
+    release(); await worker.idle();
+    expect(stages()).toEqual(['DEVELOP']);
+    expect(repo.getRequest(r.id)).toMatchObject({ stage: 'CHANGE', status: 'failed' });
+  });
+
   it('review mode always waits for a decision', async () => {
     registerAll();
     const { repo, pipeline, worker } = setup();
@@ -432,5 +551,17 @@ describe('changes helpers', () => {
     applyAcceptedChange(repo, r, { id: 'CR-01' }, { ...imp('BREAKDOWN'), scope: { add: [{ name: 'Mới', description: '' }], modify: [], remove: [] } });
     applyAcceptedChange(repo, r, { id: 'CR-02' }, { ...imp('BREAKDOWN'), affected: { features: [], tasks: ['T-99'], test_cases: ['TC-ZZ'] } });
     expect(JSON.stringify([repo.listFeatures(r.id), repo.listTasks(r.id), repo.listTestCases(r.id)])).toBe(before);
+  });
+
+  it('applyAcceptedChange keeps the CR that already cancelled a feature', () => {
+    const { repo } = setup();
+    const r = mkReq(repo);
+    seedScope(repo, r.id);
+    const rm = { ...imp('BREAKDOWN'), scope: { add: [], modify: [], remove: ['F-02'] } };
+    applyAcceptedChange(repo, r, { id: 'CR-01' }, rm);
+    applyAcceptedChange(repo, r, { id: 'CR-02' }, rm);
+    expect(repo.listFeatures(r.id).find(f => f.id === 'F-02')).toMatchObject({ scopeStatus: 'cancelled', changedByCr: 'CR-01' });
+    expect(repo.getTask(r.id, 'T-02')!.changedByCr).toBe('CR-01');
+    expect(repo.getBug(r.id, 'TC-B-01')!.note).toBe('Đóng do CR-01');
   });
 });

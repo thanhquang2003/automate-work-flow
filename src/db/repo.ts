@@ -61,13 +61,14 @@ const toCr = (r: Row): ChangeRequestRow => ({
   createdBy: r.created_by ?? null, createdAt: r.created_at, decidedBy: r.decided_by ?? null, decidedAt: r.decided_at ?? null,
   decisionNote: r.decision_note ?? null, baselineFrom: r.baseline_from ?? null, baselineTo: r.baseline_to ?? null,
   reenterStage: r.reenter_stage ?? null, interruptedStage: r.interrupted_stage ?? null, interruptedStatus: r.interrupted_status ?? null,
+  interruptedRunAfter: r.interrupted_run_after ?? null,
   impactSummary: r.impact_summary ?? null,
 });
 
 const CR_COLS: Record<string, string> = {
   title: 'title', description: 'description', kind: 'kind', source: 'source', status: 'status', decidedBy: 'decided_by',
   decidedAt: 'decided_at', decisionNote: 'decision_note', baselineFrom: 'baseline_from', baselineTo: 'baseline_to',
-  reenterStage: 'reenter_stage', interruptedStage: 'interrupted_stage', interruptedStatus: 'interrupted_status', impactSummary: 'impact_summary',
+  reenterStage: 'reenter_stage', interruptedStage: 'interrupted_stage', interruptedStatus: 'interrupted_status', interruptedRunAfter: 'interrupted_run_after', impactSummary: 'impact_summary',
 };
 const SCOPE_TABLES = { feature: 'features', task: 'tasks', test_case: 'test_cases' } as const;
 

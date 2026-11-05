@@ -76,7 +76,8 @@ export function applyAcceptedChange(repo: Repo, req: Pick<RequestRow, 'id'>, cr:
   const reqId = req.id;
   repo.tx(() => {
     const features = new Map(repo.listFeatures(reqId).map(f => [f.id, f]));
-    const removed = new Set(impact.scope.remove.filter(id => features.has(id)));
+    // Already-cancelled features keep the CR that cancelled them.
+    const removed = new Set(impact.scope.remove.filter(id => features.get(id)?.scopeStatus === 'active'));
     for (const fid of removed) {
       repo.setScope('feature', reqId, fid, 'cancelled', cr.id);
       for (const t of repo.listTasks(reqId)) if (t.featureId === fid) repo.setScope('task', reqId, t.id, 'cancelled', cr.id);

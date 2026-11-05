@@ -94,6 +94,7 @@ const BUSY_RETRY_MS = 1000; // a job whose request still has a handler unwinding
 const AUTO_ACCEPT_NOTE = 'Tự động chấp nhận';
 /** CR statuses of the batch in progress (accepted/rejected CRs also belong to it while baselineFrom is null). */
 const OPEN_CR = new Set(['pending', 'analyzing', 'awaiting_decision']);
+const MAX_CHANGE_RERUNS = 2; // consecutive CHANGE re-runs for CRs arriving during analysis
 
 /**
  * Stage that follows `stage` in normal flow, or undefined when finished.
@@ -132,6 +133,12 @@ export function summarizeEvent(line: string): string | undefined {
 export class Pipeline {
   private controllers = new Map<string, AbortController>();
   private gens = new Map<string, number>();
+  /** Pending CR ids when the current CHANGE run started (a CR still pending afterwards that was in here was skipped). */
+  private changeSnapshot = new Map<string, Set<string>>();
+  /** Consecutive CHANGE re-runs caused by CRs arriving during analysis. */
+  private changeReruns = new Map<string, number>();
+  /** First time a job was deferred because an interrupted handler of its request was still unwinding. */
+  private busySince = new Map<number, number>();
 
   constructor(private cfg: Config, private repo: Repo, private deps: PipelineDeps = {}) {}
 
@@ -181,7 +188,8 @@ export class Pipeline {
 
   pause(reqId: string): void {
     const req = this.mustGet(reqId);
-    if (req.status === 'cancelled' || req.status === 'done') return;
+    // Only work in progress can be paused; waiting states (awaiting_*, needs_human, failed, done) are left as they are.
+    if (req.status !== 'running' && req.status !== 'paused') return;
     this.setStatus(reqId, req.stage, 'paused');
     for (const j of this.repo.listJobs(reqId)) if (j.status === 'queued' || j.status === 'paused') this.repo.pauseJob(j.id, FAR_FUTURE);
   }
@@ -274,18 +282,21 @@ export class Pipeline {
   private startChange(req: RequestRow, crId: string): ChangeRequestRow {
     const reqId = req.id;
     // The first CR of a batch records where the request was; later CRs of the same batch copy it.
+    const jobs = this.repo.listJobs(reqId);
     const origin = req.stage === 'CHANGE'
       ? this.openBatch(reqId).find(c => c.id !== crId && c.interruptedStage)
-      : { interruptedStage: req.stage, interruptedStatus: req.status };
+      : { interruptedStage: req.stage, interruptedStatus: req.status, interruptedRunAfter: this.parkedRunAfter(req, jobs) };
     const cr = this.repo.updateChangeRequest(reqId, crId, {
       interruptedStage: origin?.interruptedStage ?? undefined, interruptedStatus: origin?.interruptedStatus ?? undefined,
+      interruptedRunAfter: origin?.interruptedRunAfter ?? undefined,
     });
-    if (req.stage === 'CHANGE' && req.status === 'running') {
+    const liveJob = this.controllers.has(reqId) || jobs.some(j => j.status === 'queued' || j.status === 'paused' || j.status === 'running');
+    if (req.stage === 'CHANGE' && req.status === 'running' && liveJob) {
       this.log(reqId, 'info', `Tiếp nhận yêu cầu thay đổi ${crId}: ${cr.title} — sẽ phân tích ngay sau lượt phân tích hiện tại`);
       return cr;
     }
     this.bump(reqId);
-    for (const j of this.repo.listJobs(reqId)) if (j.status === 'queued' || j.status === 'paused') this.repo.failJob(j.id, 'superseded by change request');
+    for (const j of jobs) if (j.status === 'queued' || j.status === 'paused') this.repo.failJob(j.id, 'superseded by change request');
     this.controllers.get(reqId)?.abort();
     this.log(reqId, 'info', req.stage === 'CHANGE'
       ? `Tiếp nhận yêu cầu thay đổi ${crId}: ${cr.title} — phân tích lại tác động`
@@ -293,6 +304,13 @@ export class Pipeline {
     this.setStatus(reqId, 'CHANGE', 'running');
     this.enqueue(reqId, 'CHANGE');
     return cr;
+  }
+
+  /** When a paused request is interrupted: run_after of its parked job (earliest), so a restore can keep a rate-limit pause. */
+  private parkedRunAfter(req: RequestRow, jobs: JobRow[]): number | undefined {
+    if (req.status !== 'paused') return undefined;
+    const times = jobs.filter(j => j.status === 'paused').map(j => j.runAfter);
+    return times.length ? Math.min(...times) : undefined;
   }
 
   /** CRs of the batch currently in progress (not yet finalized by finishChangeDecision). */
@@ -307,15 +325,27 @@ export class Pipeline {
     const ws = Workspace.for(this.cfg, req.id);
     const analysed = repo.listChangeRequests(req.id).filter(c => c.status === 'analyzing');
     const missing = analysed.filter(c => !loadImpact(ws, c.id)).map(c => c.id);
-    if (missing.length) {
-      this.applyOutcome(job, req, run, { kind: 'fail', error: `Không đọc được báo cáo tác động (impact.json) hợp lệ của ${missing.join(', ')}` }, userPaused);
-      return;
-    }
+    const fail = (error: string): void => this.applyOutcome(job, req, run, { kind: 'fail', error }, userPaused);
+    if (missing.length) { fail(`Không đọc được báo cáo tác động (impact.json) hợp lệ của ${missing.join(', ')}`); return; }
+    const atStart = this.changeSnapshot.get(req.id);
+    this.changeSnapshot.delete(req.id);
+    const pending = repo.listChangeRequests(req.id).filter(c => c.status === 'pending');
+    // Pending at the start and still pending: the CHANGE handler skipped it — re-running would loop forever.
+    const stuck = atStart ? pending.filter(c => atStart.has(c.id)) : [];
+    if (stuck.length) { fail(`Giai đoạn phân tích thay đổi không xử lý yêu cầu thay đổi ${stuck.map(c => c.id).join(', ')}`); return; }
+    if (pending.length) {
+      const reruns = this.changeReruns.get(req.id) ?? 0;
+      if (reruns >= MAX_CHANGE_RERUNS) {
+        fail(`Liên tục có yêu cầu thay đổi mới trong lúc phân tích (${pending.map(c => c.id).join(', ')}) — đã phân tích lại ${MAX_CHANGE_RERUNS} lần, hãy chạy lại giai đoạn phân tích thay đổi`);
+        return;
+      }
+      this.changeReruns.set(req.id, reruns + 1);
+    } else this.changeReruns.delete(req.id);
     repo.finishStageRun(run.id, 'done');
     repo.finishJob(job.id);
     for (const c of analysed) repo.updateChangeRequest(req.id, c.id, { status: 'awaiting_decision' });
-    if (repo.listChangeRequests(req.id).some(c => c.status === 'pending')) {
-      this.log(req.id, 'info', 'Có yêu cầu thay đổi mới trong lúc phân tích — phân tích tiếp trước khi quyết định');
+    if (pending.length) {
+      this.log(req.id, 'info', `Có yêu cầu thay đổi mới trong lúc phân tích (${pending.map(c => c.id).join(', ')}) — phân tích tiếp trước khi quyết định`);
       this.setStatus(req.id, 'CHANGE', userPaused ? 'paused' : 'running');
       this.enqueue(req.id, 'CHANGE');
       return;
@@ -367,7 +397,10 @@ export class Pipeline {
       const status = plan.status === 'running' && userPaused ? 'paused' : plan.status;
       this.log(reqId, 'info', `Không chấp nhận thay đổi nào — quay lại giai đoạn ${plan.stage}`);
       this.setStatus(reqId, plan.stage, status);
-      if (plan.enqueue) this.enqueue(reqId, plan.stage);
+      const ra = origin.interruptedRunAfter;
+      // A rate-limit pause keeps its due time (the worker resumes it); a user pause stays parked until resume().
+      if (plan.enqueue && status === 'paused' && ra !== null && ra < FAR_FUTURE) this.enqueueAt(reqId, plan.stage, ra);
+      else if (plan.enqueue) this.enqueue(reqId, plan.stage);
       return;
     }
 
@@ -427,7 +460,25 @@ export class Pipeline {
     if (req0.status === 'cancelled') { this.repo.failJob(job.id, 'cancelled'); return; }
     if (stale()) { this.repo.failJob(job.id, 'superseded'); return; }
     // An interrupted handler (submitChange) may still be unwinding: never run two stages of one request at once.
-    if (this.controllers.has(reqId)) { this.repo.pauseJob(job.id, this.now() + BUSY_RETRY_MS); return; }
+    // Gives up after STAGE_TIMEOUT_MIN (no limit when 0).
+    if (this.controllers.has(reqId)) {
+      const now = this.now();
+      const since = this.busySince.get(job.id);
+      if (since === undefined) {
+        this.busySince.set(job.id, now);
+        this.log(reqId, 'info', `Chờ giai đoạn bị ngắt dừng hẳn trước khi chạy ${stage}`);
+      } else if (this.cfg.stageTimeoutMin > 0 && now - since > this.cfg.stageTimeoutMin * 60_000) {
+        this.busySince.delete(job.id);
+        const msg = `Giai đoạn bị ngắt không dừng sau ${this.cfg.stageTimeoutMin} phút — không thể chạy ${stage}`;
+        this.repo.failJob(job.id, msg);
+        this.log(reqId, 'error', msg);
+        this.setStatus(reqId, stage, 'failed');
+        return;
+      }
+      this.repo.pauseJob(job.id, now + BUSY_RETRY_MS);
+      return;
+    }
+    this.busySince.delete(job.id);
 
     let run: StageRunRow | undefined;
     const controller = new AbortController();
@@ -440,7 +491,10 @@ export class Pipeline {
       if (prev?.status === 'running') this.repo.finishStageRun(prev.id, 'failed', { error: 'interrupted' });
       // A claimed job always runs; a user pause is detected only after the handler returns.
       this.setStatus(reqId, stage, 'running');
-      if (stage === 'CHANGE') this.resetAnalyzing(reqId); // leftovers of an interrupted/failed CHANGE run
+      if (stage === 'CHANGE') { // leftovers of an interrupted/failed CHANGE run go back to pending
+        this.resetAnalyzing(reqId);
+        this.changeSnapshot.set(reqId, new Set(this.repo.listChangeRequests(reqId).filter(c => c.status === 'pending').map(c => c.id)));
+      }
       const req = this.repo.getRequest(reqId)!;
       run = this.repo.createStageRun(reqId, stage, payload.feedback ?? null);
       const ws = Workspace.for(this.cfg, reqId).ensure();
@@ -474,7 +528,7 @@ export class Pipeline {
           this.parkIfPaused(reqId, retry.id);
         } else {
           this.setStatus(reqId, stage, 'failed');
-          if (stage === 'CHANGE') this.resetAnalyzing(reqId);
+          if (stage === 'CHANGE') { this.resetAnalyzing(reqId); this.changeReruns.delete(reqId); }
         }
       });
       return;
@@ -490,6 +544,7 @@ export class Pipeline {
   private applyOutcome(job: JobRow, req: RequestRow, run: StageRunRow, o: StageOutcome, userPaused: boolean): void {
     const { repo } = this;
     const stage = run.stage;
+    if (stage === 'CHANGE' && o.kind !== 'next') { this.resetAnalyzing(req.id); this.changeReruns.delete(req.id); }
     switch (o.kind) {
       case 'next': {
         if (stage === 'CHANGE') { this.afterChange(job, req, run, userPaused); return; }
@@ -542,7 +597,6 @@ export class Pipeline {
         repo.failJob(job.id, o.error);
         this.log(req.id, 'error', `Giai đoạn ${stage} thất bại: ${o.error}`);
         this.setStatus(req.id, stage, 'failed');
-        if (stage === 'CHANGE') this.resetAnalyzing(req.id);
         return;
     }
   }
@@ -588,6 +642,12 @@ export class Pipeline {
     if (resume) payload.resume = true;
     const job = this.repo.enqueueJob(reqId, 'run_stage', payload);
     this.parkIfPaused(reqId, job.id);
+  }
+
+  /** Enqueues a stage job that stays parked until `runAfter` (restored rate-limit pause). */
+  private enqueueAt(reqId: string, stage: Stage, runAfter: number): void {
+    const job = this.repo.enqueueJob(reqId, 'run_stage', { stage, gen: this.gens.get(reqId) ?? 0 });
+    this.repo.pauseJob(job.id, runAfter);
   }
 
   /** A user-paused request never gets new work claimed until resume(). */
