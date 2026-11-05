@@ -88,4 +88,24 @@ describe('Git', () => {
       if (saved.n === undefined) delete process.env.GIT_CONFIG_NOSYSTEM; else process.env.GIT_CONFIG_NOSYSTEM = saved.n;
     }
   });
+  it('commitAll excludes listed paths; untracked, branchExists, resetBranch, aheadCount, merge --no-ff', async () => {
+    const dir = join(root, 'work7');
+    const git = new Git(dir);
+    await git.clone(remote, '', dir);
+    writeFileSync(join(dir, 'build.js'), 'x');
+    expect(await git.untracked()).toEqual(['build.js']);
+    expect(await git.commitAll('nothing but excluded', ['build.js'])).toBe(false);
+    expect(await git.branchExists('feat')).toBe(false);
+    await git.resetBranch('feat', 'main');
+    expect(await git.branchExists('feat')).toBe(true);
+    writeFileSync(join(dir, 'a.txt'), 'a');
+    expect(await git.commitAll('a', ['build.js'])).toBe(true);
+    expect(g(dir, 'ls-files')).not.toContain('build.js');
+    expect(await git.aheadCount('main', 'feat')).toBe(1);
+    await git.checkout('main');
+    await git.merge('feat', 'Merge feat');
+    expect(g(dir, 'log', '--merges', '--format=%s')).toBe('Merge feat');
+    await git.resetBranch('feat', 'main');
+    expect(await git.aheadCount('main', 'feat')).toBe(0);
+  });
 });

@@ -1,15 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import JSZip from 'jszip';
 import ExcelJS from 'exceljs';
-import { setMockHandler, clearMockHandler } from '../../src/claude/mock.js';
-import type { RunOpts, RunResult } from '../../src/claude/runner.js';
-import { clearStages, registerStage, Pipeline, Workspace } from '../../src/engine/pipeline.js';
+import { clearMockHandler } from '../../src/claude/mock.js';
+import { clearStages, Pipeline, Workspace } from '../../src/engine/pipeline.js';
 import { Worker } from '../../src/engine/worker.js';
-import { registerAllStages } from '../../src/engine/stages/index.js';
 import { buildPrompt } from '../../src/engine/prompt.js';
 import { templatePath } from '../../src/office/templates.js';
 import { readUlnlCatalog } from '../../src/office/ulnl-catalog.js';
@@ -19,28 +16,7 @@ import type { Config } from '../../src/config.js';
 import type { Question, Stage } from '../../src/domain/types.js';
 import { safeFileName } from '../../src/engine/stages/intake.js';
 import { setup, mkReq } from './helpers.js';
-
-const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
-
-type Call = { role: string; prompt: string; opts: RunOpts };
-let calls: Call[];
-
-function roleOf(prompt: string): string {
-  return /^ROLE: (\S+)/.exec(prompt)?.[1] ?? '?';
-}
-
-/** Install a mock Claude: `fx[role]` writes fixture files into docs/devflow (cwd = repo dir). */
-function mockClaude(fx: Record<string, (dir: string, call: Call) => void>) {
-  setMockHandler((opts: RunOpts): RunResult => {
-    const role = roleOf(opts.prompt);
-    const call = { role, prompt: opts.prompt, opts };
-    calls.push(call);
-    const dir = join(opts.cwd, 'docs', 'devflow');
-    mkdirSync(dir, { recursive: true });
-    fx[role]?.(dir, call);
-    return { ok: true, resultText: 'ok' };
-  });
-}
+import { calls, git, initRepo, mockClaude, register, resetCalls, startAt } from './stage-helpers.js';
 
 const q = (id: string, priority: 'must' | 'should', extra: Partial<Question> = {}): Question => ({
   id, category: 'Chức năng', question: `Câu hỏi ${id}?`, why: 'vì cần', type: 'single', options: ['Có', 'Không'], suggested_answer: 'Có', priority, ...extra,
@@ -166,24 +142,7 @@ const writeDesign = (dir: string) => {
   writeFileSync(join(d, 'tong-the.mmd'), 'graph TD; A-->B\n');
 };
 
-/** Registers the real handlers and stubs the given stages so a test can stop the flow there. */
-function register(stubs: Stage[] = []) {
-  clearStages();
-  registerAllStages();
-  for (const s of stubs) registerStage(s, async () => ({ kind: 'needs_human', reason: `stub ${s}` }), { gate: false });
-}
-
-function startAt(pipeline: Pipeline, reqId: string, stage: Stage) {
-  pipeline.rerunStage(reqId, stage);
-}
-
-function initRepo(dir: string, branch: string) {
-  mkdirSync(dir, { recursive: true });
-  git(dir, 'init', '-q', '-b', branch);
-  git(dir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init');
-}
-
-beforeEach(() => { calls = []; });
+beforeEach(() => { resetCalls(); });
 afterEach(() => { clearMockHandler(); clearStages(); });
 
 describe('buildPrompt', () => {

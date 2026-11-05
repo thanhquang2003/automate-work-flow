@@ -1,0 +1,508 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
+import ExcelJS from 'exceljs';
+import { clearMockHandler } from '../../src/claude/mock.js';
+import { clearStages, Pipeline, registerStage, Workspace } from '../../src/engine/pipeline.js';
+import { Worker } from '../../src/engine/worker.js';
+import { writeProjectInfo } from '../../src/engine/stages/common.js';
+import { validateResults } from '../../src/engine/evidence.js';
+import type { GitLabClient } from '../../src/gitlab/client.js';
+import type { Stage, TestCaseRow } from '../../src/domain/types.js';
+import { setup, mkReq } from './helpers.js';
+import { calls, git, initRepo, mockClaude, outputPaths, register, resetCalls, startAt, type Call } from './stage-helpers.js';
+
+// ---------- fixtures ----------
+
+const FEATURES = [
+  { id: 'F-01', code: 'DANGNHAP', name: 'Đăng nhập', description: 'Đăng nhập', typeCode: 'CN_WEB1', unitTest: true, note: '', kind: 'function' as const },
+  { id: 'F-02', code: 'BAOCAO', name: 'Báo cáo', description: 'Báo cáo', typeCode: 'BC2', unitTest: false, note: '', kind: 'function' as const },
+];
+
+const TASKS = {
+  tasks: [
+    { id: 'T-01', title: 'Màn hình đăng nhập', feature_id: 'F-01', depends_on: [] },
+    { id: 'T-02', title: 'Báo cáo doanh thu', feature_id: 'F-02', depends_on: ['T-01'] },
+  ],
+};
+const TCS = {
+  test_cases: [
+    { id: 'TC-DANGNHAP-01', feature_id: 'F-01', purpose: 'Đăng nhập đúng mật khẩu', data: 'admin/123', steps: '1. Mở trang\n2. Nhập', expected: 'Vào trang chủ' },
+    { id: 'TC-BAOCAO-01', feature_id: 'F-02', purpose: 'Xem báo cáo', data: '', steps: '1. Mở báo cáo', expected: 'Hiện bảng' },
+  ],
+};
+
+const tcRow = (id: string, featureId: string, purpose = `Mục đích ${id}`): TestCaseRow => ({
+  id, featureId, purpose, data: '', steps: '1. Làm', expected: 'Đúng', status1: null, status2: null, realResult: null, evidence: [], comment: null,
+});
+
+type Result = { tc_id: string; status: 'P' | 'F' | 'PE'; real_result?: string; comment?: string; evidence?: string[] };
+
+/** Developer fixture: writes one code file per call plus the summary file listed as required output. */
+const developer = (_dir: string, call: Call) => {
+  const n = calls.filter(c => c.role === 'developer').length;
+  const cwd = call.opts.cwd;
+  mkdirSync(join(cwd, 'src'), { recursive: true });
+  writeFileSync(join(cwd, 'src', `code-${n}.txt`), `change ${n}\n`);
+  for (const p of outputPaths(call.prompt)) { mkdirSync(join(p, '..'), { recursive: true }); writeFileSync(p, `Đã làm lần ${n}\n`); }
+};
+
+/** Reviewer fixture: `verdicts[i]` decides call i (last one repeats). */
+const reviewer = (verdicts: boolean[]) => (_dir: string, call: Call) => {
+  const i = calls.filter(c => c.role === 'reviewer').length - 1;
+  const ok = verdicts[Math.min(i, verdicts.length - 1)]!;
+  const p = outputPaths(call.prompt)[0]!;
+  mkdirSync(join(p, '..'), { recursive: true });
+  writeFileSync(p, JSON.stringify({ approved: ok, comments: ok ? [] : [{ file: 'src/a.ts', line: 3, severity: 'major', body: `Thiếu kiểm tra null (lần ${i + 1})` }] }));
+};
+
+/** Tester fixture: `runs[i]` = results of tester call i (last repeats); writes evidence files for listed names. */
+const tester = (evidenceDir: string, runs: (Result & { files?: string[] })[][]) => (dir: string) => {
+  const i = calls.filter(c => c.role === 'tester').length - 1;
+  const rs = runs[Math.min(i, runs.length - 1)]!;
+  for (const r of rs) {
+    for (const f of r.files ?? []) {
+      mkdirSync(join(evidenceDir, r.tc_id), { recursive: true });
+      writeFileSync(join(evidenceDir, r.tc_id, f), 'PNGDATA');
+    }
+  }
+  writeFileSync(join(dir, 'test-results.json'), JSON.stringify({
+    results: rs.map(r => ({ tc_id: r.tc_id, status: r.status, real_result: r.real_result ?? 'thực tế', comment: r.comment ?? '', evidence: (r.files ?? []).map(f => join(evidenceDir, r.tc_id, f)) })),
+  }));
+};
+
+// ---------- fake GitLab over a local bare remote ----------
+
+interface FakeMR { source: string; target: string; title: string; description: string; state: string; notes: string[] }
+interface FakeIssue { title: string; description: string; labels: string[]; state: string; notes: string[]; addLabels: string[] }
+
+function fakeGitLab(bare: string) {
+  const mrs = new Map<number, FakeMR>();
+  const issues = new Map<number, FakeIssue>();
+  const uploads: string[] = [];
+  let mrN = 0;
+  let issueN = 0;
+  const client = {
+    createMR: async (_pid: number, o: { source: string; target: string; title: string; description: string }) => {
+      const iid = ++mrN;
+      mrs.set(iid, { ...o, state: 'opened', notes: [] });
+      return { iid, web_url: `http://gl/grp/app/-/merge_requests/${iid}` };
+    },
+    findOpenMR: async (_pid: number, source: string, target: string) => {
+      for (const [iid, m] of mrs) if (m.state === 'opened' && m.source === source && m.target === target) return { iid, web_url: `http://gl/grp/app/-/merge_requests/${iid}` };
+      return undefined;
+    },
+    addMRNote: async (_pid: number, iid: number, body: string) => { mrs.get(iid)!.notes.push(body); },
+    mergeMR: async (_pid: number, iid: number) => {
+      const m = mrs.get(iid)!;
+      if (m.state !== 'opened') throw new Error('not open');
+      const tmp = mkdtempSync(join(tmpdir(), 'devflow-merge-'));
+      git(tmp, 'clone', '-q', bare, '.');
+      git(tmp, 'checkout', '-q', m.target);
+      git(tmp, '-c', 'user.name=gl', '-c', 'user.email=gl@gl', 'merge', '-q', '--no-ff', `origin/${m.source}`, '-m', `Merge ${m.source}`);
+      git(tmp, 'push', '-q', 'origin', m.target);
+      m.state = 'merged';
+    },
+    createIssue: async (_pid: number, o: { title: string; description: string; labels: string[] }) => {
+      const iid = ++issueN;
+      issues.set(iid, { ...o, state: 'opened', notes: [], addLabels: [] });
+      return { iid, web_url: `http://gl/grp/app/-/issues/${iid}` };
+    },
+    addIssueNote: async (_pid: number, iid: number, body: string) => { issues.get(iid)!.notes.push(body); },
+    updateIssue: async (_pid: number, iid: number, o: { state_event?: string; add_labels?: string }) => {
+      const is = issues.get(iid)!;
+      if (o.state_event === 'close') is.state = 'closed';
+      if (o.state_event === 'reopen') is.state = 'opened';
+      if (o.add_labels) is.addLabels.push(o.add_labels);
+    },
+    uploadFile: async (_pid: number, p: string) => { uploads.push(p); return { markdown: `![${basename(p)}](/uploads/abc/${basename(p)})` }; },
+  };
+  return { client: client as unknown as GitLabClient, mrs, issues, uploads, seedIssue: (iid: number) => { issues.set(iid, { title: 'x', description: '', labels: [], state: 'opened', notes: [], addLabels: [] }); issueN = Math.max(issueN, iid); } };
+}
+
+// ---------- workspace preparation ----------
+
+interface Prep { gitlab?: boolean; stubs?: Stage[]; tasks?: boolean; testCases?: TestCaseRow[] }
+
+function prep(o: Prep = {}) {
+  register(o.stubs ?? []);
+  const s = setup();
+  const r = mkReq(s.repo, { projectKind: o.gitlab ? 'existing' : 'new', gitlabProject: o.gitlab ? 'grp/app' : null });
+  const ws = Workspace.for(s.cfg, r.id).ensure();
+  const branch = `devflow/${r.id}`;
+  let bare = '';
+  let gl: ReturnType<typeof fakeGitLab> | undefined;
+  if (o.gitlab) {
+    const root = mkdtempSync(join(tmpdir(), 'devflow-remote-'));
+    bare = join(root, 'app.git');
+    git(root, 'init', '-q', '--bare', '-b', 'main', bare);
+    const seed = join(root, 'seed');
+    initRepo(seed, 'main');
+    writeFileSync(join(seed, 'README.md'), '# app\n');
+    git(seed, 'add', '-A');
+    git(seed, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'readme');
+    git(seed, 'push', '-q', bare, 'main');
+    git(bare, 'branch', branch, 'main');
+    git(root, 'clone', '-q', bare, ws.repoDir);
+    git(ws.repoDir, 'checkout', '-q', branch);
+    writeProjectInfo(ws, { gitlab: true, projectId: 7, pathWithNamespace: 'grp/app', defaultBranch: 'main', webUrl: 'http://gl/grp/app', branch });
+    gl = fakeGitLab(bare);
+  } else {
+    initRepo(ws.repoDir, branch);
+    writeProjectInfo(ws, { gitlab: false, branch });
+  }
+  s.repo.replaceFeatures(r.id, FEATURES);
+  if (o.tasks) {
+    for (const t of TASKS.tasks) s.repo.upsertTask(r.id, { id: t.id, title: t.title, featureId: t.feature_id, dependsOn: t.depends_on, status: 'todo', reviewRounds: 0, branch: null, mrIid: null });
+  }
+  for (const tc of o.testCases ?? []) s.repo.upsertTestCase(r.id, tc);
+  // No makeGit: exercises the real Git construction (protectedBranch from project info).
+  const pipeline = new Pipeline(s.cfg, s.repo, gl ? { makeGitLab: () => gl!.client } : { makeGitLab: () => undefined });
+  const worker = new Worker(s.cfg, s.repo, pipeline);
+  return { ...s, pipeline, worker, r, ws, branch, bare, gl };
+}
+
+async function readSheet(path: string) {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.readFile(path);
+  const sh = wb.getWorksheet('2. FUNCTIONAL TESTCASE')!;
+  const text = (v: ExcelJS.CellValue): string => (v && typeof v === 'object' && 'text' in v ? String(v.text) : v == null ? '' : String(v));
+  const row = (n: number) => ({
+    id: text(sh.getCell(`A${n}`).value), s1: text(sh.getCell(`I${n}`).value), s2: text(sh.getCell(`J${n}`).value),
+    evidence: text(sh.getCell(`M${n}`).value), comment: text(sh.getCell(`N${n}`).value),
+  });
+  return { row };
+}
+
+beforeEach(() => { resetCalls(); });
+afterEach(() => { clearMockHandler(); clearStages(); delete process.env.ANDROID_HOME; });
+
+// ---------- tests ----------
+
+describe('pipeline git safety', () => {
+  it('constructs Git with protectedBranch = project default branch', async () => {
+    const p = prep({ gitlab: true });
+    let err = '';
+    registerStage('PLANNING', async ctx => {
+      try { await ctx.git.push('main'); } catch (e) { err = (e as Error).message; }
+      return { kind: 'needs_human', reason: 'stop' };
+    }, { gate: false });
+    startAt(p.pipeline, p.r.id, 'PLANNING');
+    await p.worker.drain();
+    expect(err).toMatch(/protected branch/);
+    expect(git(p.bare, 'log', '--oneline', 'main')).toMatch(/readme/);
+  });
+});
+
+describe('validateResults', () => {
+  it('downgrades P without evidence and PE without reason', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'devflow-ev-'));
+    mkdirSync(join(dir, 'TC-A-01'), { recursive: true });
+    writeFileSync(join(dir, 'TC-A-01', 'a.png'), 'x');
+    mkdirSync(join(dir, 'TC-A-02'), { recursive: true }); // empty dir
+    const out = validateResults([
+      { tc_id: 'TC-A-01', status: 'P', real_result: 'ok', evidence: [], comment: '' },
+      { tc_id: 'TC-A-02', status: 'P', real_result: 'ok', evidence: [], comment: 'đã chạy' },
+      { tc_id: 'TC-A-03', status: 'PE', real_result: '', evidence: [], comment: '  ' },
+      { tc_id: 'TC-A-04', status: 'PE', real_result: '', evidence: [], comment: 'thiếu môi trường mobile' },
+      { tc_id: '../x', status: 'P', real_result: '', evidence: [], comment: '' },
+    ], dir);
+    expect(out.map(r => r.status)).toEqual(['P', 'F', 'F', 'PE', 'F']);
+    expect(out[1]!.comment).toContain('thiếu evidence');
+    expect(out[1]!.comment).toContain('đã chạy');
+    expect(out[2]!.comment).toContain('thiếu lý do PE');
+  });
+});
+
+describe('stages part 2', () => {
+  it('planning writes test case xlsx', async () => {
+    const p = prep({ stubs: ['DEVELOP'] });
+    mockClaude({
+      planner: dir => {
+        writeFileSync(join(dir, 'tasks.json'), JSON.stringify(TASKS));
+        writeFileSync(join(dir, 'testcases.json'), JSON.stringify(TCS));
+      },
+    });
+    startAt(p.pipeline, p.r.id, 'PLANNING');
+    await p.worker.drain();
+    expect(calls.map(c => c.role)).toEqual(['planner']);
+    expect(calls[0]!.prompt).toContain('DANGNHAP');
+    expect(p.repo.listTasks(p.r.id).map(t => [t.id, t.dependsOn, t.status])).toEqual([['T-01', [], 'todo'], ['T-02', ['T-01'], 'todo']]);
+    expect(p.repo.listTestCases(p.r.id).map(t => t.id)).toEqual(['TC-BAOCAO-01', 'TC-DANGNHAP-01']);
+    const xlsx = join(p.ws.artifactsDir, `TestCase_${p.r.id}.xlsx`);
+    expect(existsSync(xlsx)).toBe(true);
+    const sh = await readSheet(xlsx);
+    expect([sh.row(12).id, sh.row(13).id]).toEqual(['TC-DANGNHAP-01', 'TC-BAOCAO-01']);
+    expect(sh.row(12).s1).toBe('');
+    expect(git(p.ws.repoDir, 'ls-files')).toContain('docs/devflow/tasks.json');
+    expect(p.repo.getRequest(p.r.id)!.stage).toBe('DEVELOP');
+  });
+
+  it('planning rejects unknown feature ids, dependency cycles and features without test cases, then retries', async () => {
+    const p = prep({ stubs: ['DEVELOP'] });
+    let n = 0;
+    mockClaude({
+      planner: dir => {
+        n++;
+        const bad = { tasks: [{ id: 'T-01', title: 'a', feature_id: 'F-99', depends_on: ['T-02'] }, { id: 'T-02', title: 'b', feature_id: 'F-01', depends_on: ['T-01'] }] };
+        writeFileSync(join(dir, 'tasks.json'), JSON.stringify(n === 1 ? bad : TASKS));
+        writeFileSync(join(dir, 'testcases.json'), JSON.stringify(n === 1 ? { test_cases: [TCS.test_cases[0]] } : TCS));
+      },
+    });
+    startAt(p.pipeline, p.r.id, 'PLANNING');
+    await p.worker.drain();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.prompt).toContain('F-99');
+    expect(calls[1]!.prompt).toMatch(/vòng|phụ thuộc vòng/);
+    expect(calls[1]!.prompt).toContain('BAOCAO');
+    expect(p.repo.listTasks(p.r.id)).toHaveLength(2);
+  });
+
+  it('develop runs review loop and merges MR', async () => {
+    const p = prep({ gitlab: true, tasks: true, stubs: ['TEST'] });
+    mockClaude({ developer, reviewer: reviewer([false, true, true]) });
+    startAt(p.pipeline, p.r.id, 'DEVELOP');
+    await p.worker.drain();
+    expect(calls.map(c => c.role)).toEqual(['developer', 'reviewer', 'developer', 'reviewer', 'developer', 'reviewer']);
+    // Developer prompt: TDD skill; second round carries the reviewer's comments.
+    expect(calls[0]!.prompt).toContain('test-driven-development');
+    expect(calls[2]!.prompt).toContain('Thiếu kiểm tra null (lần 1)');
+    expect(calls[1]!.prompt).toMatch(/tkct|TKCT/);
+    const mrs = [...p.gl!.mrs.values()];
+    expect(mrs.map(m => [m.source, m.target, m.state])).toEqual([
+      [`${p.branch}-T-01`, p.branch, 'merged'],
+      [`${p.branch}-T-02`, p.branch, 'merged'],
+    ]);
+    expect(mrs[0]!.notes).toHaveLength(2);
+    expect(mrs[0]!.notes[0]).toContain('Thiếu kiểm tra null (lần 1)');
+    expect(p.repo.listTasks(p.r.id).map(t => [t.id, t.status, t.reviewRounds])).toEqual([['T-01', 'done', 2], ['T-02', 'done', 1]]);
+    // Code reached the integration branch on the remote; default branch untouched.
+    const files = git(p.bare, 'ls-tree', '-r', '--name-only', p.branch);
+    expect(files).toContain('src/code-1.txt');
+    expect(files).toContain('src/code-3.txt');
+    expect(files).toContain('.gitignore');
+    expect(files).not.toContain('.devflow-tmp');
+    expect(git(p.bare, 'ls-tree', '-r', '--name-only', 'main')).not.toContain('src/code-1.txt');
+    // One job per task: DEVELOP ran twice, then moved on (auto mode).
+    expect(p.repo.listStageRuns(p.r.id).filter(s => s.stage === 'DEVELOP')).toHaveLength(2);
+    expect(p.repo.getRequest(p.r.id)!.stage).toBe('TEST');
+  });
+
+  it('develop without GitLab merges locally with --no-ff and records reviews in docs/devflow/reviews', async () => {
+    const p = prep({ tasks: true, stubs: ['TEST'] });
+    mkdirSync(join(p.ws.repoDir, 'dist'), { recursive: true });
+    writeFileSync(join(p.ws.repoDir, 'dist', 'build.js'), 'x'); // pre-existing untracked output must not be committed
+    mockClaude({ developer, reviewer: reviewer([false, true]) });
+    startAt(p.pipeline, p.r.id, 'DEVELOP');
+    await p.worker.drain();
+    expect(git(p.ws.repoDir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(p.branch);
+    const files = git(p.ws.repoDir, 'ls-tree', '-r', '--name-only', p.branch);
+    expect(files).toContain('src/code-1.txt');
+    expect(files).toContain('docs/devflow/reviews/T-01-r1.md');
+    expect(files).toContain('docs/devflow/reviews/T-01-r2.md');
+    expect(files).not.toContain('dist/build.js');
+    expect(readFileSync(join(p.ws.repoDir, '.gitignore'), 'utf8')).toContain('.devflow-tmp/');
+    expect(readFileSync(join(p.ws.repoDir, 'docs/devflow/reviews/T-01-r1.md'), 'utf8')).toContain('Thiếu kiểm tra null');
+    const merges = git(p.ws.repoDir, 'log', '--merges', '--format=%s', p.branch);
+    expect(merges).toContain('T-01');
+    expect(merges).toContain('T-02');
+    expect(p.repo.getRequest(p.r.id)!.stage).toBe('TEST');
+  });
+
+  it('review rejected 3 times → needs_human', async () => {
+    const p = prep({ tasks: true, stubs: ['TEST'] });
+    mockClaude({ developer, reviewer: reviewer([false]) });
+    startAt(p.pipeline, p.r.id, 'DEVELOP');
+    await p.worker.drain();
+    expect(calls.map(c => c.role)).toEqual(['developer', 'reviewer', 'developer', 'reviewer', 'developer', 'reviewer']);
+    const req = p.repo.getRequest(p.r.id)!;
+    expect(req.status).toBe('needs_human');
+    expect(req.stage).toBe('DEVELOP');
+    const t = p.repo.getTask(p.r.id, 'T-01')!;
+    expect([t.status, t.reviewRounds]).toEqual(['needs_human', 3]);
+    expect(p.repo.listStageRuns(p.r.id).at(-1)!.error).toContain('T-01');
+    // Nothing merged into the integration branch.
+    expect(git(p.ws.repoDir, 'ls-tree', '-r', '--name-only', p.branch)).not.toContain('src/code-1.txt');
+  });
+
+  it('test downgrades P without evidence', async () => {
+    const tcs = [tcRow('TC-DANGNHAP-01', 'F-01'), tcRow('TC-DANGNHAP-02', 'F-01'), tcRow('TC-BAOCAO-01', 'F-02')];
+    const p = prep({ testCases: tcs, stubs: ['BUGFIX'] });
+    mockClaude({
+      tester: tester(p.ws.evidenceDir, [[
+        { tc_id: 'TC-DANGNHAP-01', status: 'P', files: ['shot.png'] },
+        { tc_id: 'TC-DANGNHAP-02', status: 'PE', comment: '' },
+        { tc_id: 'TC-BAOCAO-01', status: 'P' },
+      ]]),
+    });
+    startAt(p.pipeline, p.r.id, 'TEST');
+    await p.worker.drain();
+    // The tester is asked to re-run (schema retries) before DevFlow downgrades.
+    expect(calls.map(c => c.role)).toEqual(['tester', 'tester', 'tester']);
+    expect(calls[1]!.prompt).toContain('TC-BAOCAO-01');
+    expect(calls[0]!.prompt).toContain(join(p.ws.evidenceDir, 'TC-BAOCAO-01'));
+    const get = (id: string) => p.repo.getTestCase(p.r.id, id)!;
+    expect(get('TC-DANGNHAP-01').status1).toBe('P');
+    expect(get('TC-DANGNHAP-01').evidence).toEqual(['evidence/TC-DANGNHAP-01/shot.png']);
+    expect(existsSync(join(p.ws.artifactsDir, 'evidence', 'TC-DANGNHAP-01', 'shot.png'))).toBe(true);
+    expect(get('TC-BAOCAO-01').status1).toBe('F');
+    expect(get('TC-BAOCAO-01').comment).toContain('thiếu evidence');
+    expect(get('TC-DANGNHAP-02').status1).toBe('F');
+    expect(get('TC-DANGNHAP-02').comment).toContain('thiếu lý do PE');
+    // Offline: bugs only in DB.
+    expect(p.repo.listBugs(p.r.id).map(b => [b.tcId, b.status, b.gitlabIid])).toEqual([['TC-BAOCAO-01', 'open', null], ['TC-DANGNHAP-02', 'open', null]]);
+    const sh = await readSheet(join(p.ws.artifactsDir, `TestCase_${p.r.id}.xlsx`));
+    const row = [12, 13, 14].map(n => sh.row(n)).find(x => x.id === 'TC-DANGNHAP-01')!;
+    expect(row.s1).toBe('P');
+    expect(row.evidence).toBe('evidence/TC-DANGNHAP-01/shot.png');
+    expect(p.repo.getRequest(p.r.id)!.stage).toBe('BUGFIX');
+  });
+
+  it('test failure creates gitlab issue and goes to BUGFIX', async () => {
+    const p = prep({ gitlab: true, testCases: [tcRow('TC-DANGNHAP-01', 'F-01'), tcRow('TC-BAOCAO-01', 'F-02', 'Xem báo cáo')], stubs: ['BUGFIX'] });
+    mockClaude({
+      tester: tester(p.ws.evidenceDir, [[
+        { tc_id: 'TC-DANGNHAP-01', status: 'P', files: ['ok.png'] },
+        { tc_id: 'TC-BAOCAO-01', status: 'F', real_result: 'Lỗi 500', files: ['loi.png', 'response.json'] },
+      ]]),
+    });
+    startAt(p.pipeline, p.r.id, 'TEST');
+    await p.worker.drain();
+    const issues = [...p.gl!.issues.entries()];
+    expect(issues).toHaveLength(1);
+    const [iid, is] = issues[0]!;
+    expect(is.title).toBe(`[${p.r.id}][TC-BAOCAO-01] Xem báo cáo`);
+    expect(is.labels).toEqual(expect.arrayContaining(['bug', 'devflow', p.r.id]));
+    expect(is.description).toContain('Lỗi 500');
+    expect(is.description).toContain('/uploads/abc/loi.png');
+    expect(p.gl!.uploads.map(u => basename(u))).toEqual(['loi.png']);
+    expect(p.repo.getBug(p.r.id, 'TC-BAOCAO-01')).toMatchObject({ gitlabIid: iid, fixAttempts: 0, status: 'open' });
+    expect(p.repo.getTestCase(p.r.id, 'TC-BAOCAO-01')!.comment).toContain(`http://gl/grp/app/-/issues/${iid}`);
+    // test-results.json committed and pushed to the integration branch.
+    expect(git(p.bare, 'ls-tree', '-r', '--name-only', p.branch)).toContain('docs/devflow/test-results.json');
+    expect(p.repo.getRequest(p.r.id)!.stage).toBe('BUGFIX');
+  });
+
+  it('bugfix >3 attempts → needs_human with label', async () => {
+    const tc = { ...tcRow('TC-BAOCAO-01', 'F-02'), status1: 'F' as const, status2: 'F' as const };
+    const p = prep({ gitlab: true, testCases: [tc] });
+    p.gl!.seedIssue(5);
+    p.repo.upsertBug(p.r.id, { tcId: 'TC-BAOCAO-01', gitlabIid: 5, fixAttempts: 3, status: 'open' });
+    mockClaude({ developer, reviewer: reviewer([true]) });
+    startAt(p.pipeline, p.r.id, 'BUGFIX');
+    await p.worker.drain();
+    expect(calls).toHaveLength(0);
+    expect(p.gl!.issues.get(5)!.addLabels).toEqual(['needs-human']);
+    const req = p.repo.getRequest(p.r.id)!;
+    expect(req.status).toBe('needs_human');
+    expect(p.repo.listStageRuns(p.r.id).at(-1)!.error).toContain('TC-BAOCAO-01');
+    expect(p.repo.getBug(p.r.id, 'TC-BAOCAO-01')!.status).toBe('needs_human');
+  });
+
+  it('full offline cycle: TEST F → BUGFIX → TEST F → BUGFIX → TEST P → DONE, with run columns and report', async () => {
+    const p = prep({ testCases: [tcRow('TC-DANGNHAP-01', 'F-01'), tcRow('TC-BAOCAO-01', 'F-02')] });
+    mockClaude({
+      developer, reviewer: reviewer([true]),
+      tester: tester(p.ws.evidenceDir, [
+        [{ tc_id: 'TC-DANGNHAP-01', status: 'P', files: ['a.png'] }, { tc_id: 'TC-BAOCAO-01', status: 'F', files: ['b.png'] }],
+        [{ tc_id: 'TC-BAOCAO-01', status: 'F', files: ['b2.png'] }],
+        [{ tc_id: 'TC-BAOCAO-01', status: 'P', files: ['b3.png'] }],
+      ]),
+    });
+    startAt(p.pipeline, p.r.id, 'TEST');
+    await p.worker.drain();
+    expect(calls.map(c => c.role)).toEqual(['tester', 'developer', 'reviewer', 'tester', 'developer', 'reviewer', 'tester']);
+    expect(calls[1]!.prompt).toContain('systematic-debugging');
+    expect(calls[3]!.prompt).toContain('TC-BAOCAO-01');
+    expect(calls[3]!.prompt).not.toContain('`TC-DANGNHAP-01`');
+    const b = p.repo.getTestCase(p.r.id, 'TC-BAOCAO-01')!;
+    expect([b.status1, b.status2]).toEqual(['F', 'P']);
+    expect(b.comment).toContain('Lần 3: P');
+    expect(b.evidence).toEqual(['evidence/TC-BAOCAO-01/b3.png']);
+    const a = p.repo.getTestCase(p.r.id, 'TC-DANGNHAP-01')!;
+    expect([a.status1, a.status2]).toEqual(['P', null]);
+    expect(p.repo.getBug(p.r.id, 'TC-BAOCAO-01')).toMatchObject({ fixAttempts: 2, status: 'closed' });
+    expect(git(p.ws.repoDir, 'log', '--merges', '--format=%s', p.branch)).toContain('fix-TC-BAOCAO-01');
+    const req = p.repo.getRequest(p.r.id)!;
+    expect([req.stage, req.status]).toEqual(['DONE', 'done']);
+    const report = readFileSync(join(p.ws.artifactsDir, 'report.md'), 'utf8');
+    expect(report).toContain(p.r.id);
+    expect(report).toMatch(/P\s*\|\s*2/);
+    expect(report).toContain(`TestCase_${p.r.id}.xlsx`);
+    expect(report).toMatch(/không có GitLab|chưa kết nối GitLab/i);
+  });
+
+  it('all pass → DONE opens final MR not merged', async () => {
+    const p = prep({ gitlab: true, testCases: [tcRow('TC-DANGNHAP-01', 'F-01'), tcRow('TC-BAOCAO-01', 'F-02')] });
+    p.gl!.seedIssue(9);
+    p.repo.upsertBug(p.r.id, { tcId: 'TC-BAOCAO-01', gitlabIid: 9, fixAttempts: 1, status: 'fixed' });
+    mockClaude({
+      tester: tester(p.ws.evidenceDir, [[
+        { tc_id: 'TC-DANGNHAP-01', status: 'P', files: ['a.png'] },
+        { tc_id: 'TC-BAOCAO-01', status: 'P', files: ['b.png'] },
+      ]]),
+    });
+    startAt(p.pipeline, p.r.id, 'TEST');
+    await p.worker.drain();
+    const mrs = [...p.gl!.mrs.values()];
+    expect(mrs.map(m => [m.source, m.target, m.state])).toEqual([[p.branch, 'main', 'opened']]);
+    expect(p.gl!.issues.get(9)!.state).toBe('closed');
+    expect(p.gl!.issues.get(9)!.notes.join('\n')).toMatch(/Pass|P/);
+    expect(p.repo.getBug(p.r.id, 'TC-BAOCAO-01')!.status).toBe('closed');
+    expect(git(p.bare, 'log', '--oneline', 'main')).not.toMatch(/Merge/);
+    const req = p.repo.getRequest(p.r.id)!;
+    expect([req.stage, req.status]).toEqual(['DONE', 'done']);
+    const report = readFileSync(join(p.ws.artifactsDir, 'report.md'), 'utf8');
+    expect(report).toContain('http://gl/grp/app/-/merge_requests/1');
+  });
+
+  it('tester prompt marks mobile PE when ANDROID_HOME is missing', async () => {
+    const p = prep({ testCases: [tcRow('TC-DANGNHAP-01', 'F-01')], stubs: ['DONE'] });
+    p.repo.updateRequest(p.r.id, { softwareTypes: ['mobile', 'api'] });
+    mockClaude({ tester: tester(p.ws.evidenceDir, [[{ tc_id: 'TC-DANGNHAP-01', status: 'PE', comment: 'thiếu môi trường mobile' }]]) });
+    startAt(p.pipeline, p.r.id, 'TEST');
+    await p.worker.drain();
+    expect(calls[0]!.prompt).toContain('thiếu môi trường mobile');
+    expect(calls[0]!.prompt).toMatch(/ANDROID_HOME.*(không|chưa)/);
+    expect(p.repo.getTestCase(p.r.id, 'TC-DANGNHAP-01')!.status1).toBe('PE');
+    expect(p.repo.getRequest(p.r.id)!.stage).toBe('DONE');
+  });
+
+  it('develop in review mode gates only after the last task; a rejection runs a feedback work item', async () => {
+    const p = prep({ tasks: true });
+    p.repo.updateRequest(p.r.id, { runMode: 'review' });
+    mockClaude({ developer, reviewer: reviewer([true]) });
+    startAt(p.pipeline, p.r.id, 'DEVELOP');
+    await p.worker.drain();
+    let req = p.repo.getRequest(p.r.id)!;
+    expect([req.stage, req.status]).toEqual(['DEVELOP', 'awaiting_approval']);
+    expect(calls.map(c => c.role)).toEqual(['developer', 'reviewer', 'developer', 'reviewer']);
+    p.pipeline.reject(p.r.id, 'Nút Đăng nhập phải màu xanh');
+    await p.worker.drain();
+    req = p.repo.getRequest(p.r.id)!;
+    expect([req.stage, req.status]).toEqual(['DEVELOP', 'awaiting_approval']);
+    expect(calls).toHaveLength(6);
+    expect(calls[4]!.prompt).toContain('Nút Đăng nhập phải màu xanh');
+    expect(git(p.ws.repoDir, 'log', '--merges', '--format=%s', p.branch)).toContain(`${p.branch}-feedback-1`);
+  });
+
+  it('bugfix on GitLab: fix branch → MR → merge, issue note "Đã sửa lần 1", then TEST', async () => {
+    const tc = { ...tcRow('TC-BAOCAO-01', 'F-02'), status1: 'F' as const };
+    const p = prep({ gitlab: true, testCases: [tc], stubs: ['TEST'] });
+    p.gl!.seedIssue(4);
+    p.repo.upsertBug(p.r.id, { tcId: 'TC-BAOCAO-01', gitlabIid: 4, fixAttempts: 0, status: 'open' });
+    mockClaude({ developer, reviewer: reviewer([true]) });
+    startAt(p.pipeline, p.r.id, 'BUGFIX');
+    await p.worker.drain();
+    expect(calls.map(c => c.role)).toEqual(['developer', 'reviewer']);
+    expect(calls[0]!.prompt).toContain('systematic-debugging');
+    expect(calls[0]!.prompt).toContain('TC-BAOCAO-01');
+    const mrs = [...p.gl!.mrs.values()];
+    expect(mrs.map(m => [m.source, m.target, m.state])).toEqual([[`${p.branch}-fix-TC-BAOCAO-01`, p.branch, 'merged']]);
+    expect(p.gl!.issues.get(4)!.notes.join('\n')).toContain('Đã sửa lần 1');
+    expect(p.repo.getBug(p.r.id, 'TC-BAOCAO-01')).toMatchObject({ fixAttempts: 1, status: 'fixed' });
+    expect(git(p.bare, 'ls-tree', '-r', '--name-only', p.branch)).toContain('src/code-1.txt');
+    expect(p.repo.getRequest(p.r.id)!.stage).toBe('TEST');
+  });
+});

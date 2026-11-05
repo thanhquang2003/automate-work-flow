@@ -1,4 +1,7 @@
 import { execFile } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 export interface GitOpts {
   protectedBranch?: string;
@@ -75,12 +78,63 @@ export class Git {
     return ['-c', `user.name=${name}`, '-c', `user.email=${email}`];
   }
 
-  async commitAll(msg: string): Promise<boolean> {
+  /**
+   * Stages everything and commits. `exclude` (repo-relative paths, e.g. untracked build outputs that existed before
+   * Claude ran) is unstaged again so it never lands in the commit. Returns false when nothing is staged.
+   */
+  async commitAll(msg: string, exclude: string[] = []): Promise<boolean> {
     await this.run(['add', '-A']);
-    const st = await this.run(['status', '--porcelain']);
-    if (!st.trim()) return false;
+    if (exclude.length) {
+      // Via a pathspec file: the list can be long (argv limits on Windows).
+      const dir = await mkdtemp(join(tmpdir(), 'devflow-git-'));
+      const file = join(dir, 'exclude');
+      try {
+        await writeFile(file, exclude.join('\0'), 'utf8');
+        await this.run(['reset', '-q', `--pathspec-from-file=${file}`, '--pathspec-file-nul']);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    }
+    const staged = await this.exec(['diff', '--cached', '--quiet'], { allowFail: true });
+    if (staged.code === 0) return false;
     await this.run([...(await this.identityArgs()), 'commit', '-m', msg]);
     return true;
+  }
+
+  /** Untracked, not ignored files (repo-relative, forward slashes). */
+  async untracked(): Promise<string[]> {
+    const out = await this.run(['ls-files', '--others', '--exclude-standard', '-z']);
+    return out.split('\0').filter(Boolean);
+  }
+
+  async branchExists(branch: string): Promise<boolean> {
+    this.checkRef(branch);
+    return (await this.exec(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { allowFail: true })).code === 0;
+  }
+
+  /** Creates or resets `branch` to `from` and checks it out (`checkout -B`). */
+  async resetBranch(branch: string, from: string): Promise<void> {
+    this.checkRef(branch);
+    this.checkRef(from);
+    await this.run(['checkout', '-B', branch, from]);
+  }
+
+  /** Number of commits on `branch` that are not on `base`. */
+  async aheadCount(base: string, branch: string): Promise<number> {
+    this.checkRef(base);
+    this.checkRef(branch);
+    return Number.parseInt((await this.run(['rev-list', '--count', `${base}..${branch}`])).trim(), 10) || 0;
+  }
+
+  /** Merges `branch` into the current branch with a merge commit (`--no-ff`). Aborts and throws on conflict. */
+  async merge(branch: string, msg: string): Promise<void> {
+    this.checkRef(branch);
+    try {
+      await this.run([...(await this.identityArgs()), 'merge', '--no-ff', '-m', msg, '--', branch]);
+    } catch (e) {
+      await this.exec(['merge', '--abort'], { allowFail: true });
+      throw e;
+    }
   }
 
   /**
@@ -108,7 +162,7 @@ export class Git {
 
   async pull(branch: string): Promise<void> {
     this.checkRef(branch);
-    await this.run(['pull', '--no-rebase', 'origin', branch]);
+    await this.run([...(await this.identityArgs()), 'pull', '--no-rebase', 'origin', branch]);
   }
 
   async currentBranch(): Promise<string> {

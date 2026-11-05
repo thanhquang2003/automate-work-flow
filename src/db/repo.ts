@@ -257,6 +257,13 @@ export class Repo {
   listTasks(reqId: string): TaskRow[] {
     return this.all('select * from tasks where request_id=? order by id', reqId).map(toTask);
   }
+  /** Replaces the whole task list of a request (a re-run of PLANNING may drop tasks). */
+  replaceTasks(reqId: string, ts: TaskRow[]): void {
+    this.tx(() => {
+      this.run('delete from tasks where request_id=?', reqId);
+      for (const t of ts) this.upsertTask(reqId, t);
+    });
+  }
 
   // ---- test cases ----
   upsertTestCase(reqId: string, t: TestCaseRow): void {
@@ -284,6 +291,13 @@ export class Repo {
   }
   listTestCases(reqId: string): TestCaseRow[] {
     return this.all('select * from test_cases where request_id=? order by id', reqId).map(toTestCase);
+  }
+  /** Replaces the whole test case list of a request (a re-run of PLANNING). */
+  replaceTestCases(reqId: string, ts: TestCaseRow[]): void {
+    this.tx(() => {
+      this.run('delete from test_cases where request_id=?', reqId);
+      for (const t of ts) this.upsertTestCase(reqId, t);
+    });
   }
 
   // ---- bugs ----

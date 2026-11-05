@@ -1,7 +1,9 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Repo } from '../../db/repo.js';
-import type { AnswerSource, QuestionRow } from '../../domain/types.js';
+import type { AnswerSource, QuestionRow, TestCaseRow, TestStatus } from '../../domain/types.js';
+import type { GitLabClient } from '../../gitlab/client.js';
+import type { TcSheetRow } from '../../office/testcase-xlsx.js';
 import type { PromptExtras, PromptOutput } from '../prompt.js';
 import type { StageContext } from '../pipeline.js';
 import type { Workspace } from '../workspace.js';
@@ -176,3 +178,96 @@ export function headingHasCode(h: string, code: string): boolean {
 
 /** Repo-relative pathspec of the DevFlow docs folder (the only thing stages commit). */
 export const DOCS_PATHSPEC = 'docs/devflow';
+
+// ---- part 2 helpers: GitLab project handle, scratch dir, flow state, integration branch prep ----
+
+/** GitLab client + project when the request is backed by GitLab; undefined in local-only mode. */
+export interface ProjectGitLab { client: GitLabClient; pid: number; defaultBranch: string; webUrl?: string }
+
+export function projectGitLab(ctx: StageContext): ProjectGitLab | undefined {
+  const info = readProjectInfo(ctx.ws);
+  if (!info?.gitlab || !ctx.gitlab || info.projectId === undefined || !info.defaultBranch) return undefined;
+  return { client: ctx.gitlab, pid: info.projectId, defaultBranch: info.defaultBranch, webUrl: info.webUrl };
+}
+
+/** DevFlow-internal scratch folder inside the repo (gitignored): Claude's summaries and review JSON. */
+export const SCRATCH_DIR = '.devflow-tmp';
+export const scratchDir = (ws: Workspace): string => join(ws.repoDir, SCRATCH_DIR);
+
+/** Adds `.devflow-tmp/` to the repo's .gitignore when missing. Returns true when the file changed. */
+export function ensureGitignore(repoDir: string): boolean {
+  const p = join(repoDir, '.gitignore');
+  const cur = existsSync(p) ? readFileSync(p, 'utf8') : '';
+  if (cur.split(/\r?\n/).some(l => l.trim() === `${SCRATCH_DIR}/` || l.trim() === SCRATCH_DIR || l.trim() === `/${SCRATCH_DIR}/`)) return false;
+  writeFileSync(p, `${cur}${cur && !cur.endsWith('\n') ? '\n' : ''}${SCRATCH_DIR}/\n`, 'utf8');
+  return true;
+}
+
+/**
+ * Checks out the integration branch devflow/<REQ>, pulls it from GitLab when there is a remote, and makes sure
+ * `.devflow-tmp/` is gitignored (committed and pushed on the integration branch). Returns the branch name.
+ */
+export async function prepareIntegration(ctx: StageContext): Promise<string> {
+  const branch = integrationBranch(ctx.req.id);
+  await ensureOnBranch(ctx, branch);
+  if (await ctx.git.hasRemote()) await ctx.git.pull(branch);
+  if (ensureGitignore(ctx.ws.repoDir)) {
+    await ctx.git.commitPaths(['.gitignore'], `chore(devflow): bỏ qua thư mục tạm ${SCRATCH_DIR}/`);
+    await pushIfRemote(ctx, branch);
+  }
+  return branch;
+}
+
+/** Per-request bookkeeping that has no DB column (test run history, issue URLs, bugfix review rounds, final MR). */
+export interface TestRun { run: number; status: TestStatus; real_result: string; comment: string; evidence: string[] }
+export interface FlowState {
+  runs: Record<string, TestRun[]>;
+  issueUrls: Record<string, string>;
+  /** Review rounds of work items without a DB column (bug fixes, feedback items), by work key. */
+  reviewRounds: Record<string, number>;
+  /** MR iid of work items without a DB column, by work key. */
+  mrIids?: Record<string, number>;
+  /** Number of DEVELOP gate-feedback work items done. */
+  feedbackItems?: number;
+  finalMrUrl?: string;
+}
+
+const flowFile = (ws: Workspace): string => join(ws.root, 'flow-state.json');
+
+export function readFlowState(ws: Workspace): FlowState {
+  const p = flowFile(ws);
+  const empty: FlowState = { runs: {}, issueUrls: {}, reviewRounds: {} };
+  if (!existsSync(p)) return empty;
+  return { ...empty, ...(JSON.parse(readFileSync(p, 'utf8')) as Partial<FlowState>) };
+}
+
+export function updateFlowState(ws: Workspace, fn: (s: FlowState) => void): FlowState {
+  const s = readFlowState(ws);
+  fn(s);
+  writeJson(flowFile(ws), s);
+  return s;
+}
+
+/** Test cases in report order: by feature id, then TC id. */
+export function sortedTestCases(repo: Repo, reqId: string): TestCaseRow[] {
+  return repo.listTestCases(reqId).sort((a, b) => (a.featureId ?? '').localeCompare(b.featureId ?? '') || a.id.localeCompare(b.id));
+}
+
+export const testCaseXlsxName = (reqId: string): string => `TestCase_${reqId}.xlsx`;
+
+export const designFile = (ws: Workspace, name: 'tkct.md' | 'tkdb.md'): string => join(ws.devflowDir, 'design', name);
+
+/** DB test case → workbook row. */
+export function tcSheetRow(tc: TestCaseRow): TcSheetRow {
+  return {
+    id: tc.id, purpose: tc.purpose, data: tc.data, steps: tc.steps, expected: tc.expected,
+    real_result: tc.realResult ?? undefined, status1: tc.status1 ?? undefined, status2: tc.status2 ?? undefined,
+    evidence: tc.evidence, comment: tc.comment ?? undefined,
+  };
+}
+
+/**
+ * Work branch of a request (task, bug fix, feedback): `devflow/<REQ>-<name>`. Spec §6 says `devflow/<REQ>/<TASK>`, but
+ * git cannot hold both `refs/heads/devflow/<REQ>` and `refs/heads/devflow/<REQ>/…` (ref directory/file conflict).
+ */
+export const workBranch = (reqId: string, name: string): string => `${integrationBranch(reqId)}-${name}`;

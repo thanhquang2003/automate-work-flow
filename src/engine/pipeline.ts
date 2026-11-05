@@ -6,6 +6,7 @@ import { runClaude, type RunOpts, type RunResult } from '../claude/runner.js';
 import { GitLabClient } from '../gitlab/client.js';
 import { Git } from '../gitlab/git.js';
 import { bus } from './bus.js';
+import { readProjectInfo } from './stages/common.js';
 import { Workspace } from './workspace.js';
 
 export { bus } from './bus.js';
@@ -296,7 +297,9 @@ export class Pipeline {
     const gitlab = this.deps.makeGitLab
       ? this.deps.makeGitLab(req)
       : this.cfg.gitlab.url && this.cfg.gitlab.token ? new GitLabClient(this.cfg.gitlab.url, this.cfg.gitlab.token) : undefined;
-    const git = this.deps.makeGit ? this.deps.makeGit(req, ws) : new Git(ws.repoDir, { token: this.cfg.gitlab.token || undefined });
+    // The project's default branch (from INTAKE's project.json) is never pushed to.
+    const protectedBranch = readProjectInfo(ws)?.defaultBranch;
+    const git = this.deps.makeGit ? this.deps.makeGit(req, ws) : new Git(ws.repoDir, { token: this.cfg.gitlab.token || undefined, protectedBranch });
     return {
       cfg: this.cfg, repo: this.repo, req, ws, feedback: feedback || undefined, resume, signal, log, gitlab, git,
       claude: async (prompt, extra = {}) => {
