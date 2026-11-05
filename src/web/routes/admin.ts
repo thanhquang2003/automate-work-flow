@@ -94,7 +94,7 @@ export function adminRoutes(app: FastifyInstance, cfg: Config, { repo }: WebDeps
     const g = (k: string) => repo.getSetting(k) ?? '';
     const values = {
       gitlabUrl: g(SETTING_KEYS.gitlabUrl) || cfg.gitlab.url, gitlabDefaultGroup: g(SETTING_KEYS.gitlabDefaultGroup) || cfg.gitlab.defaultGroup,
-      maxConcurrentJobs: g(SETTING_KEYS.maxConcurrentJobs) || String(cfg.maxConcurrentJobs), claudeBin: g(SETTING_KEYS.claudeBin) || cfg.claudeBin,
+      maxConcurrentJobs: g(SETTING_KEYS.maxConcurrentJobs) || String(cfg.maxConcurrentJobs),
     };
     return html(reply, render('settings', layout(req, 'Cài đặt', flashOf(req)), { values, tokenSet: g(SETTING_KEYS.gitlabToken) !== '' || cfg.gitlab.token !== '' }));
   });
@@ -111,7 +111,6 @@ export function adminRoutes(app: FastifyInstance, cfg: Config, { repo }: WebDeps
       repo.setSetting(SETTING_KEYS.gitlabUrl, url);
       repo.setSetting(SETTING_KEYS.gitlabDefaultGroup, t('gitlab_default_group'));
       repo.setSetting(SETTING_KEYS.maxConcurrentJobs, jobs);
-      repo.setSetting(SETTING_KEYS.claudeBin, t('claude_bin'));
       if (b.clear_token) repo.setSetting(SETTING_KEYS.gitlabToken, '');
       else if (t('gitlab_token')) repo.setSetting(SETTING_KEYS.gitlabToken, encrypt(t('gitlab_token'), getSecretKey(cfg)));
     });

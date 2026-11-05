@@ -6,7 +6,7 @@ import fastifyStatic from '@fastify/static';
 import type { Config } from '../config.js';
 import type { Repo } from '../db/repo.js';
 import type { Pipeline } from '../engine/pipeline.js';
-import { currentUser, sameOrigin } from './auth.js';
+import { currentUser, isLocalHostHeader, sameOrigin } from './auth.js';
 import { adminRoutes } from './routes/admin.js';
 import { authRoutes } from './routes/auth.js';
 import { questionRoutes } from './routes/questions.js';
@@ -32,6 +32,10 @@ export async function buildServer(cfg: Config, deps: WebDeps): Promise<FastifyIn
   app.addHook('onRequest', async (req, reply) => {
     const path = req.url.split('?')[0]!;
     const isPublic = PUBLIC_PREFIXES.some(p => path.startsWith(p)) || PUBLIC_PATHS.includes(path);
+    // Local mode has no login: a page on another site that rebinds its DNS name to 127.0.0.1 must not reach us.
+    if (!server && !isLocalHostHeader(req.headers.host, cfg.host)) {
+      return reply.code(403).type('text/html; charset=utf-8').send(render('error', { mode: cfg.mode, title: 'Bị từ chối' }, { code: 403, message: 'Yêu cầu bị từ chối (tên máy không hợp lệ).' }));
+    }
     if (req.method === 'POST' && !path.startsWith('/s/') && !sameOrigin(req, server, cfg.publicBaseUrl)) {
       return reply.code(403).type('text/html; charset=utf-8').send(render('error', { mode: cfg.mode, title: 'Bị từ chối' }, { code: 403, message: 'Yêu cầu bị từ chối (sai nguồn gốc).' }));
     }

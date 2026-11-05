@@ -18,11 +18,22 @@ describe('loadConfig', () => {
     expect(c.claudeMock).toBe(false);
   });
 
-  it('server mode requires SECRET_KEY', () => {
-    expect(() => loadConfig({ DEVFLOW_MODE: 'server' })).toThrow(/SECRET_KEY/);
-    const c = loadConfig({ DEVFLOW_MODE: 'server', SECRET_KEY: 'k' });
+  it('server mode requires SECRET_KEY and PUBLIC_BASE_URL', () => {
+    expect(() => loadConfig({ DEVFLOW_MODE: 'server', PUBLIC_BASE_URL: 'https://df.example.com' })).toThrow(/SECRET_KEY/);
+    expect(() => loadConfig({ DEVFLOW_MODE: 'server', SECRET_KEY: 'k' })).toThrow(/PUBLIC_BASE_URL/);
+    expect(() => loadConfig({ DEVFLOW_MODE: 'server', SECRET_KEY: 'k', PUBLIC_BASE_URL: '  ' })).toThrow(/PUBLIC_BASE_URL/);
+    const c = loadConfig({ DEVFLOW_MODE: 'server', SECRET_KEY: 'k', PUBLIC_BASE_URL: 'https://df.example.com' });
     expect(c.host).toBe('0.0.0.0');
     expect(c.maxConcurrentJobs).toBe(2);
+    expect(c.publicBaseUrl).toBe('https://df.example.com');
+    expect(loadConfig({}).publicBaseUrl).toBe('http://localhost:3700'); // local mode keeps the default
+  });
+
+  it('STAGE_TIMEOUT_MIN defaults to 120 minutes; 0 disables; negative rejected', () => {
+    expect(loadConfig({}).stageTimeoutMin).toBe(120);
+    expect(loadConfig({ STAGE_TIMEOUT_MIN: '45' }).stageTimeoutMin).toBe(45);
+    expect(loadConfig({ STAGE_TIMEOUT_MIN: '0' }).stageTimeoutMin).toBe(0);
+    expect(() => loadConfig({ STAGE_TIMEOUT_MIN: '-1' })).toThrow(/STAGE_TIMEOUT_MIN/);
   });
 
   it('parses overrides', () => {

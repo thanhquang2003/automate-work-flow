@@ -112,7 +112,9 @@ describe('settings', () => {
     expect(page.body).toContain('https://gl.example.com');
     // live cfg updated for new jobs
     expect(cfg.maxConcurrentJobs).toBe(3);
-    expect(cfg.claudeBin).toBe('claude2');
+    expect(cfg.claudeBin).toBe('claude'); // CLAUDE_BIN is env-only: a posted claude_bin is ignored
+    expect(repo.getSetting('claudeBin')).toBeUndefined();
+    expect(page.body).not.toContain('name="claude_bin"');
     expect(cfg.gitlab.token).toBe('glpat-SECRET123');
     // blank token keeps the stored one
     await app.inject({ method: 'POST', url: '/settings', headers: form, payload: enc({ gitlab_url: 'https://gl2.example.com', gitlab_token: '', max_concurrent_jobs: '2' }) });
@@ -150,7 +152,7 @@ describe('settings', () => {
     const e = effectiveConfig(cfg, repo);
     expect(e.gitlab).toEqual({ url: 'https://db', token: 'dbtok', defaultGroup: 'g' });
     expect(e.maxConcurrentJobs).toBe(4);
-    expect(e.claudeBin).toBe('cl');
+    expect(e.claudeBin).toBe('claude'); // a legacy DB value never overrides CLAUDE_BIN
     expect(cfg.gitlab.url).toBe('https://env'); // input untouched
     // per-user token takes precedence for the request creator
     const u = repo.createUser({ username: 'u', passwordHash: 'x', role: 'member' });

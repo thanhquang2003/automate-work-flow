@@ -14,7 +14,7 @@ function warnOnce(key: string, msg: string): void {
 
 export const SETTING_KEYS = {
   gitlabUrl: 'gitlab.url', gitlabToken: 'gitlab.token', gitlabDefaultGroup: 'gitlab.defaultGroup',
-  maxConcurrentJobs: 'maxConcurrentJobs', claudeBin: 'claudeBin',
+  maxConcurrentJobs: 'maxConcurrentJobs',
 } as const;
 
 /** Config with settings stored in the DB layered over the env-derived `cfg` (empty DB values are ignored). Does not mutate `cfg`. */
@@ -28,7 +28,6 @@ export function effectiveConfig(cfg: Config, repo: Repo): Config {
   const maxJobs = Number.parseInt(s(SETTING_KEYS.maxConcurrentJobs), 10);
   return {
     ...cfg,
-    claudeBin: s(SETTING_KEYS.claudeBin) || cfg.claudeBin,
     maxConcurrentJobs: Number.isFinite(maxJobs) && maxJobs >= 1 ? maxJobs : cfg.maxConcurrentJobs,
     gitlab: {
       url: s(SETTING_KEYS.gitlabUrl) || cfg.gitlab.url,

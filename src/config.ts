@@ -16,6 +16,8 @@ export interface Config {
   publicBaseUrl: string;
   gitlab: { url: string; token: string; defaultGroup: string };
   rateLimitPauseMin: number;
+  /** Minutes one Claude run may take before it is killed (STAGE_TIMEOUT_MIN, default 120; 0 = no limit). */
+  stageTimeoutMin: number;
   /** Fastify trustProxy: true, false or a hop count (TRUST_PROXY). */
   trustProxy: boolean | number;
   /** Per-file upload cap in bytes (default 50MB); overridable for tests. */
@@ -56,6 +58,10 @@ export function loadConfig(env: Env = process.env): Config {
   const mode = modeRaw;
   const secretKey = env.SECRET_KEY ?? '';
   if (mode === 'server' && !secretKey) throw new Error('SECRET_KEY is required in server mode');
+  const publicBaseUrl = (env.PUBLIC_BASE_URL ?? '').trim();
+  if (mode === 'server' && !publicBaseUrl) throw new Error('PUBLIC_BASE_URL is required in server mode (e.g. https://devflow.example.com)');
+  const stageTimeoutMin = int(env.STAGE_TIMEOUT_MIN, 120);
+  if (stageTimeoutMin < 0) throw new Error(`Invalid STAGE_TIMEOUT_MIN: ${env.STAGE_TIMEOUT_MIN}`);
   const port = int(env.PORT, 3700);
   return {
     mode,
@@ -68,9 +74,10 @@ export function loadConfig(env: Env = process.env): Config {
     claudeMock: env.CLAUDE_MOCK === '1' || env.CLAUDE_MOCK === 'true',
     maxConcurrentJobs: int(env.MAX_CONCURRENT_JOBS, mode === 'server' ? 2 : 1),
     surveyTtlDays: int(env.SURVEY_TTL_DAYS, 14),
-    publicBaseUrl: env.PUBLIC_BASE_URL || `http://localhost:${port}`,
+    publicBaseUrl: publicBaseUrl || `http://localhost:${port}`,
     gitlab: { url: env.GITLAB_URL ?? '', token: env.GITLAB_TOKEN ?? '', defaultGroup: env.GITLAB_DEFAULT_GROUP ?? '' },
     rateLimitPauseMin: int(env.RATE_LIMIT_PAUSE_MIN, 30),
+    stageTimeoutMin,
     trustProxy: parseTrustProxy(env.TRUST_PROXY),
   };
 }

@@ -47,6 +47,22 @@ export function currentUser(cfg: Config, repo: Repo, req: FastifyRequest): Sessi
   return u ? { id: u.id, username: u.username, role: u.role } : undefined;
 }
 
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/**
+ * DNS-rebinding defence for local mode (no login): the Host header must name the loopback interface
+ * (any port), or the explicit non-wildcard address DevFlow was bound to via HOST.
+ */
+export function isLocalHostHeader(host: string | undefined, boundHost = ''): boolean {
+  if (!host) return false;
+  let name: string;
+  try { name = new URL(`http://${host}`).hostname.toLowerCase(); } catch { return false; }
+  if (LOOPBACK_HOSTS.has(name)) return true;
+  const bound = boundHost.trim().toLowerCase();
+  if (!bound || bound === '0.0.0.0' || bound === '::' || bound === '[::]') return false;
+  return name === bound || name === `[${bound}]`;
+}
+
 /** CSRF defence in depth: a POST must come from the same host (Origin, else Referer). */
 export function sameOrigin(req: FastifyRequest, required: boolean, publicBaseUrl = ''): boolean {
   const src = (req.headers.origin as string | undefined) || (req.headers.referer as string | undefined);
