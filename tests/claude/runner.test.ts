@@ -1,9 +1,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runClaude, detectRateLimit, validateShellArgs } from '../../src/claude/runner.js';
+import { runClaude, detectRateLimit, validateShellArgs, needsShell, claudeEnv } from '../../src/claude/runner.js';
 import { setMockHandler, clearMockHandler } from '../../src/claude/mock.js';
 import type { Config } from '../../src/config.js';
 
@@ -100,6 +100,50 @@ describe('runner robustness', () => {
   it('validateShellArgs rejects shell metacharacters', () => {
     expect(() => validateShellArgs(['C:\\my dir\\x', 'abc-1.2'])).not.toThrow();
     for (const bad of ['a&calc', 'a"b', 'a|b', '%PATH%', 'a^b', 'a\nb']) expect(() => validateShellArgs([bad])).toThrow(/unsafe/i);
+  });
+  it('validateShellArgs accepts Vietnamese and Program Files (x86) paths; quotes still rejected', () => {
+    expect(() => validateShellArgs(['D:\\Dữ liệu\\Dự án mới\\workspaces\\REQ-001', 'C:\\Program Files (x86)\\claude\\claude.cmd'])).not.toThrow();
+    for (const bad of ['D:\\Dữ liệu\\"x', "a'b\"c", 'Dự&án', 'a<b', 'a>b', 'a!b']) expect(() => validateShellArgs([bad])).toThrow(/unsafe/i);
+  });
+  it('needsShell: bare name or .cmd/.bat on Windows only', () => {
+    expect(needsShell('claude', 'win32')).toBe(true);
+    expect(needsShell('C:\\Users\\a\\AppData\\Roaming\\npm\\claude.cmd', 'win32')).toBe(true);
+    expect(needsShell('C:\\tools\\CLAUDE.BAT', 'win32')).toBe(true);
+    expect(needsShell('claude.CMD', 'win32')).toBe(true);
+    expect(needsShell('C:\\tools\\claude.exe', 'win32')).toBe(false);
+    expect(needsShell('C:\\tools\\claude', 'win32')).toBe(false);
+    expect(needsShell('claude', 'linux')).toBe(false);
+    expect(needsShell('/x/claude.cmd', 'linux')).toBe(false);
+  });
+  it.runIf(process.platform === 'win32')('runs a .cmd shim in a Vietnamese folder through cmd.exe', async () => {
+    const dir = join(mkdtempSync(join(tmpdir(), 'df-')), 'Thư mục Claude');
+    mkdirSync(dir, { recursive: true });
+    const shim = join(dir, 'claude.cmd');
+    writeFileSync(shim, `@"${process.execPath}" "${fixture}" ok %*\r\n`);
+    try {
+      const r = await runClaude(cfg('ok', { claudeBin: shim, claudeBinArgs: [] }), { cwd: process.cwd(), prompt: 'xin chào', addDirs: [dir] });
+      expect(r.error).toBeUndefined();
+      expect(r.ok).toBe(true);
+      const parsed = JSON.parse(r.resultText);
+      expect(parsed.prompt.trim()).toBe('xin chào'); // shell mode → prompt via stdin
+      expect(parsed.args).toContain(dir);
+    } finally { rmSync(join(dir, '..'), { recursive: true, force: true }); }
+  });
+  it('Claude does not inherit DevFlow secrets, GitLab credentials or git auth config', async () => {
+    const keys = ['SECRET_KEY', 'GITLAB_TOKEN', 'GITLAB_URL', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'CLAUDE_MOCK', 'CLAUDE_BIN_ARGS'];
+    const saved = Object.fromEntries(keys.map(k => [k, process.env[k]]));
+    for (const k of keys) process.env[k] = `leak-${k}`;
+    try {
+      const r = await runClaude(cfg('env'), { cwd: process.cwd(), prompt: 'hi' });
+      expect(r.ok).toBe(true);
+      const env = JSON.parse(r.resultText) as Record<string, string>;
+      for (const k of keys) expect(env[k], k).toBeUndefined();
+      expect(r.resultText).not.toContain('leak-');
+      expect(Object.keys(env).some(k => k.toUpperCase() === 'PATH')).toBe(true);
+    } finally {
+      for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+    }
+    expect(claudeEnv({ PATH: '/bin', gitlab_token: 'x', Secret_Key: 'y', GITLAB_DEFAULT_GROUP: 'g', HOME: '/h' })).toEqual({ PATH: '/bin', HOME: '/h' });
   });
 });
 

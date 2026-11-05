@@ -18,6 +18,7 @@ else if (mode === 'partial') {
 }
 else if (mode === 'noresult') { out({ type: 'system', subtype: 'init', session_id: 's-n' }); process.exit(3); }
 else if (mode === 'plain-limit') { console.log('Claude usage limit reached'); process.exit(1); }
+else if (mode === 'env') { out({ type: 'result', is_error: false, result: JSON.stringify(process.env) }); }
 else if (mode === 'stderr-limit') { console.error('rate limit exceeded'); process.exit(1); }
 else {
   out({ type: 'system', subtype: 'init', session_id: 'sess-123' });

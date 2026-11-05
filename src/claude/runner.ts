@@ -45,13 +45,35 @@ export function detectRateLimit(text: string, now: Date, defaultPauseMin: number
   return new Date(now.getTime() + defaultPauseMin * 60000);
 }
 
-const SAFE_SHELL_ARG = /^[\w .:\\/@=+-]+$/;
+// Letters/digits of any script (e.g. Vietnamese folder names), Windows path characters and a few safe marks.
+// Quotes, %, ^, &, |, <, >, ! and control characters never reach cmd.exe.
+const SAFE_SHELL_ARG = /^[\p{L}\p{N}_ .:\\/@=+()-]+$/u;
 
 /** In cmd.exe shell mode, reject args that could be interpreted by the shell. Throws on violation. */
 export function validateShellArgs(parts: string[]): void {
   for (const a of parts) {
     if (!SAFE_SHELL_ARG.test(a)) throw new Error(`Unsafe argument for shell execution: ${JSON.stringify(a)}`);
   }
+}
+
+/**
+ * True when the Claude command must be started through cmd.exe: on Windows, a bare command name (the npm shim
+ * `claude` resolves to claude.cmd via PATHEXT) or an explicit .cmd/.bat file.
+ */
+export function needsShell(bin: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== 'win32') return false;
+  if (/\.(cmd|bat)$/i.test(bin)) return true;
+  return !/[\\/]/.test(bin) && !/\.[A-Za-z0-9]+$/.test(bin);
+}
+
+/** Never passed to Claude: DevFlow secrets, GitLab credentials, git auth headers (GIT_CONFIG_*), test hooks. */
+const HIDDEN_ENV = /^(SECRET_KEY|GITLAB_.*|GIT_CONFIG_.*|CLAUDE_MOCK|CLAUDE_BIN_ARGS)$/i;
+
+/** `env` minus HIDDEN_ENV (Claude runs with bypassPermissions and can read its own environment). */
+export function claudeEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(env)) if (!HIDDEN_ENV.test(k)) out[k] = v;
+  return out;
 }
 
 const MAX_BUF = 10 * 1024 * 1024;
@@ -92,7 +114,7 @@ export async function runClaude(cfg: Config, opts: RunOpts): Promise<RunResult> 
 
   // On Windows the claude shim is a .cmd file and needs a shell. Quoting a prompt through cmd.exe is
   // unreliable, so in shell mode (and for long prompts) the prompt goes via stdin.
-  const shell = process.platform === 'win32' && !/[\\/]/.test(cfg.claudeBin) && !/\.[A-Za-z0-9]+$/.test(cfg.claudeBin);
+  const shell = needsShell(cfg.claudeBin);
   const viaStdin = shell || opts.prompt.length > PROMPT_ARGV_MAX;
   if (shell) {
     try { validateShellArgs([cfg.claudeBin, ...cfg.claudeBinArgs, ...(opts.addDirs ?? []), ...(opts.resumeSessionId ? [opts.resumeSessionId] : [])]); }
@@ -102,10 +124,11 @@ export async function runClaude(cfg: Config, opts: RunOpts): Promise<RunResult> 
 
   return new Promise<RunResult>(resolve => {
     let child: ChildProcess;
+    const env = claudeEnv();
     try {
       child = shell
-        ? spawn([cfg.claudeBin, ...args].map(quoteCmd).join(' '), { cwd: opts.cwd, shell: true, stdio: 'pipe', windowsHide: true })
-        : spawn(cfg.claudeBin, args, { cwd: opts.cwd, stdio: 'pipe', windowsHide: true, detached: process.platform !== 'win32' });
+        ? spawn([cfg.claudeBin, ...args].map(quoteCmd).join(' '), { cwd: opts.cwd, env, shell: true, stdio: 'pipe', windowsHide: true })
+        : spawn(cfg.claudeBin, args, { cwd: opts.cwd, env, stdio: 'pipe', windowsHide: true, detached: process.platform !== 'win32' });
     } catch (e) {
       return resolve({ ok: false, resultText: '', error: `spawn failed: ${(e as Error).message}` });
     }

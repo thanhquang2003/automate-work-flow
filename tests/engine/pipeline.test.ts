@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { setMockHandler, clearMockHandler } from '../../src/claude/mock.js';
 import type { RunOpts } from '../../src/claude/runner.js';
-import { PipelineBusyError, summarizeEvent, bus, clearStages, registerStage, type StageHandler } from '../../src/engine/pipeline.js';
+import { Pipeline, PipelineBusyError, summarizeEvent, bus, clearStages, registerStage, type StageHandler } from '../../src/engine/pipeline.js';
+import { GitLabClient } from '../../src/gitlab/client.js';
 import { Worker } from '../../src/engine/worker.js';
 import { STAGES, type Stage } from '../../src/domain/types.js';
 import { setup, mkReq } from './helpers.js';
@@ -300,5 +301,43 @@ describe('pipeline', () => {
     await worker.drain();
     expect(n).toBe(2);
     expect(repo.getRequest(r.id)!.status).toBe('awaiting_approval');
+  });
+});
+
+describe('pipeline context', () => {
+  it('Git uses the same token as the request GitLab client; Claude runs get STAGE_TIMEOUT_MIN as timeout', async () => {
+    const seen: { gitToken?: string; timeoutMs?: number; extraTimeout?: number }[] = [];
+    registerAll({
+      INTAKE: async ctx => {
+        const r1 = await ctx.claude('p1');
+        const r2 = await ctx.claude('p2', { timeoutMs: 5 });
+        void r1; void r2;
+        seen.push({ gitToken: (ctx.git as unknown as { opts: { token?: string } }).opts.token });
+        return { kind: 'needs_human', reason: 'stop' };
+      },
+    });
+    const timeouts: (number | undefined)[] = [];
+    setMockHandler((o: RunOpts) => { timeouts.push(o.timeoutMs); return { ok: true, resultText: 'ok' }; });
+    try {
+      const base = setup({ stageTimeoutMin: 7, gitlab: { url: 'http://gl', token: 'shared-tok', defaultGroup: '' } });
+      const pipeline = new Pipeline(base.cfg, base.repo, { makeGitLab: () => new GitLabClient('http://gl', 'creator-tok') });
+      const worker = new Worker(base.cfg, base.repo, pipeline);
+      const r = mkReq(base.repo);
+      pipeline.start(r.id);
+      await worker.drain();
+      expect(seen[0]!.gitToken).toBe('creator-tok');
+      expect(timeouts).toEqual([7 * 60_000, 5]); // per-call override still wins
+
+      // No GitLab client → shared token; STAGE_TIMEOUT_MIN=0 → no timeout.
+      seen.length = 0; timeouts.length = 0;
+      const b = setup({ stageTimeoutMin: 0, gitlab: { url: '', token: 'shared-tok', defaultGroup: '' } });
+      const p2 = new Pipeline(b.cfg, b.repo, { makeGitLab: () => undefined });
+      const w2 = new Worker(b.cfg, b.repo, p2);
+      const r2 = mkReq(b.repo);
+      p2.start(r2.id);
+      await w2.drain();
+      expect(seen[0]!.gitToken).toBe('shared-tok');
+      expect(timeouts).toEqual([undefined, 5]);
+    } finally { clearMockHandler(); }
   });
 });

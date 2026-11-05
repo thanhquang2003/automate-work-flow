@@ -65,7 +65,13 @@ export interface PipelineDeps {
   now?: () => number;
 }
 
-const FAR_FUTURE = 8_640_000_000_000_000; // max JS date; paused-by-user jobs never come due
+/** The credential a GitLab client was built with ('' for test doubles without one). */
+export function gitlabToken(gl: GitLabClient | undefined): string {
+  const t = (gl as { token?: unknown } | undefined)?.token;
+  return typeof t === 'string' ? t : '';
+}
+
+const FAR_FUTURE =8_640_000_000_000_000; // max JS date; paused-by-user jobs never come due
 const MAX_EXCEPTION_RETRIES = 1; // one retry after an exception
 const MAX_LOG_LINE = 500;
 
@@ -299,7 +305,10 @@ export class Pipeline {
       : this.cfg.gitlab.url && this.cfg.gitlab.token ? new GitLabClient(this.cfg.gitlab.url, this.cfg.gitlab.token) : undefined;
     // The project's default branch (from INTAKE's project.json) is never pushed to.
     const protectedBranch = readProjectInfo(ws)?.defaultBranch;
-    const git = this.deps.makeGit ? this.deps.makeGit(req, ws) : new Git(ws.repoDir, { token: this.cfg.gitlab.token || undefined, protectedBranch });
+    // Git uses the same credential as the API client (the creator's own token when set), else the shared one.
+    const token = gitlabToken(gitlab) || this.cfg.gitlab.token || undefined;
+    const git = this.deps.makeGit ? this.deps.makeGit(req, ws) : new Git(ws.repoDir, { token, protectedBranch });
+    const timeoutMs = this.cfg.stageTimeoutMin > 0 ? this.cfg.stageTimeoutMin * 60_000 : undefined;
     return {
       cfg: this.cfg, repo: this.repo, req, ws, feedback: feedback || undefined, resume, signal, log, gitlab, git,
       claude: async (prompt, extra = {}) => {
@@ -308,6 +317,7 @@ export class Pipeline {
           addDirs: [ws.root],
           logFile: join(ws.logsDir, `${run.stage}-${run.attempt}.log`),
           signal,
+          ...(timeoutMs ? { timeoutMs } : {}),
           onEvent: line => { const t = summarizeEvent(line); if (t) log(t.length > MAX_LOG_LINE ? `${t.slice(0, MAX_LOG_LINE)}…` : t); },
           prompt,
           ...extra,
