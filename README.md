@@ -41,6 +41,7 @@ Mỗi yêu cầu (`REQ-001`, `REQ-002`...) đi qua các giai đoạn:
 | 9 | `TEST` | Kiểm thử | Tester | Chạy test, lưu evidence, điền file Test case; F thì tạo bug |
 | 10 | `BUGFIX` | Sửa lỗi (lặp) | Developer, Reviewer | Sửa theo từng bug, merge, quay lại `TEST`; tối đa 3 lần sửa mỗi bug |
 | 11 | `DONE` | Hoàn tất | — | Mở MR cuối `devflow/<REQ>` → nhánh mặc định (**không merge**), `report.md` |
+| — | `CHANGE` | Thay đổi (chen ngang ở mọi bước) | Change Analyst | `changes/CR-NN/impact.md` + `impact.json`: phân tích tác động; chấp nhận thì quay lại bước sớm nhất cần làm lại (xem [Điều chỉnh yêu cầu](#điều-chỉnh-yêu-cầu-agile)) |
 
 Mỗi giai đoạn có **checkpoint**: nếu server khởi động lại hoặc chạm giới hạn subscription, DevFlow chạy tiếp từ giai đoạn dở dang, không làm lại phần đã xong.
 
@@ -154,6 +155,7 @@ Cấu hình qua biến môi trường (hoặc file `.env`); xem [`.env.example`]
 | `GITLAB_DEFAULT_GROUP` | (trống) | Group mặc định khi tạo project GitLab mới |
 | `RATE_LIMIT_PAUSE_MIN` | `30` | Số phút tạm dừng khi chạm giới hạn subscription nếu Claude không báo thời điểm reset |
 | `STAGE_TIMEOUT_MIN` | `120` | Thời gian tối đa (phút) cho một lần chạy Claude; quá hạn thì DevFlow dừng tiến trình Claude và coi lần chạy đó là lỗi (bước bị lỗi thì bấm **Chạy lại bước**). `0` = không giới hạn |
+| `CR_AUTO_ACCEPT_MAX_MH` | `40` | Ngưỡng nỗ lực (man-hour) để tự chấp nhận yêu cầu thay đổi ở chế độ auto; CR bỏ phạm vi hoặc vượt ngưỡng luôn chờ người quyết định |
 | `TRUST_PROXY` | `false` | `true` hoặc số tầng proxy khi đứng sau reverse proxy |
 | `ANDROID_HOME` | (trống) | (Tùy chọn) Android SDK cho kiểm thử mobile; DevFlow chỉ đọc để báo cho Tester |
 
@@ -181,6 +183,21 @@ Khi phân tích còn điểm chưa rõ, yêu cầu chuyển sang "Chờ khách h
 2. **Web** (chỉ server mode): tab **Câu hỏi** → **Tạo link khảo sát**, gửi link `https://<host>/s/<token>` cho khách. Link không cần đăng nhập, hết hạn sau `SURVEY_TTL_DAYS` ngày, khách lưu nháp rồi bấm "Gửi".
 
 Nhân viên cũng có thể nhập hoặc sửa câu trả lời thay khách (ghi rõ nguồn). Khi đã đủ câu **bắt buộc (must)** thì bấm **Tiếp tục**; câu "nên hỏi (should)" chưa trả lời được ghi thành **giả định**. Nếu Analyst còn câu hỏi mới, sẽ có vòng tiếp theo (tối đa 5 vòng; hết 5 vòng, điểm còn lại buộc chuyển thành giả định). Giả định luôn nằm ở mục "Câu hỏi mở và giả định" của tài liệu để khách xác nhận sau.
+
+### Điều chỉnh yêu cầu (Agile)
+
+Yêu cầu của khách hàng thường đổi giữa chừng. DevFlow cho phép gửi **yêu cầu thay đổi (CR)** ở mọi bước, không phải làm lại từ đầu. Chi tiết thiết kế: [`docs/superpowers/specs/2026-11-05-agile-change-requests-design.md`](docs/superpowers/specs/2026-11-05-agile-change-requests-design.md).
+
+- **Gửi CR ở mọi bước**: tab **Thay đổi** của trang chi tiết yêu cầu (tiêu đề, mô tả, loại `add` / `modify` / `remove` / `nfr` / `other`, file đính kèm). Mã CR theo từng yêu cầu: `CR-01`, `CR-02`... Không gửi được CR khi yêu cầu đã bị hủy. Bước đang chạy bị ngắt và chuyển sang bước `CHANGE`.
+- **Đề xuất của khách hàng**: khách có thể gửi đề xuất thay đổi ngay trên trang khảo sát. Đề xuất ở trạng thái `proposed` và **không ảnh hưởng tới luồng** cho đến khi nhân viên bấm **Nhận đề xuất** (thành CR `pending`) hoặc **Từ chối** (kèm lý do).
+- **Bước `CHANGE` — phân tích tác động**: vai trò Change Analyst đọc tài liệu, mã nguồn và tiến độ hiện tại rồi ghi `docs/devflow/changes/CR-NN/impact.md` + `impact.json` (chức năng, task, test case bị ảnh hưởng; nỗ lực tăng/giảm theo man-hour; rủi ro; câu hỏi cho khách hàng; bước cần quay lại). Xem ở màn hình **Tác động** của CR.
+- **Khi nào phải duyệt**: chế độ `review` luôn chờ người duyệt. Chế độ `auto` tự chấp nhận, **trừ** khi CR có phần **bỏ phạm vi** (`remove`) hoặc nỗ lực tăng thêm lớn hơn `CR_AUTO_ACCEPT_MAX_MH` (mặc định 40 MH) — các CR này dừng ở bước `CHANGE` chờ nhân viên quyết định.
+- **Chấp nhận / từ chối**: chấp nhận thì phạm vi được cập nhật, phiên bản yêu cầu tăng lên (`v1` → `v2`...) và yêu cầu **quay lại bước sớm nhất mà thay đổi cần** (không sớm hơn `ANALYSIS`, không muộn hơn bước yêu cầu đang ở; nếu đã `DONE` thì không muộn hơn `TEST`). Câu hỏi bắt buộc mới cho khách làm yêu cầu quay lại `ANALYSIS`/`CLARIFY`. Từ chối (bắt buộc ghi lý do) thì yêu cầu trở về đúng bước và trạng thái trước khi có CR, không chạy thêm gì.
+- **Chỉ làm phần thay đổi**: các bước sau chạy theo kiểu cập nhật — giữ ID cũ, task đã xong và kết quả kiểm thử không bị ảnh hưởng thì không làm lại; chỉ task/test case bị tác động quay về `todo`/chạy lại. Mọi merge mới vào `devflow/<REQ>` sau lần Pass của một test case đều kích hoạt kiểm thử hồi quy.
+- **Phiên bản tài liệu `_vN`**: `TKCT_<REQ>_v<N>.docx`, `TKDB_<REQ>_v<N>.docx`, `ULNL_<REQ>_v<N>.xlsx`, `TestCase_<REQ>_v<N>.xlsx`; bản cũ luôn được giữ. TKCT có mục PHỤ LỤC › **Lịch sử thay đổi** liệt kê các CR đã chấp nhận.
+- **Hủy theo CR-NN**: phần bị bỏ không bao giờ bị xóa, chỉ đánh dấu `cancelled` (kèm CR gây ra). Trong ULNL và Test case vẫn hiện dòng ghi "Hủy theo CR-NN", không tính nỗ lực và không tính vào P/F/PE; task bị hủy không được phát triển, bug của test case bị hủy được đóng.
+- **Vòng lặp (iteration)**: CR được chấp nhận khi yêu cầu đã `DONE` mở **vòng lặp mới** (iteration + 1) trên cùng nhánh `devflow/<REQ>` và cùng MR cuối: không tạo MR thứ hai, chỉ thêm ghi chú cho vòng mới vào MR cuối đang mở và `report.md` có mục "Các thay đổi trong vòng này". Số vòng làm rõ (tối đa 5) được tính lại theo từng phiên bản.
+- **Khi CR cắt ngang lúc đang code**: nếu cây làm việc còn thay đổi dở dang, DevFlow cất vào `git stash` (kèm ghi chú) trước khi phân tích; stash **không tự động pop** vì CR có thể làm đổi hướng phần việc đó — lấy lại bằng `git stash list` / `git stash pop` trong workspace khi cần.
 
 ### Tài liệu đầu ra
 

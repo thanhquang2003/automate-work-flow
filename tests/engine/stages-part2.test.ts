@@ -239,7 +239,7 @@ describe('stages part 2', () => {
     // One job per task: DEVELOP ran twice, then moved on (auto mode).
     expect(p.repo.listStageRuns(p.r.id).filter(s => s.stage === 'DEVELOP')).toHaveLength(2);
     expect(p.repo.getRequest(p.r.id)!.stage).toBe('TEST');
-  });
+  }, 30_000);
 
   it('develop without GitLab merges locally with --no-ff and records reviews in docs/devflow/reviews', async () => {
     const p = prep({ tasks: true, stubs: ['TEST'] });

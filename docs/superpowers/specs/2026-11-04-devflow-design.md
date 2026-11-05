@@ -63,6 +63,8 @@ Mọi stage có **checkpoint** (học từ `/lah`): kết quả của stage đư
 
 Mỗi role kiểm tra lại đầu ra của role trước (Reviewer kiểm tra Developer; Tester đối chiếu test case với yêu cầu). Đây là "quality gate" học từ chuỗi vai trò của `/lah`.
 
+> Điều chỉnh yêu cầu giữa chừng (bước CHANGE, phiên bản tài liệu, vòng lặp): xem [spec v2](2026-11-05-agile-change-requests-design.md).
+
 ## 5. Kiến trúc
 
 ```
