@@ -312,6 +312,7 @@ export class Repo {
   setTaskAssignee(reqId: string, taskId: string, userId: number | null): void {
     this.run('update tasks set assignee_id=? where request_id=? and id=?', userId, reqId, taskId);
   }
+  // Note: assigneeId null/undefined does NOT clear an assignment (upsert coalesces); use setTaskAssignee(reqId, id, null).
   updateTask(reqId: string, id: string, patch: Partial<Omit<TaskRow, 'id'>>): void {
     const cur = this.getTask(reqId, id);
     if (!cur) throw new Error(`Task not found: ${reqId}/${id}`);
@@ -515,12 +516,10 @@ export class Repo {
   // ---- request assignees ----
   /** Replace the ordered list of people for `role` on a request; the first (position 0) is the runner. */
   setRequestAssignees(requestId: string, role: ProjectRole, userIds: number[]): void {
-    this.db.exec('begin');
-    try {
+    this.tx(() => {
       this.run('delete from request_assignees where request_id=? and role=?', requestId, role);
       [...new Set(userIds)].forEach((u, i) => this.run('insert into request_assignees(request_id,role,user_id,position) values(?,?,?,?)', requestId, role, u, i));
-      this.db.exec('commit');
-    } catch (e) { this.db.exec('rollback'); throw e; }
+    });
   }
   listRequestAssignees(requestId: string, role?: ProjectRole): RequestAssigneeRow[] {
     const rows = role

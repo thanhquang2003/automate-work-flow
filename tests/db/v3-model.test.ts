@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { openDb } from '../../src/db/db.js';
 import { Repo } from '../../src/db/repo.js';
 import type { NewRequest } from '../../src/domain/types.js';
@@ -9,6 +11,56 @@ const base: NewRequest = {
   title: 't', description: 'd', perfReq: '', nonfuncReq: '',
   projectKind: 'new', gitlabProject: null, softwareTypes: ['web'], runMode: 'auto', createdBy: null,
 };
+
+const OLD_V2_DDL = `
+create table if not exists users(
+  id integer primary key autoincrement,
+  username text not null unique,
+  password_hash text not null,
+  role text not null default 'member',
+  gitlab_token_enc text,
+  created_at integer not null
+);
+create table if not exists requests(
+  id text primary key,
+  title text not null,
+  description text not null default '',
+  perf_req text not null default '',
+  nonfunc_req text not null default '',
+  project_kind text not null default 'new',
+  gitlab_project text,
+  software_types text not null default '[]',
+  run_mode text not null default 'auto',
+  stage text not null default 'INTAKE',
+  status text not null default 'running',
+  clarify_round integer not null default 0,
+  created_by integer,
+  created_at integer not null,
+  updated_at integer not null
+);
+create table if not exists tasks(
+  request_id text not null,
+  id text not null,
+  title text not null,
+  feature_id text,
+  depends_on text not null default '[]',
+  status text not null default 'todo',
+  review_rounds integer not null default 0,
+  branch text,
+  mr_iid integer,
+  primary key(request_id, id)
+);
+create table if not exists jobs(
+  id integer primary key autoincrement,
+  request_id text,
+  kind text not null,
+  payload text not null default '{}',
+  status text not null default 'queued',
+  run_after integer not null default 0,
+  attempts integer not null default 0,
+  last_error text
+);
+`;
 
 let repo: Repo;
 beforeEach(() => { repo = new Repo(openDb(':memory:')); });
@@ -20,18 +72,32 @@ function mkProject(key = 'ERP') {
 
 describe('v3 data model', () => {
   it('schema is idempotent on an existing dev db', () => {
-    const file = join(tmpdir(), `devflow-v3-${Date.now()}.db`);
-    const a = openDb(file);
-    a.prepare("insert into users(username,password_hash,role,created_at) values('old','h','admin',1)").run();
-    a.close();
-    const b = openDb(file);
-    const c = openDb(file);
-    expect(b.prepare('select count(*) c from departments').get()).toEqual({ c: 2 });
-    const u = new Repo(c).web.getUserByUsername('old')!;
-    expect(u.sysRole).toBe('member');
-    expect(u.canBePm).toBe(false);
-    expect(u.departmentId).toBeNull();
-    b.close(); c.close();
+    const file = join(mkdtempSync(join(tmpdir(), 'devflow-v3-')), 'old.db');
+    try {
+      // hand-built pre-v3 tables (no v3 columns), one row in each
+      const old = new DatabaseSync(file);
+      old.exec(OLD_V2_DDL);
+      old.exec(`insert into users(username,password_hash,role,created_at) values('old','h','admin',1);
+        insert into requests(id,title,created_at,updated_at) values('REQ-001','t',1,1);
+        insert into tasks(request_id,id,title) values('REQ-001','T1','x');
+        insert into jobs(request_id,kind) values('REQ-001','k');`);
+      old.close();
+      const b = openDb(file);
+      const c = openDb(file); // second call must not throw
+      const cols = (t: string) => (c.prepare(`pragma table_info(${t})`).all() as { name: string }[]).map(x => x.name);
+      expect(cols('users')).toEqual(expect.arrayContaining(['email', 'google_sub', 'display_name', 'sys_role', 'department_id', 'can_be_pm', 'os_user', 'disabled']));
+      expect(cols('requests')).toEqual(expect.arrayContaining(['project_id', 'code']));
+      expect(cols('tasks')).toContain('assignee_id');
+      expect(cols('jobs')).toContain('seat_user_id');
+      expect(c.prepare('select count(*) c from departments').get()).toEqual({ c: 2 });
+      const r = new Repo(c);
+      const u = r.web.getUserByUsername('old')!;
+      expect([u.role, u.sysRole, u.canBePm, u.departmentId]).toEqual(['admin', 'member', false, null]);
+      expect(r.getRequest('REQ-001')!.title).toBe('t');
+      expect(r.getTask('REQ-001', 'T1')!.assigneeId).toBeNull();
+      expect(r.listJobs('REQ-001')).toHaveLength(1);
+      b.close(); c.close();
+    } finally { rmSync(dirname(file), { recursive: true, force: true }); }
   });
 
   it('departments seeded', () => {
@@ -86,5 +152,21 @@ describe('v3 data model', () => {
     expect(repo.enqueueJob(r.id, 'k', {}, 0, u.user.id).seatUserId).toBe(u.user.id);
     repo.updateRequest(r.id, { status: 'awaiting_seat' });
     expect(repo.getRequest(r.id)!.status).toBe('awaiting_seat');
+  });
+
+  it('setRequestAssignees joins an outer repo.tx() and rolls back with it', () => {
+    const r = repo.createRequest(base);
+    const u1 = repo.web.createUser({ username: 'a', passwordHash: 'x', role: 'member' });
+    const u2 = repo.web.createUser({ username: 'b', passwordHash: 'x', role: 'member' });
+    repo.tx(() => { repo.setRequestAssignees(r.id, 'DEV', [u1.id]); repo.setRequestAssignees(r.id, 'BA', [u2.id]); });
+    expect(repo.listRequestAssignees(r.id)).toHaveLength(2);
+    expect(() => repo.tx(() => {
+      repo.setRequestAssignees(r.id, 'DEV', [u2.id, u1.id]);
+      throw new Error('boom');
+    })).toThrow('boom');
+    expect(repo.listRequestAssignees(r.id, 'DEV').map(a => a.userId)).toEqual([u1.id]);
+    // failure inside setRequestAssignees itself (bad user id type) rolls back its own delete
+    expect(() => repo.setRequestAssignees(r.id, 'DEV', [u2.id, undefined as unknown as number])).toThrow();
+    expect(repo.listRequestAssignees(r.id, 'DEV').map(a => a.userId)).toEqual([u1.id]);
   });
 });
