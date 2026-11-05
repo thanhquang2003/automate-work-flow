@@ -8,6 +8,7 @@ import type { Config } from '../../config.js';
 import type { ProjectKind, RequestRow, RunMode, SoftwareType } from '../../domain/types.js';
 import { Workspace } from '../../engine/workspace.js';
 import { markdownToHtml } from '../markdown-html.js';
+import { questionsTabData } from './questions.js';
 import { streamEvents } from '../sse.js';
 import type { WebDeps } from '../server.js';
 import { render, renderPartial, type LayoutData } from '../view.js';
@@ -144,9 +145,7 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
       const p = join(ws.devflowDir, 'analysis.md');
       data.analysisHtml = existsSync(p) ? markdownToHtml(readFileSync(p, 'utf8')) : '';
     } else if (tab === 'questions') {
-      data.questionsHtml = renderPartial('partials/questions', {
-        r, questions: repo.listQuestions(id), answers: repo.latestAnswers(id), surveys: repo.listSurveyLinks(id),
-      });
+      data.questionsHtml = renderPartial('partials/questions', questionsTabData(repo, cfg, r));
     } else if (tab === 'docs') {
       const files = listFiles(ws.artifactsDir);
       data.docs = files.filter(f => !f.rel.startsWith('evidence/'));

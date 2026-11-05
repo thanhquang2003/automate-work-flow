@@ -1,18 +1,69 @@
-<% /* Placeholder: Task 11 replaces this partial with import/export/survey/continue actions. */ %>
-<% if (it.questions.length === 0) { %>
-<p class="muted">Chưa có câu hỏi nào.</p>
-<% } else { %>
+<% const base = '/requests/' + it.r.id; const p = it.progress; %>
+<div class="card stack">
+  <p>
+    <strong>Tiến độ:</strong> đã trả lời <%= p.answered %>/<%= p.total %> câu, trong đó <%= p.mustAnswered %>/<%= p.must %> câu bắt buộc.
+  </p>
+  <div class="row">
+    <a class="btn" href="<%= base %>/questions.xlsx">Tải file Excel câu hỏi (vòng <%= it.r.clarifyRound + 1 %>)</a>
+    <% if (it.mode === 'server') { %>
+    <form method="post" action="<%= base %>/survey-link" class="inline"><button class="btn" type="submit">Tạo link khảo sát mới</button></form>
+    <% } %>
+    <% if (it.r.status === 'awaiting_customer') { %>
+    <form method="post" action="<%= base %>/continue" class="inline" data-confirm="Các câu chưa trả lời sẽ được chuyển thành giả định"><button class="btn primary" type="submit">Tiếp tục</button></form>
+    <% } %>
+  </div>
+  <form method="post" action="<%= base %>/answers/import" enctype="multipart/form-data" class="row">
+    <label class="grow">Nhập câu trả lời từ file Excel (.xlsx) <input type="file" name="file" accept=".xlsx" required></label>
+    <button class="btn" type="submit">Nhập file</button>
+  </form>
+  <% if (it.r.status === 'awaiting_customer') { %><p class="muted">Nút "Tiếp tục": các câu chưa trả lời sẽ được chuyển thành giả định.</p><% } %>
+</div>
+
+<% if (it.surveys.length) { %>
+<h3>Link khảo sát</h3>
+<div class="table-wrap">
 <table class="list">
-  <thead><tr><th>Mã</th><th>Nhóm</th><th>Câu hỏi</th><th>Ưu tiên</th><th>Trả lời</th></tr></thead>
+  <thead><tr><th>Vòng</th><th>Link</th><th>Hết hạn</th><th>Trạng thái</th></tr></thead>
   <tbody>
-  <% for (const q of it.questions) { %>
+  <% for (const s of it.surveys) { %>
   <tr>
-    <td><%= q.id %></td><td><%= q.category %></td>
-    <td><%= q.question %><br><span class="muted"><%= q.why %></span></td>
-    <td><%= q.priority === 'must' ? 'Bắt buộc' : 'Nên có' %></td>
-    <td class="pre-wrap"><%= it.answers.get(q.id) || '' %></td>
+    <td><%= s.round %></td>
+    <td><input readonly value="<%= s.url %>" onfocus="this.select()"></td>
+    <td><%= it.fmtTime(s.expiresAt) %></td>
+    <td><%= s.submittedAt !== null ? 'Đã gửi lúc ' + it.fmtTime(s.submittedAt) : (s.expiresAt < it.now ? 'Đã hết hạn' : 'Đang mở') %></td>
   </tr>
   <% } %>
   </tbody>
 </table>
+</div>
+<% } %>
+
+<h3>Câu hỏi</h3>
+<% if (it.questions.length === 0) { %>
+<p class="muted">Chưa có câu hỏi nào.</p>
+<% } else { %>
+<div class="table-wrap">
+<table class="list">
+  <thead><tr><th>Mã</th><th>Vòng</th><th>Nhóm</th><th>Câu hỏi</th><th>Ưu tiên</th><th>Trả lời mới nhất</th><th></th></tr></thead>
+  <tbody>
+  <% for (const q of it.questions) { const a = it.latest.get(q.id); const has = a && a.answer.trim() !== ''; %>
+  <tr>
+    <td><%= q.id %></td><td><%= q.round %></td><td><%= q.category %></td>
+    <td><%= q.question %><br><span class="muted"><%= q.why %></span></td>
+    <td><%= q.priority === 'must' ? 'Bắt buộc' : 'Nên có' %></td>
+    <td class="pre-wrap"><% if (has) { %><%= a.answer %><br><span class="badge"><%= it.SOURCE_LABELS[a.source] || a.source %></span><% } else { %><span class="muted">Chưa trả lời</span><% } %></td>
+    <td>
+      <details><summary>Sửa</summary>
+        <form method="post" action="<%= base %>/answers" class="stack">
+          <input type="hidden" name="qid" value="<%= q.id %>">
+          <textarea name="answer" rows="3"><%= a ? a.answer : '' %></textarea>
+          <button class="btn" type="submit">Lưu (nhân viên)</button>
+        </form>
+      </details>
+    </td>
+  </tr>
+  <% } %>
+  </tbody>
+</table>
+</div>
 <% } %>

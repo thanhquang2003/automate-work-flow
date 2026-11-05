@@ -1,11 +1,9 @@
-import { randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { exportQuestions } from '../../office/questions-xlsx.js';
 import type { StageContext, StageOutcome } from '../pipeline.js';
+import { createSurveyLink } from '../survey.js';
 import { MAX_CLARIFY_ROUNDS, openQuestions, writeAnswers, writeAssumptions } from './common.js';
-
-const DAY_MS = 86_400_000;
 
 export function questionsFileName(reqId: string, round: number): string {
   return `Questions_${reqId}_round${round}.xlsx`;
@@ -28,9 +26,8 @@ async function ask(ctx: StageContext): Promise<StageOutcome> {
   ctx.log(`Đã xuất ${open.length} câu hỏi vòng ${round} ra ${file}. Gửi file cho khách hàng rồi tải lên file đã trả lời.`);
 
   if (cfg.mode === 'server') {
-    const token = randomBytes(32).toString('base64url');
-    repo.createSurveyLink({ token, requestId: req.id, round, expiresAt: Date.now() + cfg.surveyTtlDays * DAY_MS });
-    ctx.log(`Link khảo sát cho khách hàng (hết hạn sau ${cfg.surveyTtlDays} ngày): ${cfg.publicBaseUrl.replace(/\/+$/, '')}/s/${token}`);
+    const link = createSurveyLink(repo, cfg, req.id, round);
+    ctx.log(`Link khảo sát cho khách hàng (hết hạn sau ${cfg.surveyTtlDays} ngày): ${link.url}`);
   }
   return { kind: 'await_customer' };
 }

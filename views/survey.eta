@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title><%= it.state === 'message' ? it.title : (it.title ? 'Khảo sát yêu cầu - ' + it.title : 'Khảo sát yêu cầu') %></title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:#f5f6f8;color:#1f2430}
+header{background:#2b3a55;color:#fff;padding:14px 16px;font-weight:600}
+main{max-width:760px;margin:0 auto;padding:16px}
+.card{background:#fff;border:1px solid #dde1e8;border-radius:8px;padding:16px;margin-bottom:16px}
+h1{font-size:22px;margin:0 0 8px}h2{font-size:17px;margin:20px 0 8px;color:#2b3a55}
+.q{padding:12px 0;border-top:1px solid #eceef2}.q:first-of-type{border-top:0}
+.q.bad{background:#fff5f5;margin:0 -8px;padding:12px 8px;border-radius:6px}
+.lbl{font-weight:600}.req{color:#b42318;font-weight:400;font-size:14px}
+.help,.hint{color:#667085;font-size:14px;margin:2px 0 6px}
+.err{color:#b42318;font-size:14px;margin:4px 0 0}
+label.opt{display:flex;align-items:flex-start;gap:8px;padding:6px 0}
+input[type=radio],input[type=checkbox]{margin-top:5px;width:18px;height:18px;flex:none}
+textarea{width:100%;font:inherit;padding:10px;border:1px solid #c5cad3;border-radius:6px;min-height:84px}
+.notice{padding:10px 14px;border-radius:6px;margin-bottom:16px;background:#e3f6ea;color:#14633a}
+.notice.error{background:#fde8e8;color:#8a1f1f}
+.actions{display:flex;gap:10px;flex-wrap:wrap}
+button{font:inherit;padding:10px 18px;border-radius:6px;border:1px solid #c5cad3;background:#fff;cursor:pointer;min-height:44px}
+button.primary{background:#2b5fd9;border-color:#2b5fd9;color:#fff}
+</style>
+</head>
+<body>
+<header>Khảo sát yêu cầu</header>
+<main>
+<% if (it.state === 'message') { %>
+<div class="card"><h1><%= it.title %></h1><p><%= it.message %></p></div>
+<% } else if (it.state === 'thanks') { %>
+<div class="card"><h1>Cảm ơn Quý khách!</h1><p>Chúng tôi đã nhận được câu trả lời cho yêu cầu<% if (it.title) { %> "<%= it.title %>"<% } %>. Câu trả lời đã được gửi và không thể chỉnh sửa thêm.</p></div>
+<% } else { %>
+<div class="card">
+  <h1><%= it.title %></h1>
+  <p>Vui lòng trả lời các câu hỏi dưới đây để chúng tôi hiểu đúng yêu cầu của Quý khách</p>
+</div>
+<% if (it.notice) { %><div class="notice<%= it.errors.size ? ' error' : '' %>"><%= it.notice %></div><% } %>
+<form method="post" class="card">
+<% if (it.groups.length === 0) { %><p>Hiện không còn câu hỏi nào cần trả lời.</p><% } %>
+<% for (const [cat, qs] of it.groups) { %>
+  <h2><%= cat %></h2>
+  <% for (const q of qs) { const val = it.values.get(q.id) || ''; const name = 'a_' + q.id; const err = it.errors.get(q.id); %>
+  <div class="q<%= err ? ' bad' : '' %>">
+    <div class="lbl"><%= q.question %> <% if (q.priority === 'must') { %><span class="req">(bắt buộc)</span><% } %></div>
+    <% if (q.why) { %><div class="help"><%= q.why %></div><% } %>
+    <% if (q.type === 'single' && q.options.length) { %>
+      <% if (q.suggested_answer) { %><div class="hint">Gợi ý: <%= q.suggested_answer %></div><% } %>
+      <% for (const o of q.options) { %><label class="opt"><input type="radio" name="<%= name %>" value="<%= o %>" <%= val === o ? 'checked' : '' %>><span><%= o %></span></label><% } %>
+    <% } else if (q.type === 'multi' && q.options.length) { const picked = val.split('; '); %>
+      <% if (q.suggested_answer) { %><div class="hint">Gợi ý: <%= q.suggested_answer %></div><% } %>
+      <% for (const o of q.options) { %><label class="opt"><input type="checkbox" name="<%= name %>" value="<%= o %>" <%= picked.includes(o) ? 'checked' : '' %>><span><%= o %></span></label><% } %>
+    <% } else { %>
+      <textarea name="<%= name %>" rows="3" placeholder="<%= q.suggested_answer ? 'Gợi ý: ' + q.suggested_answer : '' %>"><%= val %></textarea>
+    <% } %>
+    <% if (err) { %><div class="err"><%= err %></div><% } %>
+  </div>
+  <% } %>
+<% } %>
+<% if (it.groups.length) { %>
+  <div class="actions">
+    <button type="submit" name="action" value="save">Lưu nháp</button>
+    <button type="submit" name="action" value="submit" class="primary">Gửi câu trả lời</button>
+  </div>
+<% } %>
+</form>
+<% } %>
+</main>
+</body>
+</html>
