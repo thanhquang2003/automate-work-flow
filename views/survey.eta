@@ -64,7 +64,7 @@ button.primary{background:#2b5fd9;border-color:#2b5fd9;color:#fff}
   <h2>Đề xuất thay đổi hoặc bổ sung khác</h2>
   <label class="lbl" for="proposal">Đề xuất thay đổi hoặc bổ sung khác</label>
   <div class="help">Không bắt buộc. Nhân viên sẽ xem xét đề xuất trước khi áp dụng.</div>
-  <textarea id="proposal" name="proposal" rows="4" maxlength="5000"><%= it.proposal %></textarea>
+  <textarea id="proposal" name="proposal" rows="4" maxlength="<%= it.maxProposal %>"><%= it.proposal %></textarea>
   <div class="actions">
     <button type="submit" name="action" value="save">Lưu nháp</button>
     <button type="submit" name="action" value="submit" class="primary">Gửi câu trả lời</button>

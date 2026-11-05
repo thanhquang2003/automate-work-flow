@@ -150,6 +150,43 @@ describe('change requests web', () => {
     expect(res.body).not.toContain('<img src=x');
   });
 
+  it('unexpected errors are not flashed; known state errors are', async () => {
+    const { app, repo, pipeline } = await boot();
+    const r = mkReq(repo);
+    const cr = repo.createChangeRequest(r.id, { title: 'P', description: 'd', kind: 'other', source: 'customer', status: 'proposed' });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(pipeline, 'acceptProposal').mockImplementation(() => { throw new Error('SQLITE_CORRUPT secret path C:/x'); });
+    const boom = await app.inject({ method: 'POST', url: `/requests/${r.id}/changes/${cr.id}/accept-proposal`, headers: form, payload: '' });
+    expect(boom.statusCode).toBe(500);
+    expect(boom.body).not.toContain('SQLITE_CORRUPT');
+    err.mockRestore();
+    const wrong = await app.inject({ method: 'POST', url: `/requests/${r.id}/changes/${cr.id}/decide`, headers: form, payload: enc({ decision: 'accept' }) });
+    expect(wrong.statusCode).toBe(302);
+    expect(decodeURIComponent(String(wrong.headers.location))).toContain('err=Yêu cầu');
+  });
+
+  it('attachment failure still reports the created CR', async () => {
+    const { app, repo } = await boot();
+    const r = mkReq(repo);
+    const err = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(repo, 'addCrAttachment').mockImplementation(() => { throw new Error('disk'); });
+    const res = await app.inject({ method: 'POST', url: `/requests/${r.id}/changes`, ...multipart(
+      [['title', 'T'], ['description', 'D'], ['kind', 'add']], [{ name: 'files', filename: 'a.txt', content: 'x' }]) });
+    err.mockRestore();
+    expect(res.statusCode).toBe(302);
+    expect(decodeURIComponent(String(res.headers.location))).toContain('Đã tạo CR-01 nhưng không lưu được tệp: a.txt');
+    expect(repo.listChangeRequests(r.id)).toHaveLength(1);
+  });
+
+  it('identical open customer proposal is not duplicated', async () => {
+    const { app, repo } = await boot(true);
+    const r = mkReq(repo);
+    repo.updateRequest(r.id, { status: 'awaiting_customer', stage: 'CLARIFY' });
+    repo.createSurveyLink({ token: 'tokd', requestId: r.id, round: 1, expiresAt: Date.now() + 86_400_000 });
+    for (let i = 0; i < 2; i++) await app.inject({ method: 'POST', url: '/s/tokd', headers: form, payload: enc({ action: 'save', proposal: 'thêm báo cáo' }) });
+    expect(repo.listChangeRequests(r.id)).toHaveLength(1);
+  });
+
   it('proposal accept/reject endpoints', async () => {
     const { app, repo, pipeline } = await boot();
     const r = mkReq(repo);

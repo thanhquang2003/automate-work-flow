@@ -16,15 +16,30 @@ import { cleanName } from './requests.js';
 const KINDS: CrKind[] = ['add', 'modify', 'remove', 'nfr', 'other'];
 const MAX_TEXT = 20000;
 
+/** Validation failure raised by this module; its message is safe to show. */
+class UserError extends Error {}
+/** Plain Errors the pipeline throws for wrong-state calls (see decideChange / expectCr / approve / reject). */
+const KNOWN_STATE_ERRORS = [
+  /^Yêu cầu [^ ]+ không ở bước chờ quyết định thay đổi/,
+  /^Yêu cầu thay đổi [^ ]+ đang ở trạng thái/,
+  /^Không tìm thấy yêu cầu thay đổi/,
+  /^Giai đoạn CHANGE được duyệt theo từng yêu cầu/,
+];
+
 export function changeRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline }: WebDeps): void {
   const layout = (req: FastifyRequest, title: string): LayoutData => ({ user: req.user, mode: cfg.mode, title });
   const html = (reply: FastifyReply, s: string, code = 200) => reply.code(code).type('text/html; charset=utf-8').send(s);
   const errPage = (req: FastifyRequest, reply: FastifyReply, code: number, message: string) =>
     html(reply, render('error', layout(req, code === 404 ? 'Không tìm thấy' : 'Lỗi'), { code, message }), code);
 
+  /** Flash text for expected errors (validation, wrong state, busy); anything else is logged and rethrown (500 page). */
   const msgOf = (e: unknown): string => {
-    if (e instanceof Error && e.name === 'PipelineBusyError') return 'Bước hiện tại đang chạy, vui lòng thử lại sau khi hoàn tất.';
-    return (e instanceof Error ? e.message : String(e)).slice(0, 300);
+    if (e instanceof Error) {
+      if (e.name === 'PipelineBusyError') return 'Bước hiện tại đang chạy, vui lòng thử lại sau khi hoàn tất.';
+      if (e instanceof UserError || e.name === 'CrNotAllowedError' || KNOWN_STATE_ERRORS.some(re => re.test(e.message))) return e.message.slice(0, 300);
+    }
+    console.error('change route failed', e);
+    throw e;
   };
   const back = (reply: FastifyReply, id: string, tab: string, err?: string) =>
     reply.redirect(`/requests/${id}?tab=${tab}${err ? `&err=${encodeURIComponent(err)}` : ''}`);
@@ -72,16 +87,23 @@ export function changeRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
       }
       // The CHANGE job runs on a later worker tick, so attaching synchronously here is visible to it.
       const dir = join(Workspace.for(cfg, id).ensure().inputsDir, 'changes', crId);
-      mkdirSync(dir, { recursive: true });
       const used = new Set<string>();
+      const failed: string[] = [];
       for (const s of saved) {
         let name = s.name;
         for (let i = 2; used.has(name); i++) name = `${i}_${s.name}`;
         used.add(name);
-        const dest = join(dir, name);
-        renameSync(s.tmp, dest);
-        repo.addCrAttachment(id, crId, name, dest);
+        try {
+          mkdirSync(dir, { recursive: true });
+          const dest = join(dir, name);
+          renameSync(s.tmp, dest);
+          repo.addCrAttachment(id, crId, name, dest);
+        } catch (e) {
+          console.error(`CR attachment ${name} not saved`, e);
+          failed.push(s.name);
+        }
       }
+      if (failed.length) return back(reply, id, 'changes', `Đã tạo ${crId} nhưng không lưu được tệp: ${failed.join(', ')}`);
       return reply.redirect(`/requests/${id}?tab=changes&ok=${encodeURIComponent(`Đã ghi nhận yêu cầu thay đổi ${crId}`)}`);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
@@ -100,15 +122,15 @@ export function changeRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
   };
   crAction('decide', (id, cr, b, req) => {
     const decision = b.decision;
-    if (decision !== 'accept' && decision !== 'reject') throw new Error('Quyết định không hợp lệ.');
+    if (decision !== 'accept' && decision !== 'reject') throw new UserError('Quyết định không hợp lệ.');
     const note = (b.note ?? '').trim().slice(0, 2000);
-    if (decision === 'reject' && !note) throw new Error('Vui lòng nhập lý do khi từ chối thay đổi.');
+    if (decision === 'reject' && !note) throw new UserError('Vui lòng nhập lý do khi từ chối thay đổi.');
     pipeline.decideChange(id, cr, decision, note, req.user?.id ?? null);
   }, 'overview');
   crAction('accept-proposal', (id, cr) => { pipeline.acceptProposal(id, cr); });
   crAction('reject-proposal', (id, cr, b, req) => {
     const note = (b.note ?? '').trim().slice(0, 2000);
-    if (!note) throw new Error('Vui lòng nhập lý do từ chối đề xuất.');
+    if (!note) throw new UserError('Vui lòng nhập lý do từ chối đề xuất.');
     pipeline.rejectProposal(id, cr, note, req.user?.id ?? null);
   });
 

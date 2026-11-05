@@ -68,7 +68,7 @@ export function surveyRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
       groups.set(q.category, g);
     }
     return page(reply, code, {
-      state: 'form', splitMulti, title: req?.title ?? '', groups: [...groups], values: over.values ?? v.values, errors: over.errors ?? new Map(), notice: over.notice ?? '', proposal: over.proposal ?? '',
+      state: 'form', splitMulti, title: req?.title ?? '', groups: [...groups], values: over.values ?? v.values, errors: over.errors ?? new Map(), notice: over.notice ?? '', proposal: over.proposal ?? '', maxProposal: MAX_ANSWER,
     });
   };
 
@@ -131,7 +131,9 @@ export function surveyRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
       if (submit) repo.markSurveySubmitted(link.token);
     });
     let proposalNote = '';
-    if (proposal) {
+    const dup = proposal && repo.listChangeRequests(link.requestId).some(c => c.source === 'customer' && c.status === 'proposed' && c.description === proposal);
+    if (proposal && dup) proposalNote = ' Đề xuất thay đổi này đã được ghi nhận trước đó.';
+    else if (proposal) {
       try {
         pipeline.proposeChange(link.requestId, { title: 'Đề xuất của khách hàng', description: proposal, kind: 'other', source: 'customer' });
         proposalNote = ' Đề xuất thay đổi của Quý khách đã được ghi nhận.';

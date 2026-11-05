@@ -209,7 +209,7 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
     const steps = STAGES.filter(s => s !== 'CHANGE');
     const at = r.stage === 'CHANGE' ? (crs.find(c => c.interruptedStage && OPEN_CR.has(c.status))?.interruptedStage ?? null) : r.stage;
     data.steps = steps;
-    data.stepIdx = at === null ? -1 : steps.indexOf(at === 'CHANGE' ? 'TEST' : at);
+    data.stepIdx = at === null ? -1 : steps.indexOf(at as (typeof steps)[number]);
     if (tab === 'changes') {
       const feats = new Map(repo.listFeatures(id).map(f => [f.id, f]));
       data.crRows = crs.map(c => ({ ...c, attachments: repo.listCrAttachments(id, c.id), hasImpact: existsSync(join(changeDir(ws, c.id), 'impact.md')) }));
