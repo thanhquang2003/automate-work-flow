@@ -219,10 +219,17 @@ export async function prepareIntegration(ctx: StageContext): Promise<string> {
 }
 
 /** Per-request bookkeeping that has no DB column (test run history, issue URLs, bugfix review rounds, final MR). */
-export interface TestRun { run: number; status: TestStatus; real_result: string; comment: string; evidence: string[] }
+/** One Tester result of a TC. `seq` orders runs against merged fixes (FlowState.clock). */
+export interface TestRun { run: number; seq: number; status: TestStatus; real_result: string; comment: string; evidence: string[] }
 export interface FlowState {
   runs: Record<string, TestRun[]>;
   issueUrls: Record<string, string>;
+  /** Highest run number per TC whose bug/issue sync is done (TEST reconcile is idempotent). */
+  bugSynced: Record<string, number>;
+  /** Monotonic counter shared by test runs and merged fixes. */
+  clock: number;
+  /** `clock` value of the last merged bug fix (0 = none). */
+  lastFixSeq: number;
   /** Review rounds of work items without a DB column (bug fixes, feedback items), by work key. */
   reviewRounds: Record<string, number>;
   /** MR iid of work items without a DB column, by work key. */
@@ -236,10 +243,12 @@ const flowFile = (ws: Workspace): string => join(ws.root, 'flow-state.json');
 
 export function readFlowState(ws: Workspace): FlowState {
   const p = flowFile(ws);
-  const empty: FlowState = { runs: {}, issueUrls: {}, reviewRounds: {} };
+  const empty: FlowState = { runs: {}, issueUrls: {}, reviewRounds: {}, bugSynced: {}, clock: 0, lastFixSeq: 0 };
   if (!existsSync(p)) return empty;
   return { ...empty, ...(JSON.parse(readFileSync(p, 'utf8')) as Partial<FlowState>) };
 }
+
+export function writeFlowState(ws: Workspace, s: FlowState): void { writeJson(flowFile(ws), s); }
 
 export function updateFlowState(ws: Workspace, fn: (s: FlowState) => void): FlowState {
   const s = readFlowState(ws);

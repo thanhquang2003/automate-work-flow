@@ -71,6 +71,10 @@ export class GitLabClient {
     return Array.isArray(list) && list.length ? list[0] : undefined;
   }
 
+  getMR(pid: Id, iid: number): Promise<GlRef & { state: string }> {
+    return this.req('GET', `/projects/${this.enc(pid)}/merge_requests/${iid}`);
+  }
+
   async addMRNote(pid: Id, iid: number, body: string): Promise<void> {
     await this.req('POST', `/projects/${this.enc(pid)}/merge_requests/${iid}/notes`, { body });
   }

@@ -85,6 +85,7 @@ export async function bugfix(ctx: StageContext): Promise<StageOutcome> {
   if (r.kind === 'needs_human') return { kind: 'needs_human', reason: `Bug ${bug.tcId}: ${r.reason}` };
 
   repo.upsertBug(req.id, { ...bug, status: 'fixed' });
+  updateFlowState(ws, s => { s.lastFixSeq = ++s.clock; }); // TEST retests this TC, and regression-tests earlier passes
   if (gl && bug.gitlabIid) await gl.client.addIssueNote(gl.pid, bug.gitlabIid, `Đã sửa lần ${attempt}${r.mrUrl ? ` (MR ${r.mrUrl})` : ''}. Chờ kiểm thử lại.`);
   const left = repo.listBugs(req.id).filter(b => b.status === 'open' || b.status === 'fixing').length;
   return left ? { kind: 'goto', stage: 'BUGFIX' } : { kind: 'goto', stage: 'TEST' };

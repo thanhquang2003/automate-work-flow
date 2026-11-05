@@ -9,7 +9,7 @@ import type { StageContext, StageOutcome } from '../pipeline.js';
 import { MAX_SCHEMA_RETRIES, OutputError, readJsonOutput, runClaudeStep } from './claude-json.js';
 import {
   codebaseMapPath, designFile, fileRef, prepareIntegration, projectGitLab, promptExtras, pushIfRemote, readFlowState, sortedTestCases,
-  tcSheetRow, testCaseXlsxName, updateFlowState, type FlowState, type ProjectGitLab, type TestRun,
+  tcSheetRow, testCaseXlsxName, writeFlowState, type FlowState, type ProjectGitLab, type TestRun,
 } from './common.js';
 
 const RESULTS_EXAMPLE = {
@@ -137,9 +137,12 @@ async function uploadEvidence(ctx: StageContext, gl: ProjectGitLab, run: TestRun
   return up.markdown;
 }
 
-/** F → create the bug (GitLab issue when available) or reopen/annotate it. P/PE → close an open bug. */
+/**
+ * F → create the bug (GitLab issue when available) or reopen/annotate it. P/PE → close an open bug.
+ * The bug row and issue URL are persisted right after the issue is created, so a later failure never duplicates it.
+ */
 async function syncBug(ctx: StageContext, gl: ProjectGitLab | undefined, tc: TestCaseRow, run: TestRun, state: FlowState): Promise<void> {
-  const { repo, req } = ctx;
+  const { repo, req, ws } = ctx;
   const bug = repo.getBug(req.id, tc.id);
   if (run.status === 'F') {
     if (!bug) {
@@ -149,8 +152,11 @@ async function syncBug(ctx: StageContext, gl: ProjectGitLab | undefined, tc: Tes
         const title = `[${req.id}][${tc.id}] ${tc.purpose}`.slice(0, 250);
         const is = await gl.client.createIssue(gl.pid, { title, description: issueDescription(ctx, gl, tc, run, md), labels: ['bug', 'devflow', req.id] });
         iid = is.iid;
+        repo.upsertBug(req.id, { tcId: tc.id, gitlabIid: iid, fixAttempts: 0, status: 'open' });
         state.issueUrls[tc.id] = is.web_url;
+        writeFlowState(ws, state);
         ctx.log(`Đã tạo issue ${is.web_url} cho ${tc.id}`);
+        return;
       }
       repo.upsertBug(req.id, { tcId: tc.id, gitlabIid: iid, fixAttempts: 0, status: 'open' });
       return;
@@ -182,9 +188,59 @@ function bugLine(ctx: StageContext, tcId: string, state: FlowState): string | un
 }
 
 /**
- * TEST: the Tester runs every test case without a P/PE result yet (all of them on the first run) on devflow/<REQ>.
- * Evidence rules are enforced, evidence copied to artifacts/evidence/<TC>/, run 1 → status1, run 2 → status2,
- * run 3+ → status2 overwritten and "Lần N: X" appended to the comment. F → bug/issue, then BUGFIX; all P/PE → DONE.
+ * Idempotent: brings bugs/issues and the DB rows of ALL test cases in line with the run history in flow-state.
+ * Bug sync happens once per run (FlowState.bugSynced); DB rows are rewritten every time.
+ */
+async function reconcile(ctx: StageContext, gl: ProjectGitLab | undefined, all: TestCaseRow[], state: FlowState): Promise<void> {
+  const { repo, req, ws } = ctx;
+  for (const tc of all) {
+    const runs = state.runs[tc.id];
+    const last = runs?.at(-1);
+    if (!runs || !last) continue;
+    if ((state.bugSynced[tc.id] ?? 0) < last.run) {
+      await syncBug(ctx, gl, tc, last, state);
+      state.bugSynced[tc.id] = last.run;
+      writeFlowState(ws, state);
+    }
+    repo.updateTestCase(req.id, tc.id, {
+      status1: runs[0]!.status, status2: runs.length >= 2 ? last.status : null, realResult: last.real_result || null,
+      evidence: last.evidence, comment: composeComment(runs, bugLine(ctx, tc.id, state)),
+    });
+  }
+}
+
+type Plan = { kind: 'test'; targets: TestCaseRow[]; regression: boolean } | { kind: 'bugfix'; failing: string[] } | { kind: 'done' };
+
+/**
+ * What TEST does next, from the run history:
+ * - TCs never run, and F TCs with a fix merged after their last run (or whose bug is parked for a human) → test them;
+ * - else F TCs without a new fix (e.g. a rerun after a crash) → BUGFIX without re-testing;
+ * - else a fix was merged after the last run of some P TC → one regression run of every non-PE TC;
+ * - else done.
+ */
+function plan(ctx: StageContext, all: TestCaseRow[], state: FlowState): Plan {
+  const last = (id: string): TestRun | undefined => latestRun(state, id);
+  const fixedSince = (r: TestRun): boolean => state.lastFixSeq > r.seq;
+  const retest = all.filter(tc => {
+    const r = last(tc.id);
+    if (!r) return true;
+    return r.status === 'F' && (fixedSince(r) || ctx.repo.getBug(ctx.req.id, tc.id)?.status === 'needs_human');
+  });
+  if (retest.length) return { kind: 'test', targets: retest, regression: false };
+  const failing = all.filter(tc => last(tc.id)?.status === 'F').map(tc => tc.id);
+  if (failing.length) return { kind: 'bugfix', failing };
+  if (all.some(tc => { const r = last(tc.id); return r?.status === 'P' && fixedSince(r); })) {
+    return { kind: 'test', targets: all.filter(tc => last(tc.id)?.status !== 'PE'), regression: true };
+  }
+  return { kind: 'done' };
+}
+
+/**
+ * TEST on devflow/<REQ>. First reconciles DB rows and bugs from the saved run history (idempotent after a crash),
+ * then runs the Tester on the planned TCs (see plan()). Evidence rules are enforced, evidence copied to
+ * artifacts/evidence/<TC>/, run 1 → status1, run 2 → status2, run 3+ → status2 overwritten and "Lần N: X" appended
+ * to the comment. F → bug/issue, then BUGFIX; a fix merged after a P → full regression run (goto TEST);
+ * all P/PE → DONE.
  */
 export async function test(ctx: StageContext): Promise<StageOutcome> {
   const { ws, req, repo } = ctx;
@@ -195,43 +251,39 @@ export async function test(ctx: StageContext): Promise<StageOutcome> {
   const branch = await prepareIntegration(ctx);
   const state = readFlowState(ws);
   const gl = projectGitLab(ctx);
-  const targets = all.filter(tc => { const s = latestRun(state, tc.id)?.status; return s !== 'P' && s !== 'PE'; });
 
-  if (targets.length) {
+  await reconcile(ctx, gl, all, state);
+  let p = plan(ctx, all, state);
+
+  if (p.kind === 'test') {
+    const { targets, regression } = p;
+    if (regression) ctx.log(`Đã có bản sửa lỗi sau lần kiểm thử trước → kiểm thử hồi quy ${targets.length} test case`);
     const baseline = await ctx.git.untracked();
     const r = await runTester(ctx, branch, targets, state);
     if (!r.ok) return { kind: 'fail', error: `Tester: ${r.error}` };
     const results: TestResult[] = validateResults(r.value, ws.evidenceDir);
     for (const res of results) {
       const runs = (state.runs[res.tc_id] ??= []);
-      runs.push({ run: runs.length + 1, status: res.status, real_result: res.real_result, comment: res.comment, evidence: copyEvidence(ws.evidenceDir, ws.artifactsDir, res.tc_id) });
-    }
-    updateFlowState(ws, s => { s.runs = state.runs; });
-    for (const tc of targets) await syncBug(ctx, gl, tc, latestRun(state, tc.id)!, state);
-    updateFlowState(ws, s => { s.runs = state.runs; s.issueUrls = state.issueUrls; });
-    for (const tc of targets) {
-      const runs = state.runs[tc.id]!;
-      const last = runs.at(-1)!;
-      repo.updateTestCase(req.id, tc.id, {
-        status1: runs[0]!.status, status2: runs.length >= 2 ? last.status : null, realResult: last.real_result || null,
-        evidence: last.evidence, comment: composeComment(runs, bugLine(ctx, tc.id, state)),
+      runs.push({
+        run: runs.length + 1, seq: ++state.clock, status: res.status, real_result: res.real_result, comment: res.comment,
+        evidence: copyEvidence(ws.evidenceDir, ws.artifactsDir, res.tc_id),
       });
     }
+    writeFlowState(ws, state); // the results are the checkpoint: a rerun reconciles instead of re-testing
     const counts = (['P', 'F', 'PE'] as const).map(s => `${s}=${results.filter(x => x.status === s).length}`).join(', ');
-    ctx.log(`Kết quả kiểm thử: ${counts}`);
+    ctx.log(`Kết quả kiểm thử${regression ? ' hồi quy' : ''}: ${counts}`);
+    await reconcile(ctx, gl, all, state);
     const runLabel = [...new Set(targets.map(t => state.runs[t.id]!.length))].join(',');
     if (await ctx.git.commitAll(`test(devflow): ${req.id} kết quả kiểm thử lần ${runLabel}`, baseline)) await pushIfRemote(ctx, branch);
-  } else {
-    ctx.log('Tất cả test case đã P/PE, không cần chạy lại Tester');
+    p = plan(ctx, all, state);
   }
+  await writeTestCases(templatePath(ctx.cfg, 'testcase'), sortedTestCases(repo, req.id).map(tcSheetRow), join(ws.artifactsDir, testCaseXlsxName(req.id)));
 
-  const out = join(ws.artifactsDir, testCaseXlsxName(req.id));
-  await writeTestCases(templatePath(ctx.cfg, 'testcase'), sortedTestCases(repo, req.id).map(tcSheetRow), out);
-
-  const failing = all.filter(tc => latestRun(state, tc.id)?.status === 'F').map(tc => tc.id);
-  if (failing.length) {
-    ctx.log(`Còn ${failing.length} test case F: ${failing.join(', ')} → sửa lỗi`, 'warn');
+  if (p.kind === 'bugfix') {
+    ctx.log(`Còn ${p.failing.length} test case F: ${p.failing.join(', ')} → sửa lỗi`, 'warn');
     return { kind: 'goto', stage: 'BUGFIX' };
   }
+  if (p.kind === 'test') return { kind: 'goto', stage: 'TEST' }; // regression run as its own job (checkpoint)
+  ctx.log('Tất cả test case đã P/PE');
   return { kind: 'goto', stage: 'DONE' };
 }

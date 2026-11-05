@@ -83,6 +83,7 @@ function fakeGitLab(bare: string) {
   const uploads: string[] = [];
   let mrN = 0;
   let issueN = 0;
+  const fail = { createIssue: 0 };
   const client = {
     createMR: async (_pid: number, o: { source: string; target: string; title: string; description: string }) => {
       const iid = ++mrN;
@@ -104,7 +105,9 @@ function fakeGitLab(bare: string) {
       git(tmp, 'push', '-q', 'origin', m.target);
       m.state = 'merged';
     },
+    getMR: async (_pid: number, iid: number) => { const m = mrs.get(iid)!; return { iid, state: m.state, web_url: `http://gl/grp/app/-/merge_requests/${iid}` }; },
     createIssue: async (_pid: number, o: { title: string; description: string; labels: string[] }) => {
+      if (fail.createIssue > 0) { fail.createIssue--; throw new Error("GitLab 502"); }
       const iid = ++issueN;
       issues.set(iid, { ...o, state: 'opened', notes: [], addLabels: [] });
       return { iid, web_url: `http://gl/grp/app/-/issues/${iid}` };
@@ -118,7 +121,7 @@ function fakeGitLab(bare: string) {
     },
     uploadFile: async (_pid: number, p: string) => { uploads.push(p); return { markdown: `![${basename(p)}](/uploads/abc/${basename(p)})` }; },
   };
-  return { client: client as unknown as GitLabClient, mrs, issues, uploads, seedIssue: (iid: number) => { issues.set(iid, { title: 'x', description: '', labels: [], state: 'opened', notes: [], addLabels: [] }); issueN = Math.max(issueN, iid); } };
+  return { client: client as unknown as GitLabClient, mrs, issues, uploads, fail, seedIssue: (iid: number) => { issues.set(iid, { title: 'x', description: '', labels: [], state: 'opened', notes: [], addLabels: [] }); issueN = Math.max(issueN, iid); } };
 }
 
 // ---------- workspace preparation ----------
@@ -400,7 +403,7 @@ describe('stages part 2', () => {
     expect(p.repo.getBug(p.r.id, 'TC-BAOCAO-01')!.status).toBe('needs_human');
   });
 
-  it('full offline cycle: TEST F → BUGFIX → TEST F → BUGFIX → TEST P → DONE, with run columns and report', async () => {
+  it('full offline cycle: TEST F → BUGFIX → TEST F → BUGFIX → TEST P → regression → DONE, with run columns and report', async () => {
     const p = prep({ testCases: [tcRow('TC-DANGNHAP-01', 'F-01'), tcRow('TC-BAOCAO-01', 'F-02')] });
     mockClaude({
       developer, reviewer: reviewer([true]),
@@ -408,20 +411,25 @@ describe('stages part 2', () => {
         [{ tc_id: 'TC-DANGNHAP-01', status: 'P', files: ['a.png'] }, { tc_id: 'TC-BAOCAO-01', status: 'F', files: ['b.png'] }],
         [{ tc_id: 'TC-BAOCAO-01', status: 'F', files: ['b2.png'] }],
         [{ tc_id: 'TC-BAOCAO-01', status: 'P', files: ['b3.png'] }],
+        [{ tc_id: 'TC-DANGNHAP-01', status: 'P', files: ['a4.png'] }, { tc_id: 'TC-BAOCAO-01', status: 'P', files: ['b4.png'] }],
       ]),
     });
     startAt(p.pipeline, p.r.id, 'TEST');
     await p.worker.drain();
-    expect(calls.map(c => c.role)).toEqual(['tester', 'developer', 'reviewer', 'tester', 'developer', 'reviewer', 'tester']);
+    // The last tester call is the regression run of all (non-PE) TCs after the fixes.
+    expect(calls.map(c => c.role)).toEqual(['tester', 'developer', 'reviewer', 'tester', 'developer', 'reviewer', 'tester', 'tester']);
+    expect(calls[7]!.prompt).toContain('`TC-DANGNHAP-01`');
+    expect(calls[7]!.prompt).toContain('`TC-BAOCAO-01`');
     expect(calls[1]!.prompt).toContain('systematic-debugging');
     expect(calls[3]!.prompt).toContain('TC-BAOCAO-01');
     expect(calls[3]!.prompt).not.toContain('`TC-DANGNHAP-01`');
     const b = p.repo.getTestCase(p.r.id, 'TC-BAOCAO-01')!;
     expect([b.status1, b.status2]).toEqual(['F', 'P']);
     expect(b.comment).toContain('Lần 3: P');
-    expect(b.evidence).toEqual(['evidence/TC-BAOCAO-01/b3.png']);
+    expect(b.comment).toContain('Lần 4: P');
+    expect(b.evidence).toEqual(['evidence/TC-BAOCAO-01/b4.png']);
     const a = p.repo.getTestCase(p.r.id, 'TC-DANGNHAP-01')!;
-    expect([a.status1, a.status2]).toEqual(['P', null]);
+    expect([a.status1, a.status2]).toEqual(['P', 'P']);
     expect(p.repo.getBug(p.r.id, 'TC-BAOCAO-01')).toMatchObject({ fixAttempts: 2, status: 'closed' });
     expect(git(p.ws.repoDir, 'log', '--merges', '--format=%s', p.branch)).toContain('fix-TC-BAOCAO-01');
     const req = p.repo.getRequest(p.r.id)!;
@@ -504,5 +512,71 @@ describe('stages part 2', () => {
     expect(p.repo.getBug(p.r.id, 'TC-BAOCAO-01')).toMatchObject({ fixAttempts: 1, status: 'fixed' });
     expect(git(p.bare, 'ls-tree', '-r', '--name-only', p.branch)).toContain('src/code-1.txt');
     expect(p.repo.getRequest(p.r.id)!.stage).toBe('TEST');
+  });
+
+  it('TEST is idempotent: a GitLab error after results are saved → rerun reconciles without re-testing', async () => {
+    const p = prep({ gitlab: true, testCases: [tcRow('TC-DANGNHAP-01', 'F-01'), tcRow('TC-BAOCAO-01', 'F-02')], stubs: ['BUGFIX'] });
+    p.gl!.fail.createIssue = 1;
+    mockClaude({
+      tester: tester(p.ws.evidenceDir, [[
+        { tc_id: 'TC-DANGNHAP-01', status: 'F', files: ['f.png'] },
+        { tc_id: 'TC-BAOCAO-01', status: 'P', files: ['ok.png'] },
+      ]]),
+    });
+    startAt(p.pipeline, p.r.id, 'TEST');
+    await p.worker.drain(); // run 1 throws on createIssue; the engine retries the stage once
+    expect(p.repo.listStageRuns(p.r.id).filter(s => s.stage === 'TEST').map(s => s.status)).toEqual(['failed', 'done']);
+    expect(calls.map(c => c.role)).toEqual(['tester']);
+    expect(p.gl!.issues.size).toBe(1);
+    const a = p.repo.getTestCase(p.r.id, 'TC-DANGNHAP-01')!;
+    const b = p.repo.getTestCase(p.r.id, 'TC-BAOCAO-01')!;
+    expect([a.status1, a.status2]).toEqual(['F', null]);
+    expect(a.comment).toContain('http://gl/grp/app/-/issues/1');
+    expect([b.status1, b.status2]).toEqual(['P', null]);
+    expect(b.evidence).toEqual(['evidence/TC-BAOCAO-01/ok.png']);
+    const sh = await readSheet(join(p.ws.artifactsDir, `TestCase_${p.r.id}.xlsx`));
+    expect([sh.row(12).id, sh.row(12).s1, sh.row(13).id, sh.row(13).s1]).toEqual(['TC-DANGNHAP-01', 'F', 'TC-BAOCAO-01', 'P']);
+    expect(p.repo.getRequest(p.r.id)!.stage).toBe('BUGFIX');
+  });
+
+  it('develop skips merging an MR that GitLab already merged (crash after merge)', async () => {
+    const p = prep({ gitlab: true, tasks: true, stubs: ['TEST'] });
+    // T-01: review approved and MR merged before the crash; DB still says in_progress.
+    const mr = await p.gl!.client.createMR(7, { source: `${p.branch}-T-01`, target: p.branch, title: 't', description: '' });
+    p.gl!.mrs.get(mr.iid)!.state = 'merged';
+    p.repo.updateTask(p.r.id, 'T-01', { status: 'in_progress', reviewRounds: 1, mrIid: mr.iid, branch: `${p.branch}-T-01` });
+    mkdirSync(join(p.ws.repoDir, '.devflow-tmp'), { recursive: true });
+    writeFileSync(join(p.ws.repoDir, '.devflow-tmp', 'review-T-01-r1.json'), JSON.stringify({ approved: true, comments: [] }));
+    mockClaude({ developer, reviewer: reviewer([true]) });
+    startAt(p.pipeline, p.r.id, 'DEVELOP');
+    await p.worker.drain();
+    expect(calls.map(c => c.role)).toEqual(['developer', 'reviewer']); // T-02 only
+    expect(p.repo.listTasks(p.r.id).map(t => t.status)).toEqual(['done', 'done']);
+    expect(p.repo.getRequest(p.r.id)!.stage).toBe('TEST');
+  });
+
+  it('planning rerun clears test history and bugs', async () => {
+    const p = prep({ stubs: ['DEVELOP'] });
+    p.repo.upsertBug(p.r.id, { tcId: 'TC-OLD-01', gitlabIid: null, fixAttempts: 2, status: 'open' });
+    writeFileSync(join(p.ws.root, 'flow-state.json'), JSON.stringify({ runs: { 'TC-OLD-01': [{ run: 1, seq: 1, status: 'F', real_result: '', comment: '', evidence: [] }] }, issueUrls: { 'TC-OLD-01': 'u' }, reviewRounds: { keep: 1 } }));
+    mockClaude({ planner: dir => { writeFileSync(join(dir, 'tasks.json'), JSON.stringify(TASKS)); writeFileSync(join(dir, 'testcases.json'), JSON.stringify(TCS)); } });
+    startAt(p.pipeline, p.r.id, 'PLANNING');
+    await p.worker.drain();
+    expect(p.repo.listBugs(p.r.id)).toEqual([]);
+    const st = JSON.parse(readFileSync(join(p.ws.root, 'flow-state.json'), 'utf8'));
+    expect(st.runs).toEqual({});
+    expect(st.issueUrls).toEqual({});
+    expect(st.reviewRounds).toEqual({ keep: 1 });
+  });
+
+  it('DONE refuses to finish while a test case is F or a bug is open', async () => {
+    const p = prep({ testCases: [{ ...tcRow('TC-BAOCAO-01', 'F-02'), status1: 'F' }] });
+    p.repo.upsertBug(p.r.id, { tcId: 'TC-BAOCAO-01', gitlabIid: null, fixAttempts: 1, status: 'open' });
+    startAt(p.pipeline, p.r.id, 'DONE');
+    await p.worker.drain();
+    const req = p.repo.getRequest(p.r.id)!;
+    expect([req.stage, req.status]).toEqual(['DONE', 'failed']);
+    expect(p.repo.listStageRuns(p.r.id).at(-1)!.error).toContain('TC-BAOCAO-01');
+    expect(existsSync(join(p.ws.artifactsDir, 'report.md'))).toBe(false);
   });
 });

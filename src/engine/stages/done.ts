@@ -82,6 +82,13 @@ export async function writeReport(ctx: StageContext): Promise<string> {
  */
 export async function done(ctx: StageContext): Promise<StageOutcome> {
   const { req, ws } = ctx;
+  // Defensive: DONE is only reached from TEST with every TC P/PE; never report done with open failures.
+  const state = readFlowState(ws);
+  const failing = sortedTestCases(ctx.repo, req.id).filter(tc => latestRun(state, tc.id)?.status === 'F' || (!state.runs[tc.id] && (tc.status2 ?? tc.status1) === 'F')).map(tc => tc.id);
+  const openBugs = ctx.repo.listBugs(req.id).filter(b => b.status === 'open' || b.status === 'fixing' || b.status === 'fixed').map(b => b.tcId);
+  if (failing.length || openBugs.length) {
+    return { kind: 'fail', error: `Chưa thể hoàn tất: còn test case F (${failing.join(', ') || 'không'}) hoặc bug chưa đóng (${openBugs.join(', ') || 'không'}). Hãy chạy lại giai đoạn TEST.` };
+  }
   const gl = projectGitLab(ctx);
   if (existsSync(join(ws.repoDir, '.git'))) await prepareIntegration(ctx);
   if (gl) {

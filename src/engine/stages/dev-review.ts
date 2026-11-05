@@ -171,8 +171,10 @@ export async function developAndReview(ctx: StageContext, w: WorkItem): Promise<
 
   // ---- merge ----
   if (gl) {
-    const mr = w.mrIid ? { iid: w.mrIid, web_url: '' } : await ensureMr(ctx, gl, w, summary);
-    await gl.client.mergeMR(gl.pid, mr.iid);
+    const mr = w.mrIid ? await gl.client.getMR(gl.pid, w.mrIid) : { ...(await ensureMr(ctx, gl, w, summary)), state: 'opened' };
+    // After a crash between mergeMR and the caller's bookkeeping the MR is already merged: do not merge again.
+    if (mr.state === 'merged') ctx.log(`MR !${mr.iid} đã được merge trước đó`);
+    else await gl.client.mergeMR(gl.pid, mr.iid);
     await ctx.git.checkout(w.base);
     await ctx.git.pull(w.base);
     ctx.log(`Đã merge MR !${mr.iid} (${w.branch} → ${w.base})`);

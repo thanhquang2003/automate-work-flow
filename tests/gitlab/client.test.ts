@@ -98,4 +98,11 @@ describe('GitLabClient', () => {
     expect(recs[0].body).toContain('filename="f.png"');
     expect(recs[0].body).toContain('PNGDATA');
   });
+  it('getMR reads one merge request', async () => {
+    const c = new GitLabClient(base, 't');
+    respond = () => ({ status: 200, json: { iid: 2, state: 'merged', web_url: 'w' } });
+    expect(await c.getMR(1, 2)).toEqual({ iid: 2, state: 'merged', web_url: 'w' });
+    expect(recs[0].method).toBe('GET');
+    expect(recs[0].url).toBe('/api/v4/projects/1/merge_requests/2');
+  });
 });

@@ -8,7 +8,7 @@ import { buildPrompt } from '../prompt.js';
 import type { StageContext, StageOutcome } from '../pipeline.js';
 import { OutputError, readJsonOutput, runClaudeStep } from './claude-json.js';
 import {
-  DOCS_PATHSPEC, contextFileVars, designFile, ensureOnBranch, fileRef, integrationBranch, promptExtras, pushIfRemote, sortedTestCases, tcSheetRow,
+  DOCS_PATHSPEC, contextFileVars, designFile, ensureOnBranch, fileRef, integrationBranch, promptExtras, pushIfRemote, sortedTestCases, tcSheetRow, updateFlowState,
   testCaseXlsxName,
 } from './common.js';
 
@@ -118,6 +118,9 @@ export async function planning(ctx: StageContext): Promise<StageOutcome> {
   }));
   repo.replaceTasks(req.id, taskRows);
   repo.replaceTestCases(req.id, tcRows);
+  // New test cases: earlier test history, issue links and bugs no longer apply.
+  repo.clearBugs(req.id);
+  updateFlowState(ws, s => { s.runs = {}; s.issueUrls = {}; s.bugSynced = {}; s.lastFixSeq = 0; });
 
   const out = join(ws.artifactsDir, testCaseXlsxName(req.id));
   await writeTestCases(templatePath(ctx.cfg, 'testcase'), sortedTestCases(repo, req.id).map(tcSheetRow), out);

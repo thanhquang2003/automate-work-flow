@@ -308,6 +308,8 @@ export class Repo {
       reqId, b.tcId, b.gitlabIid, b.fixAttempts, b.status,
     );
   }
+  /** Removes every bug of a request (a re-run of PLANNING starts testing from scratch). */
+  clearBugs(reqId: string): void { this.run('delete from bugs where request_id=?', reqId); }
   getBug(reqId: string, tcId: string): BugRow | undefined {
     const r = this.one('select * from bugs where request_id=? and tc_id=?', reqId, tcId);
     return r && toBug(r);
