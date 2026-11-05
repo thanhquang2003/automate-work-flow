@@ -123,6 +123,8 @@ export function openQuestions(repo: Repo, reqId: string): QuestionRow[] {
 
 export const answersPath = (ws: Workspace): string => join(ws.devflowDir, 'answers.json');
 export const assumptionsPath = (ws: Workspace): string => join(ws.devflowDir, 'assumptions.json');
+/** Per-CR output folder of the CHANGE stage: impact.md + impact.json. */
+export const changeDir = (ws: Workspace, crId: string): string => join(ws.devflowDir, 'changes', crId);
 export const codebaseMapPath = (ws: Workspace): string => join(ws.devflowDir, 'codebase-map.md');
 
 export function writeAnswers(ctx: StageContext): AnswerEntry[] {

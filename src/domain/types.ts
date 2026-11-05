@@ -164,7 +164,11 @@ export interface TestCaseRow {
   status1: TestStatus | null; status2: TestStatus | null; realResult: string | null; evidence: string[]; comment: string | null;
   scopeStatus: ScopeStatus; changedByCr: string | null; baseline: number | null;
 }
-export interface BugRow { tcId: string; gitlabIid: number | null; fixAttempts: number; status: string }
+export interface BugRow {
+  tcId: string; gitlabIid: number | null; fixAttempts: number; status: string;
+  /** Why the bug was closed outside TEST (e.g. "Đóng do CR-01"). */
+  note?: string | null;
+}
 
 export interface ChangeRequestRow {
   id: string; requestId: string; title: string; description: string; kind: CrKind; source: CrSource; status: CrStatus;

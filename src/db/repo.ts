@@ -54,7 +54,7 @@ const toTestCase = (r: Row): TestCaseRow => ({
   evidence: parse(r.evidence, []), comment: r.comment ?? null,
   scopeStatus: r.scope_status ?? 'active', changedByCr: r.changed_by_cr ?? null, baseline: r.baseline ?? null,
 });
-const toBug = (r: Row): BugRow => ({ tcId: r.tc_id, gitlabIid: r.gitlab_iid ?? null, fixAttempts: r.fix_attempts, status: r.status });
+const toBug = (r: Row): BugRow => ({ tcId: r.tc_id, gitlabIid: r.gitlab_iid ?? null, fixAttempts: r.fix_attempts, status: r.status, note: r.note ?? null });
 
 const toCr = (r: Row): ChangeRequestRow => ({
   id: r.id, requestId: r.request_id, title: r.title, description: r.description, kind: r.kind, source: r.source, status: r.status,
@@ -166,6 +166,11 @@ export class Repo {
        type=excluded.type,options=excluded.options,suggested_answer=excluded.suggested_answer,priority=excluded.priority`,
     );
     this.tx(() => { for (const q of qs) st.run(reqId, q.id, round, q.category, q.question, q.why, q.type, json(q.options), q.suggested_answer, q.priority); });
+  }
+  /** Deletes the given questions (e.g. unanswered questions raised by a rejected CR). */
+  deleteQuestions(reqId: string, ids: string[]): void {
+    const st = this.db.prepare('delete from questions where request_id=? and id=?');
+    this.tx(() => { for (const id of ids) st.run(reqId, id); });
   }
   listQuestions(reqId: string): QuestionRow[] {
     return this.all('select * from questions where request_id=? order by round, id', reqId).map(toQuestion);
@@ -327,9 +332,9 @@ export class Repo {
   // ---- bugs ----
   upsertBug(reqId: string, b: BugRow): void {
     this.run(
-      `insert into bugs(request_id,tc_id,gitlab_iid,fix_attempts,status) values(?,?,?,?,?)
-       on conflict(request_id,tc_id) do update set gitlab_iid=excluded.gitlab_iid,fix_attempts=excluded.fix_attempts,status=excluded.status`,
-      reqId, b.tcId, b.gitlabIid, b.fixAttempts, b.status,
+      `insert into bugs(request_id,tc_id,gitlab_iid,fix_attempts,status,note) values(?,?,?,?,?,?)
+       on conflict(request_id,tc_id) do update set gitlab_iid=excluded.gitlab_iid,fix_attempts=excluded.fix_attempts,status=excluded.status,note=excluded.note`,
+      reqId, b.tcId, b.gitlabIid, b.fixAttempts, b.status, b.note ?? null,
     );
   }
   /** Removes every bug of a request (a re-run of PLANNING starts testing from scratch). */
