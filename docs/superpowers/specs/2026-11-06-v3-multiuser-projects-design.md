@@ -8,7 +8,10 @@ Triển khai DevFlow trên **một VPS dùng chung** cho cả đội. Nhân viê
 
 ## 2. Quyết định của chủ dự án
 - Công ty dùng **Claude Team**; mỗi người dùng seat riêng của mình trên server (không dùng chung một tài khoản, không dùng API key chung).
-- Vai trò dự án: **PM, BA, SE, Dev, Tester** (không có Coordinator). SE phụ trách thiết kế và thiết kế chạy bằng seat của SE.
+- Vai trò dự án: **PM, BA, SE, Dev, Code Reviewer, Tester** (không có Coordinator). SE phụ trách thiết kế và thiết kế chạy bằng seat của SE. **Code Reviewer** review code (chạy bằng seat của Reviewer) và duyệt bước phát triển.
+- DevFlow được dùng **sudo** (qua script quản trị `dfctl`, mục 6b.2) để tạo tài khoản, quản lý nhóm và chạy Claude dưới tài khoản riêng của từng người.
+- **Mã yêu cầu do PM nhập** (DevFlow gợi ý `<KEY>-NNN`).
+- Một thư mục dự án có thể có **nhiều yêu cầu làm song song**; mỗi yêu cầu làm trên **git worktree riêng** để không ghi đè nhau.
 - Một dự án = một thư mục trên VPS (repo mã nguồn); một dự án có **nhiều yêu cầu** nối tiếp; tài liệu từng yêu cầu ở `docs/devflow/<REQ>/` trong dự án.
 - Mỗi yêu cầu: PM chỉ định **một người phụ trách cho mỗi vai trò** (mặc định là thành viên đầu tiên của vai trò). **Task code được giao cho từng Dev**, chạy bằng seat của Dev đó.
 - Chỉ email Google thuộc **tên miền công ty** được đăng nhập. **Admin** hệ thống chỉ định ai được làm PM (tạo dự án), cấu hình GitLab và các **thư mục gốc** được phép đặt dự án. **PM** tạo dự án (chọn thư mục có sẵn, clone repo vào thư mục mới, hoặc tạo repo mới) và tự thêm thành viên.
@@ -17,7 +20,7 @@ Triển khai DevFlow trên **một VPS dùng chung** cho cả đội. Nhân viê
 
 **Mục tiêu**
 - Google OIDC SSO, giới hạn tên miền; phiên đăng nhập như v1 (cookie ký HMAC).
-- Quyền hệ thống: `admin`, `pm` (được tạo dự án), `member`. Quyền dự án: tập vai trò {PM, BA, SE, DEV, TESTER} cho mỗi thành viên (một người có thể giữ nhiều vai trò).
+- Quyền hệ thống: `admin`, `pm` (được tạo dự án), `member`. Quyền dự án: tập vai trò {PM, BA, SE, DEV, REVIEWER, TESTER} cho mỗi thành viên (một người có thể giữ nhiều vai trò).
 - Kết nối seat Claude của từng người trên server, chạy Claude bằng đúng seat đó, có trang trạng thái seat.
 - Phân công theo yêu cầu và theo task; người duyệt mỗi bước là người phụ trách vai trò của bước đó (PM duyệt thay được).
 - Hộp việc "Việc của tôi": các bước chờ tôi duyệt, task giao cho tôi, CR chờ PM, seat cần đăng nhập lại.
@@ -59,7 +62,7 @@ Theo trang Legal & compliance của Claude Code: OAuth của gói Team dành cho
 - Chế độ `local` và môi trường Windows: không có tài khoản riêng; dùng Claude đang đăng nhập của máy (như v2).
 
 ### 5.3 Dự án
-- Bảng `projects(id, key, name, path, gitlab_project, default_branch, created_by, created_at, archived)`; `key` 2–10 chữ in hoa (ví dụ `ERP`), dùng làm tiền tố mã yêu cầu `ERP-001`.
+- Bảng `projects(id, key, name, path, gitlab_project, default_branch, created_by, created_at, archived)`; `key` 2–10 chữ in hoa (ví dụ `ERP`), dùng làm gợi ý mã yêu cầu `ERP-001` (PM có thể nhập mã khác); `requests` có khóa duy nhất (project_id, code).
 - `project_members(project_id, user_id, roles JSON, added_by, added_at)`; PM luôn có ít nhất một người.
 - Admin cấu hình `PROJECT_ROOTS` (danh sách thư mục gốc, ví dụ `/srv/projects`). Thư mục dự án phải nằm trong một thư mục gốc (đã resolve symlink).
 - PM tạo dự án theo một trong ba cách: (a) **thư mục có sẵn** (phải là repo git hoặc rỗng), (b) **clone** repo GitLab vào thư mục mới, (c) **tạo mới** (git init + tùy chọn tạo project GitLab). Người tạo trở thành PM.
@@ -80,9 +83,9 @@ Theo trang Legal & compliance của Claude Code: OAuth của gói Team dành cho
 | BREAKDOWN | BA | BA |
 | DESIGN | SE | SE |
 | PLANNING | Dev (tasks) và Tester (test cases) — hai lần chạy Claude riêng | cả Dev và Tester phụ trách đều phải duyệt |
-| DEVELOP | Dev được giao từng task (seat của người đó); review bằng seat của Dev phụ trách yêu cầu (nếu chính người đó là người viết task thì dùng seat của một Dev khác trong yêu cầu nếu có, không thì vẫn dùng seat của họ) | Dev phụ trách yêu cầu |
+| DEVELOP | Dev được giao từng task (seat của người đó); review từng task bằng seat của **Code Reviewer** phụ trách yêu cầu | **Code Reviewer** |
 | TEST | Tester | — |
-| BUGFIX | Dev được giao task của chức năng có test case lỗi (không có → Dev phụ trách) | — |
+| BUGFIX | Dev được giao task của chức năng có test case lỗi (không có → Dev phụ trách); review bản sửa bằng seat Code Reviewer | — |
 | CHANGE (phân tích CR) | BA | **PM** quyết định từng CR |
 | DONE | — | PM chốt (gate mới ở chế độ review; ở auto thì tự hoàn thành) |
 - `request_assignees(request_id, role, user_id)`; PM đổi người phụ trách bất kỳ lúc nào (áp dụng cho lần chạy kế tiếp). `tasks.assignee_id` — PM hoặc Dev phụ trách giao; task chưa giao → Dev phụ trách.
@@ -104,9 +107,9 @@ Theo trang Legal & compliance của Claude Code: OAuth của gói Team dành cho
 2. Kết nối seat qua `claude auth login` chạy trong pseudo-terminal, người dùng tự đăng nhập trên trình duyệt; DevFlow chỉ chuyển mã dán vào stdin, không lưu.
 3. Mỗi yêu cầu một git worktree trong `.devflow/worktrees/` của dự án; Office/evidence ở `.devflow/requests/`, bản cuối commit vào `docs/devflow/<REQ>/deliverables/`.
 4. PLANNING tách hai lần chạy (Dev: tasks, Tester: test cases) và cần hai người duyệt.
-5. Review code dùng seat của Dev phụ trách yêu cầu.
+5. Review code dùng seat của Code Reviewer phụ trách yêu cầu (chủ dự án bổ sung vai trò này).
 6. Thông báo chỉ trong ứng dụng; không email.
-7. Mã yêu cầu theo dự án: `<KEY>-NNN`.
+7. Mã yêu cầu do PM nhập (duy nhất trong dự án, 1–40 ký tự `A-Za-z0-9._-`, không trùng nhánh git hiện có), gợi ý mặc định `<KEY>-NNN`; mã dùng làm tên nhánh `devflow/<mã>` và thư mục worktree.
 8. Bỏ đăng nhập mật khẩu ở server mode, giữ một tài khoản khẩn cấp.
 9. Trạng thái mới `awaiting_seat` khi seat của người phụ trách chưa kết nối/hết hạn.
 
@@ -116,7 +119,7 @@ Theo trang Legal & compliance của Claude Code: OAuth của gói Team dành cho
 3. **Spike trước tiên**: task đầu của kế hoạch là spike kiểm chứng `claude auth login|status|logout` chạy được trong pseudo-terminal dưới một user không có shell đăng nhập (in URL, nhận mã dán). Nếu không được: phương án dự phòng là trang hướng dẫn + lệnh `sudo dfctl claude-auth <id> login` do admin mở phiên SSH cùng người dùng; phần còn lại của thiết kế không đổi.
 4. **DEVELOP**: mỗi task có worktree riêng `.devflow/worktrees/<REQ>-<TASK>` trên nhánh `devflow/<REQ>-<TASK>`; các task độc lập (phụ thuộc đã xong) của **những Dev khác nhau** chạy song song (mỗi seat tối đa `SEAT_CONCURRENCY`); merge vào `devflow/<REQ>` được tuần tự hóa bằng khóa theo yêu cầu (MR GitLab như v2 hoặc merge local). MR cuối `devflow/<REQ>` → nhánh mặc định chỉ được mở, con người merge.
 5. **Di chuyển v2**: người chạy `migrate:v3` (admin) thành PM và giữ mọi vai trò của dự án Legacy; các yêu cầu cũ giữ mã `REQ-NNN`; mọi bước của yêu cầu cũ dùng seat của người phụ trách được gán (mặc định là người đó).
-6. **PLANNING bị từ chối**: người từ chối là Dev → chạy lại phần tasks; Tester → chạy lại phần test cases; PM → chọn phần. Tạo yêu cầu bị chặn (thông báo rõ) nếu dự án thiếu thành viên cho một trong các vai trò BA, SE, Dev, Tester.
+6. **PLANNING bị từ chối**: người từ chối là Dev → chạy lại phần tasks; Tester → chạy lại phần test cases; PM → chọn phần. Tạo yêu cầu bị chặn (thông báo rõ) nếu dự án thiếu thành viên cho một trong các vai trò BA, SE, Dev, Code Reviewer, Tester.
 7. **Chế độ**: giữ `DEVFLOW_MODE=local|server`; server mode từ chối khởi động nếu không phải Linux hoặc thiếu `dfctl`; DB SQLite v2 được nâng cấp tại chỗ bằng migration.
 8. **Hàng đợi**: FIFO theo seat + giới hạn toàn server; `awaiting_seat` tự chạy lại khi người đó kết nối seat, và kiểm tra lại mỗi 10 phút; trạng thái tạm dừng vì giới hạn subscription hiển thị theo seat trong hộp việc của người đó và trên trang yêu cầu.
 9. **GitLab**: token GitLab dùng chung do admin cấu hình (như v2) để clone/push/tạo MR/issue; token GitLab cá nhân (tùy chọn, như v2) chỉ dùng để ghi tên người trên GitLab. Commit git mang tên/email Google của người phụ trách.
