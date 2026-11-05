@@ -18,7 +18,8 @@ export function streamEvents(repo: Repo, req: FastifyRequest, reply: FastifyRepl
     if (res.writableEnded || res.destroyed) return;
     res.write(`${id !== undefined ? `id: ${id}\n` : ''}event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
   };
-  const all = repo.listEvents(reqId);
+  const lastId = Number.parseInt(String(req.headers['last-event-id'] ?? ''), 10);
+  const all = repo.listEvents(reqId, Number.isFinite(lastId) && lastId > 0 ? lastId : 0);
   for (const e of all.slice(-200)) send('log', { id: e.id, ts: e.ts, level: e.level, message: e.message }, e.id);
   const onEvent = (e: { requestId: string; id: number; ts: number; level: string; message: string }) => {
     if (e.requestId === reqId) send('log', { id: e.id, ts: e.ts, level: e.level, message: e.message }, e.id);

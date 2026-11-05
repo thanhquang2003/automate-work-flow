@@ -18,10 +18,10 @@ const PUBLIC_PATHS = ['/login', '/setup'];
 const MAX_UPLOAD = 50 * 1024 * 1024;
 
 export async function buildServer(cfg: Config, deps: WebDeps): Promise<FastifyInstance> {
-  const app = Fastify({ logger: false, bodyLimit: MAX_UPLOAD });
+  const app = Fastify({ logger: false, bodyLimit: 210 * 1024 * 1024 });
   await app.register(cookie);
   await app.register(formbody);
-  await app.register(multipart, { limits: { fileSize: MAX_UPLOAD, files: 30, fields: 50 } });
+  await app.register(multipart, { limits: { fileSize: cfg.maxUploadBytes ?? MAX_UPLOAD, files: 30, fields: 50 } });
   await app.register(fastifyStatic, { root: `${ROOT}public`, prefix: '/static/' });
 
   const server = cfg.mode === 'server';
@@ -29,7 +29,7 @@ export async function buildServer(cfg: Config, deps: WebDeps): Promise<FastifyIn
   app.addHook('onRequest', async (req, reply) => {
     const path = req.url.split('?')[0]!;
     const isPublic = PUBLIC_PREFIXES.some(p => path.startsWith(p)) || PUBLIC_PATHS.includes(path);
-    if (req.method === 'POST' && !path.startsWith('/s/') && !sameOrigin(req, server)) {
+    if (req.method === 'POST' && !path.startsWith('/s/') && !sameOrigin(req, server, cfg.publicBaseUrl)) {
       return reply.code(403).type('text/html; charset=utf-8').send(render('error', { mode: cfg.mode, title: 'Bị từ chối' }, { code: 403, message: 'Yêu cầu bị từ chối (sai nguồn gốc).' }));
     }
     if (!server) { req.user = currentUser(cfg, deps.repo, req); return; }

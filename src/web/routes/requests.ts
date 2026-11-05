@@ -49,7 +49,7 @@ export function safeJoin(root: string, rel: string): string | undefined {
 
 const cleanName = (n: string): string => {
   const b = basename(n.replace(/\\/g, '/')).replace(/[^\w.\- ()À-ỹ]/g, '_').replace(/^\.+/, '_');
-  return b || 'file';
+  return /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(b.replace(/\..*$/, '')) ? `${b}_` : b || 'file';
 };
 
 export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline }: WebDeps): void {

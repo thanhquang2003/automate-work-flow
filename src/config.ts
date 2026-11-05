@@ -13,6 +13,8 @@ export interface Config {
   publicBaseUrl: string;
   gitlab: { url: string; token: string; defaultGroup: string };
   rateLimitPauseMin: number;
+  /** Per-file upload cap in bytes (default 50MB); overridable for tests. */
+  maxUploadBytes?: number;
 }
 
 type Env = Record<string, string | undefined>;

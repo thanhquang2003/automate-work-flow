@@ -48,8 +48,12 @@ export function currentUser(cfg: Config, repo: Repo, req: FastifyRequest): Sessi
 }
 
 /** CSRF defence in depth: a POST must come from the same host (Origin, else Referer). */
-export function sameOrigin(req: FastifyRequest, required: boolean): boolean {
+export function sameOrigin(req: FastifyRequest, required: boolean, publicBaseUrl = ''): boolean {
   const src = (req.headers.origin as string | undefined) || (req.headers.referer as string | undefined);
   if (!src) return !required;
-  try { return new URL(src).host === req.headers.host; } catch { return false; }
+  try {
+    const h = new URL(src).host;
+    if (h === req.headers.host) return true;
+    return publicBaseUrl !== '' && h === new URL(publicBaseUrl).host;
+  } catch { return false; }
 }

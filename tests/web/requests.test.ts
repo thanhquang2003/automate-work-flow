@@ -239,3 +239,76 @@ describe('web: server mode', () => {
   });
 });
 
+
+describe('web: fix round 1', () => {
+  const form = { 'content-type': 'application/x-www-form-urlencoded', origin: 'http://localhost:3000', host: 'localhost:3000' };
+
+  it('login rate limit: 10 failures per ip+username then 429; success path unaffected for others', async () => {
+    const { app, repo } = await boot(true);
+    repo.createUser({ username: 'admin', passwordHash: hashPassword('password123'), role: 'admin' });
+    for (let i = 0; i < 10; i++) {
+      expect((await app.inject({ method: 'POST', url: '/login', payload: 'username=admin&password=bad', headers: form })).statusCode).toBe(401);
+    }
+    const blocked = await app.inject({ method: 'POST', url: '/login', payload: 'username=admin&password=password123', headers: form });
+    expect(blocked.statusCode).toBe(429);
+    expect(blocked.body).toContain('Quá nhiều lần đăng nhập sai, thử lại sau');
+    // unknown users are counted too (and answer 401 like a wrong password)
+    const ghost = await app.inject({ method: 'POST', url: '/login', payload: 'username=ghost&password=x', headers: form });
+    expect(ghost.statusCode).toBe(401);
+    expect(ghost.body).toContain('Sai tên đăng nhập hoặc mật khẩu');
+  });
+
+  it('CSRF accepts publicBaseUrl host (reverse proxy) as well as Host', async () => {
+    const s = setup({ mode: 'server', secretKey: 'test-secret', publicBaseUrl: 'https://devflow.example.com' });
+    const app = await buildServer(s.cfg, { repo: s.repo, pipeline: s.pipeline });
+    apps.push(app);
+    const u = s.repo.createUser({ username: 'admin', passwordHash: hashPassword('password123'), role: 'admin' });
+    const cookie = `devflow_sid=${signSession(s.cfg.secretKey, u.id)}`;
+    const r = mkReq(s.repo);
+    const viaProxy = await app.inject({ method: 'POST', url: `/requests/${r.id}/pause`, headers: { cookie, origin: 'https://devflow.example.com', host: 'internal:3700' } });
+    expect(viaProxy.statusCode).toBe(302);
+    const evil = await app.inject({ method: 'POST', url: `/requests/${r.id}/pause`, headers: { cookie, origin: 'https://evil.example.com', host: 'internal:3700' } });
+    expect(evil.statusCode).toBe(403);
+  });
+
+  it('single file over the per-file limit returns 413 and creates nothing', async () => {
+    const s = setup({ maxUploadBytes: 1024 });
+    const app = await buildServer(s.cfg, { repo: s.repo, pipeline: s.pipeline });
+    apps.push(app);
+    const m = multipart([['title', 't'], ['description', 'd']], [{ name: 'files', filename: 'big.bin', content: 'x'.repeat(1025) }]);
+    const res = await app.inject({ method: 'POST', url: '/requests', ...m });
+    expect(res.statusCode).toBe(413);
+    expect(res.body).toContain('50MB');
+    expect(s.repo.listRequests()).toHaveLength(0);
+  });
+
+  it('SSE honours Last-Event-ID', async () => {
+    const { app, repo } = await boot();
+    const r = mkReq(repo);
+    const e1 = repo.addEvent(r.id, 'info', 'một');
+    repo.addEvent(r.id, 'info', 'hai');
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    const port = (app.server.address() as { port: number }).port;
+    const text = await new Promise<string>((resolve, reject) => {
+      const req = get({ host: '127.0.0.1', port, path: `/requests/${r.id}/events`, headers: { 'last-event-id': String(e1.id) } }, res => {
+        res.setEncoding('utf8');
+        let acc = '';
+        res.on('data', (c: string) => { acc += c; if (acc.includes('hai')) { req.destroy(); resolve(acc); } });
+      });
+      req.on('error', () => undefined);
+      setTimeout(() => reject(new Error('timeout')), 4000);
+    });
+    expect(text).toContain('hai');
+    expect(text).not.toContain('một');
+  });
+
+  it('Windows reserved upload names are suffixed', async () => {
+    const { app, repo } = await boot();
+    const m = multipart([['title', 't'], ['description', 'd']], [
+      { name: 'files', filename: 'CON.txt', content: 'a' }, { name: 'files', filename: 'nul', content: 'b' }, { name: 'files', filename: 'com1.log', content: 'c' }, { name: 'files', filename: 'console.txt', content: 'd' },
+    ]);
+    await app.inject({ method: 'POST', url: '/requests', ...m });
+    const names = repo.listAttachments(repo.listRequests()[0]!.id).map(a => a.filename).sort();
+    expect(names).toEqual(['CON.txt_', 'com1.log_', 'console.txt', 'nul_']);
+  });
+});
