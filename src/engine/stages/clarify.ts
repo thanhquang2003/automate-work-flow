@@ -1,4 +1,5 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { safeWriteFile } from '../safe-fs.js';
+import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { exportQuestions } from '../../office/questions-xlsx.js';
 import type { StageContext, StageOutcome } from '../pipeline.js';
@@ -27,7 +28,7 @@ async function ask(ctx: StageContext): Promise<StageOutcome> {
   const dir = join(ws.artifactsDir, 'questions');
   mkdirSync(dir, { recursive: true });
   const file = join(dir, questionsFileName(req.id, round, req.baselineVersion));
-  writeFileSync(file, await exportQuestions(req.id, round, open, repo.latestAnswers(req.id)));
+  safeWriteFile(file, await exportQuestions(req.id, round, open, repo.latestAnswers(req.id)));
   ctx.log(`Đã xuất ${open.length} câu hỏi vòng ${round} ra ${file}. Gửi file cho khách hàng rồi tải lên file đã trả lời.`);
 
   if (cfg.mode === 'server') {

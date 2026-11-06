@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
+import { safeReadText, safeWriteFile } from '../safe-fs.js';
 import { basename, join, relative } from 'node:path';
 import type { StageContext, StageOutcome } from '../pipeline.js';
 import {
@@ -40,7 +41,7 @@ export async function writeReport(ctx: StageContext): Promise<string> {
   const tcNote = (tc: (typeof allTcs)[number]): string =>
     tc.scopeStatus === 'cancelled' ? [`Hủy theo ${tc.changedByCr ?? '?'}`, tc.comment ?? ''].filter(Boolean).join(' — ') : (tc.comment ?? '');
   const docRel = (p: string): string => relative(ws.root, p).replace(/\\/g, '/');
-  const assumptions: AssumptionEntry[] = existsSync(assumptionsPath(ws)) ? JSON.parse(readFileSync(assumptionsPath(ws), 'utf8')) : [];
+  const assumptions: AssumptionEntry[] = existsSync(assumptionsPath(ws)) ? JSON.parse(safeReadText(assumptionsPath(ws))) : [];
   const bugs = repo.listBugs(req.id);
   const tasks = repo.listTasks(req.id).filter(t => t.scopeStatus === 'active');
   const changes = iterationChanges(ctx);
@@ -94,8 +95,7 @@ export async function writeReport(ctx: StageContext): Promise<string> {
     '',
   ];
   const out = join(ws.artifactsDir, 'report.md');
-  mkdirSync(ws.artifactsDir, { recursive: true });
-  writeFileSync(out, lines.join('\n'), 'utf8');
+  safeWriteFile(out, lines.join('\n'));
   return out;
 }
 

@@ -1,5 +1,6 @@
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
-import { appendFileSync } from 'node:fs';
+import { closeSync, writeSync } from 'node:fs';
+import { safeOpenAppend } from '../engine/safe-fs.js';
 import type { Config } from '../config.js';
 import { runMock } from './mock.js';
 
@@ -211,9 +212,12 @@ export function runClaudeCommand(cfg: Pick<Config, 'rateLimitPauseMin'>, opts: R
     let settleTimer: NodeJS.Timeout | undefined;
     let unsettled = false;
 
+    // The log folder can be seat-writable: open once, refusing symlinks/hard links; the fd stays bound to that file.
+    let logFd: number | undefined;
+    if (opts.logFile) { try { logFd = safeOpenAppend(opts.logFile); } catch { /* no log rather than a redirected one */ } }
     const handleLine = (line: string) => {
       if (!line.trim()) return;
-      if (opts.logFile) { try { appendFileSync(opts.logFile, line + '\n'); } catch { /* ignore */ } }
+      if (logFd !== undefined) { try { writeSync(logFd, line + '\n'); } catch { /* ignore */ } }
       let ev: any;
       try { ev = JSON.parse(line); } catch { if (plain.length < 20000) plain += line + '\n'; return; }
       if (ev.type === 'system' && ev.subtype === 'init' && typeof ev.session_id === 'string') sessionId = ev.session_id;
@@ -261,6 +265,7 @@ export function runClaudeCommand(cfg: Pick<Config, 'rateLimitPauseMin'>, opts: R
       if (settleTimer) clearTimeout(settleTimer);
       opts.signal?.removeEventListener('abort', onAbort);
       if (buf.trim()) handleLine(buf);
+      if (logFd !== undefined) { try { closeSync(logFd); } catch { /* ignore */ } logFd = undefined; }
       if (aborted) return resolve({ ok: false, aborted: true, sessionId, resultText, error: 'aborted', exitCode: code, ...(unsettled ? { settledWithoutExit: true } : {}) });
       const failedRun = !sawResult || !!isError;
       const failText = `${isError ? resultText : ''}\n${plain}\n${stderr}`;

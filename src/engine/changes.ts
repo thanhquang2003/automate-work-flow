@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { safeReadText } from './safe-fs.js';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Repo } from '../db/repo.js';
 import { ImpactOut, STAGES, type ChangeRequestRow, type ImpactOutT, type RequestRow, type RequestStatus, type Stage } from '../domain/types.js';
@@ -20,7 +21,7 @@ export function loadImpact(ws: Workspace, crId: string): ImpactOutT | undefined 
   const p = impactJsonPath(ws, crId);
   if (!existsSync(p)) return undefined;
   try {
-    const r = ImpactOut.safeParse(JSON.parse(readFileSync(p, 'utf8')));
+    const r = ImpactOut.safeParse(JSON.parse(safeReadText(p)));
     return r.success ? r.data : undefined;
   } catch { return undefined; }
 }

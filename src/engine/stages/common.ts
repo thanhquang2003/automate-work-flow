@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, lstatSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Repo } from '../../db/repo.js';
 import type { AnswerSource, ChangeRequestRow, QuestionRow, TestCaseRow, TestStatus } from '../../domain/types.js';
 import type { GitLabClient } from '../../gitlab/client.js';
@@ -7,6 +7,7 @@ import type { TcSheetRow } from '../../office/testcase-xlsx.js';
 import { changesSection, type PromptExtras, type PromptOutput } from '../prompt.js';
 import type { StageContext } from '../pipeline.js';
 import type { Workspace } from '../workspace.js';
+import { safeIsFile, safeReadText, safeWriteFile } from '../safe-fs.js';
 
 export const MAX_CLARIFY_ROUNDS = 5;
 
@@ -34,7 +35,9 @@ export function listFiles(dir: string): string[] {
   const out: string[] = [];
   for (const name of readdirSync(dir).sort()) {
     const p = join(dir, name);
-    if (statSync(p).isDirectory()) out.push(...listFiles(p));
+    const st = lstatSync(p);
+    if (st.isSymbolicLink()) continue; // never follow links planted in seat-writable folders
+    if (st.isDirectory()) out.push(...listFiles(p));
     else out.push(p);
   }
   return out;
@@ -45,9 +48,12 @@ export function fileRef(path: string, fallback: string): string {
   return existsSync(path) ? `\`${path}\`` : fallback;
 }
 
+/** Writes JSON through safe-fs (refuses symlinks/hard links planted in seat-writable folders). */
+/** True for a symlink (even a dangling one): reading it must fail loudly instead of looking like a missing file. */
+export const isLink = (p: string): boolean => !!lstatSync(p, { throwIfNoEntry: false })?.isSymbolicLink();
+
 export function writeJson(path: string, data: unknown): void {
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(data, null, 2) + '\n', 'utf8');
+  safeWriteFile(path, JSON.stringify(data, null, 2) + '\n');
 }
 
 // ---- project info (written by INTAKE, read by later stages) ----
@@ -70,8 +76,8 @@ export function writeProjectInfo(ws: Workspace, info: ProjectInfo): void { write
 
 export function readProjectInfo(ws: Workspace): ProjectInfo | undefined {
   const p = projectFile(ws);
-  if (!existsSync(p)) return undefined;
-  return JSON.parse(readFileSync(p, 'utf8')) as ProjectInfo;
+  if (!existsSync(p) && !isLink(p)) return undefined;
+  return JSON.parse(safeReadText(p)) as ProjectInfo;
 }
 
 /**
@@ -200,9 +206,9 @@ export const scratchDir = (ws: Workspace): string => join(ws.repoDir, SCRATCH_DI
 /** Adds `.devflow-tmp/` to the repo's .gitignore when missing. Returns true when the file changed. */
 export function ensureGitignore(repoDir: string): boolean {
   const p = join(repoDir, '.gitignore');
-  const cur = existsSync(p) ? readFileSync(p, 'utf8') : '';
+  const cur = existsSync(p) || isLink(p) ? safeReadText(p) : '';
   if (cur.split(/\r?\n/).some(l => l.trim() === `${SCRATCH_DIR}/` || l.trim() === SCRATCH_DIR || l.trim() === `/${SCRATCH_DIR}/`)) return false;
-  writeFileSync(p, `${cur}${cur && !cur.endsWith('\n') ? '\n' : ''}${SCRATCH_DIR}/\n`, 'utf8');
+  safeWriteFile(p, `${cur}${cur && !cur.endsWith('\n') ? '\n' : ''}${SCRATCH_DIR}/\n`);
   return true;
 }
 
@@ -257,8 +263,8 @@ const flowFile = (ws: Workspace): string => join(ws.root, 'flow-state.json');
 export function readFlowState(ws: Workspace): FlowState {
   const p = flowFile(ws);
   const empty: FlowState = { runs: {}, issueUrls: {}, reviewRounds: {}, bugSynced: {}, clock: 0, lastFixSeq: 0 };
-  if (!existsSync(p)) return empty;
-  return { ...empty, ...(JSON.parse(readFileSync(p, 'utf8')) as Partial<FlowState>) };
+  if (!existsSync(p) && !isLink(p)) return empty;
+  return { ...empty, ...(JSON.parse(safeReadText(p)) as Partial<FlowState>) };
 }
 
 export function writeFlowState(ws: Workspace, s: FlowState): void { writeJson(flowFile(ws), s); }

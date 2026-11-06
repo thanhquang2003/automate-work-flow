@@ -1,4 +1,5 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { safeWriteFile } from '../safe-fs.js';
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
   CR_REENTER_STAGES, ImpactOut, STAGE_LABELS, type ChangeRequestRow, type CrKind, type ImpactOutT, type Question, type RequestStatus, type Stage,
@@ -70,7 +71,7 @@ function copyCrAttachments(ctx: StageContext, crId: string): string[] {
     const dest = join(dir, name);
     if (resolve(a.path) !== resolve(dest)) {
       if (!existsSync(a.path)) { ctx.log(`Không tìm thấy file đính kèm ${a.filename} của ${crId}`, 'warn'); continue; }
-      copyFileSync(a.path, dest);
+      safeWriteFile(dest, readFileSync(a.path));
     }
     out.push(dest);
   }

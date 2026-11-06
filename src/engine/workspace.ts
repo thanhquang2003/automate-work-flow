@@ -2,6 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { Config } from '../config.js';
 import type { Repo } from '../db/repo.js';
+import { addTrustedRoot } from './safe-fs.js';
 
 /** Minimal request shape needed to locate a workspace. */
 export interface WorkspaceReq { id: string; projectId?: number | null; code?: string | null }
@@ -39,6 +40,8 @@ export class Workspace {
     this.evidenceDir = join(root, 'evidence');
     this.logsDir = join(root, 'logs');
     this.devflowDir = join(this.repoDir, ...o.docsRel.split('/'));
+    // Everything DevFlow writes for this request lies under this folder: safe-fs checks paths from here down.
+    addTrustedRoot(o.projectDir ?? root);
   }
 
   get isProjectRooted(): boolean { return this.projectDir !== undefined; }

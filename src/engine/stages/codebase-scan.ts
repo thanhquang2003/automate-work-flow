@@ -1,4 +1,5 @@
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { safeReadFile, safeWriteFile } from '../safe-fs.js';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { buildPrompt } from '../prompt.js';
 import type { StageContext, StageOutcome } from '../pipeline.js';
@@ -21,8 +22,7 @@ export async function codebaseScan(ctx: StageContext): Promise<StageOutcome> {
 
   // A reviewer rejection means the cached map was not good enough: rescan.
   if (cache && existsSync(cache) && !ctx.feedback) {
-    mkdirSync(ctx.ws.devflowDir, { recursive: true });
-    copyFileSync(cache, out);
+    safeWriteFile(out, readFileSync(cache));
     ctx.log(`Dùng lại bản đồ mã nguồn đã quét cho commit ${sha.slice(0, 8)}`);
     return { kind: 'next' };
   }
@@ -42,7 +42,7 @@ export async function codebaseScan(ctx: StageContext): Promise<StageOutcome> {
   if (!r.ok) return { kind: 'fail', error: r.error };
   if (cache) {
     mkdirSync(dirname(cache), { recursive: true });
-    copyFileSync(out, cache);
+    writeFileSync(cache, safeReadFile(out));
   }
   ctx.log('Đã tạo bản đồ mã nguồn docs/devflow/codebase-map.md');
   return { kind: 'next' };

@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
-import { readFile, rm } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
+import { UnsafePathError, safeReadText } from '../safe-fs.js';
 import { z } from 'zod';
 import type { StageContext } from '../pipeline.js';
 
@@ -13,10 +14,20 @@ export class OutputError extends Error {
 
 export const MAX_SCHEMA_RETRIES = 2;
 
+/** Reads a file Claude wrote, refusing symlinks (a seat could otherwise make DevFlow read any file it can). */
+function readOutput(path: string): string {
+  try {
+    return safeReadText(path);
+  } catch (e) {
+    if (e instanceof UnsafePathError) throw new OutputError(`File ${path} không hợp lệ (symlink hoặc không phải file thường): ${e.message}`);
+    if (!existsSync(path)) throw new OutputError(`Không tìm thấy file ${path}`);
+    throw e;
+  }
+}
+
 /** Reads and parses a JSON file Claude was asked to write, validating it with a zod schema. */
 export async function readJsonOutput<S extends z.ZodType>(path: string, schema: S): Promise<z.infer<S>> {
-  if (!existsSync(path)) throw new OutputError(`Không tìm thấy file ${path}`);
-  let raw = await readFile(path, 'utf8');
+  let raw = readOutput(path);
   raw = raw.replace(/^\uFEFF/, '').trim();
   // Tolerate a markdown fence around the JSON.
   const fence = /^```(?:json)?\s*\n([\s\S]*?)\n```$/.exec(raw);
@@ -34,8 +45,7 @@ export async function readJsonOutput<S extends z.ZodType>(path: string, schema: 
 
 /** Reads a markdown/text output; it must exist and have at least `minChars` non-blank characters. */
 export async function readTextOutput(path: string, minChars = 1): Promise<string> {
-  if (!existsSync(path)) throw new OutputError(`Không tìm thấy file ${path}`);
-  const text = (await readFile(path, 'utf8')).replace(/^\uFEFF/, '');
+  const text = readOutput(path).replace(/^\uFEFF/, '');
   if (text.trim().length < minChars) throw new OutputError(`File ${path} rỗng hoặc quá ngắn`);
   return text;
 }

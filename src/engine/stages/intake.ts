@@ -1,4 +1,5 @@
-import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { safeWriteFile } from '../safe-fs.js';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { extname, join, resolve } from 'node:path';
 import { GitLabError, type GlProject } from '../../gitlab/client.js';
 import { gitlabToken, type StageContext, type StageOutcome } from '../pipeline.js';
@@ -30,7 +31,7 @@ function copyAttachments(ctx: StageContext): number {
     const dest = join(ctx.ws.inputsDir, name);
     if (resolve(a.path) === resolve(dest)) { n++; continue; }
     if (!existsSync(a.path)) { ctx.log(`Không tìm thấy file đính kèm ${a.filename}`, 'warn'); continue; }
-    copyFileSync(a.path, dest);
+    safeWriteFile(dest, readFileSync(a.path));
     n++;
   }
   return n;

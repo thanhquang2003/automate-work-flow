@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
+import { safeWriteFile } from '../safe-fs.js';
 import { join } from 'node:path';
 import type { z } from 'zod';
 import { ReviewOut } from '../../domain/types.js';
@@ -161,9 +162,7 @@ export async function developAndReview(ctx: StageContext, w: WorkItem): Promise<
       await gl.client.addMRNote(gl.pid, mr.iid, md);
     } else {
       const rel = `${ctx.ws.docsRel}/reviews/${w.key}-r${round}.md`;
-      const p = join(ws.repoDir, ...rel.split('/'));
-      mkdirSync(join(p, '..'), { recursive: true });
-      writeFileSync(p, `# Review ${w.kind}\n\n${md}`, 'utf8');
+      safeWriteFile(join(ws.repoDir, ...rel.split('/')), `# Review ${w.kind}\n\n${md}`);
       await ctx.git.commitPaths([rel], `docs(devflow): review ${w.key} vòng ${round}`);
     }
     ctx.log(`Review ${w.kind} vòng ${round}: ${isApproved(last) ? 'đạt' : `chưa đạt (${last.comments.length} nhận xét)`}`);

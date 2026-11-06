@@ -1,3 +1,4 @@
+import { prepareWrite } from '../safe-fs.js';
 import { rmSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { TestResultsOut, type SoftwareType, type TestCaseRow } from '../../domain/types.js';
@@ -345,7 +346,9 @@ export async function test(ctx: StageContext): Promise<StageOutcome> {
     if (await commitTesterOutput(ctx, baseline, `test(devflow): ${req.id} kết quả kiểm thử lần ${runLabel}`)) await pushIfRemote(ctx, branch);
     p = plan(ctx, active, state);
   }
-  await writeTestCases(templatePath(ctx.cfg, 'testcase'), sortedTestCases(repo, req.id).map(tcSheetRow), join(ws.artifactsDir, artifactName('TestCase', ctx.ws.key, ctx.baseline)));
+  const tcOut = join(ws.artifactsDir, artifactName('TestCase', ctx.ws.key, ctx.baseline));
+  prepareWrite(tcOut);
+  await writeTestCases(templatePath(ctx.cfg, 'testcase'), sortedTestCases(repo, req.id).map(tcSheetRow), tcOut);
 
   if (p.kind === 'bugfix') {
     ctx.log(`Còn ${p.failing.length} test case F: ${p.failing.join(', ')} → sửa lỗi`, 'warn');

@@ -1,4 +1,5 @@
-import { cpSync, existsSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, rmSync } from 'node:fs';
+import { safeCopyTree } from './safe-fs.js';
 import { join } from 'node:path';
 import type { z } from 'zod';
 import type { TestResultSchema } from '../domain/types.js';
@@ -13,13 +14,15 @@ export const safeTcId = (id: string): boolean => /^[\w.-]+$/.test(id) && !id.inc
 
 /** Files under a directory, relative to it with forward slashes (recursive, sorted). Empty when missing. */
 export function evidenceFiles(dir: string): string[] {
-  if (!existsSync(dir) || !statSync(dir).isDirectory()) return [];
+  if (!existsSync(dir) || !lstatSync(dir).isDirectory()) return [];
   const out: string[] = [];
   const walk = (d: string, prefix: string): void => {
     for (const name of readdirSync(d).sort()) {
       const p = join(d, name);
-      if (statSync(p).isDirectory()) walk(p, `${prefix}${name}/`);
-      else out.push(`${prefix}${name}`);
+      const st = lstatSync(p);
+      if (st.isSymbolicLink()) continue; // seat-planted links are never followed or copied
+      if (st.isDirectory()) walk(p, `${prefix}${name}/`);
+      else if (st.isFile()) out.push(`${prefix}${name}`);
     }
   };
   walk(dir, '');
@@ -56,6 +59,5 @@ export function copyEvidence(evidenceDir: string, artifactsDir: string, tcId: st
   rmSync(dest, { recursive: true, force: true });
   const files = evidenceFiles(src);
   if (!files.length) return [];
-  cpSync(src, dest, { recursive: true });
-  return files.map(f => `evidence/${tcId}/${f}`);
+  return safeCopyTree(src, dest).map(f => `evidence/${tcId}/${f}`);
 }

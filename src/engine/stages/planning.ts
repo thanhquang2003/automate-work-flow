@@ -1,3 +1,4 @@
+import { prepareWrite } from '../safe-fs.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { z } from 'zod';
@@ -208,6 +209,7 @@ export async function planning(ctx: StageContext): Promise<StageOutcome> {
       }
     });
     const out = join(ws.artifactsDir, artifactName('TestCase', ctx.ws.key, ctx.baseline));
+    prepareWrite(out);
     await writeTestCases(templatePath(ctx.cfg, 'testcase'), sortedTestCases(repo, req.id).map(tcSheetRow), out);
     const active = <T extends { scopeStatus: string }>(xs: T[]): number => xs.filter(x => x.scopeStatus === 'active').length;
     ctx.log(`Đã cập nhật kế hoạch: ${active(m.tasks)} task, ${active(m.tcs)} test case còn hiệu lực (giữ lịch sử kiểm thử); xuất ${out}`);
@@ -230,6 +232,7 @@ export async function planning(ctx: StageContext): Promise<StageOutcome> {
   updateFlowState(ws, s => { s.runs = {}; s.issueUrls = {}; s.bugSynced = {}; s.lastFixSeq = 0; });
 
   const out = join(ws.artifactsDir, artifactName('TestCase', ctx.ws.key, ctx.baseline));
+  prepareWrite(out);
   await writeTestCases(templatePath(ctx.cfg, 'testcase'), sortedTestCases(repo, req.id).map(tcSheetRow), out);
   ctx.log(`Đã lập ${taskRows.length} task, ${tcRows.length} test case; xuất ${out}`);
   await commitPlan(ctx);
