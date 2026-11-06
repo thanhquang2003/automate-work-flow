@@ -86,7 +86,9 @@ export function changeRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
 
       let crId: string;
       try {
-        crId = pipeline.submitChange(id, { title: title.slice(0, 300), description, kind, createdBy: req.user?.id ?? null }, cfg.mode === 'server' ? (req.user?.id ?? null) : undefined).id;
+        const input = { title: title.slice(0, 300), description, kind, createdBy: req.user?.id ?? null };
+        // Server mode passes the acting person so the engine checks the right; local mode keeps the v2 call.
+        crId = (cfg.mode === 'server' ? pipeline.submitChange(id, input, req.user?.id ?? null) : pipeline.submitChange(id, input)).id;
       } catch (e) {
         if (e instanceof PermissionError) return forbidPage(cfg, req, reply, e.message);
         return back(reply, id, 'changes', msgOf(e));
