@@ -275,11 +275,12 @@ export class ProjectService {
 
   /**
    * After an admin disabled (or re-enabled) a user: the Linux group of every project they belong to is set to the
-   * project's enabled members, so a disabled seat loses (or regains) file access. Errors are collected per project.
+   * project's enabled members, so a disabled seat loses (or regains) file access. Archived projects included (their
+   * folders and groups still exist). Errors are collected per project.
    */
   async syncUserGroups(userId: number): Promise<{ projectId: number; error: string }[]> {
     const failed: { projectId: number; error: string }[] = [];
-    for (const p of this.repo.listProjects()) {
+    for (const p of this.repo.listProjects({ includeArchived: true })) {
       if (!this.repo.getProjectMember(p.id, userId)) continue;
       try {
         await this.systemOps.setMembers(p.id, enabledMemberIds(this.repo, p.id));
