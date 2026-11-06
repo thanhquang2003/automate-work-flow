@@ -1,12 +1,11 @@
-# DevFlow — Ghi chú bàn giao (cập nhật 2026-11-06)
+# DevFlow — Ghi chú bàn giao (cập nhật 2026-11-07, sau Task 8)
 
 ## 1. Trạng thái hiện tại
-- Repo: `D:\source\automationWorkFlow\devflow` · remote `origin` = GitHub `thanhquang2003/automate-work-flow`.
-- `main` = **v2** (tag `v2`, commit `56a0931`) — đã push lên GitHub. Tag `v1` = `56d28b8`.
-- Nhánh đang làm: **`feat/v3-multiuser`** (chưa push) — mới có tài liệu, **chưa có code v3**:
-  - Thiết kế: `docs/superpowers/specs/2026-11-06-v3-multiuser-projects-design.md` (đã được chủ dự án duyệt)
-  - Kế hoạch: `docs/superpowers/plans/2026-11-06-v3-multiuser.md` (7 task, đã được duyệt)
-- Test hiện tại trên `main`: 300/300 pass, build OK.
+- Nhánh làm việc: `feat/v3-multiuser` (chưa push; chủ dự án tự push). Task 8 làm trên `feat/FEAT-008`, merge fast-forward vào `feat/v3-multiuser`. `main` vẫn là **v2** (tag `v2`, commit `56a0931`).
+- **Code v3 đã xong toàn bộ (Task 1-8)**: mô hình dữ liệu, quyền hạn và Google SSO, dự án/thành viên/worktree, dfctl + SeatRunner + đăng nhập seat, engine (seat, duyệt theo vai, đổi người chạy, task song song), web, khu vực giám sát, và E2E `tests/e2e/v3-multiuser.test.ts` + tài liệu triển khai.
+- **Chưa làm được ở máy phát triển (chỉ VPS)**: mọi thứ cần root hoặc Claude thật. Danh sách kiểm tra đầy đủ: `docs/deploy-vps.md` mục 9. Phải chạy `sudo scripts/spike-claude-login.sh --cleanup` và bước 8, 9 của spike (`--seat <id> --worktree <đường dẫn>`) trước khi bật seat cho người dùng thật.
+- Thiết kế: `docs/superpowers/specs/2026-11-06-v3-multiuser-projects-design.md` (gốc) và `docs/superpowers/specs/2026-11-07-v3-roles-and-lah-delta-design.md` (thắng khi mâu thuẫn). Kế hoạch: `docs/superpowers/plans/2026-11-07-v3-implementation.md`.
+- Hợp nhất lên `main` và gắn tag v3 chỉ làm sau khi kiểm tra VPS đạt.
 
 ## 2. Các phiên bản đã có
 - **v1** (`docs/superpowers/specs/2026-11-04-devflow-design.md`): quy trình tự động Tiếp nhận → Đọc hiểu dự án → Phân tích → Làm rõ (Excel + web khảo sát) → Bóc tách (ULNL) → Thiết kế (TKCT/TKDB) → Kế hoạch & Test case → Phát triển + review (MR GitLab) → Kiểm thử + evidence → Sửa lỗi (≤3 lần) → Hoàn thành (MR cuối không merge).
@@ -24,11 +23,12 @@
 - Phương án thay thế: API key Console của công ty (được phép cho người dùng nội bộ, trả theo token).
 - Nên xác nhận với Anthropic sales về mô hình máy chủ dùng chung. Nguồn: https://code.claude.com/docs/en/legal-and-compliance , https://code.claude.com/docs/en/authentication , https://claude.com/pricing
 
-## 5. Cách tiếp tục (phiên Claude Code mới)
-1. `cd D:\source\automationWorkFlow\devflow && git checkout feat/v3-multiuser`
-2. Yêu cầu Claude: *"Đọc docs/HANDOFF.md, rồi triển khai kế hoạch docs/superpowers/plans/2026-11-06-v3-multiuser.md bằng /superpowers:subagent-driven-development"*.
-3. Quy trình đã dùng cho v1/v2: mỗi task một subagent cài đặt (TDD) → reviewer độc lập → sửa → review tổng thể cuối → merge vào `main` → tag.
-4. Sau khi xong: chạy `scripts/spike-claude-login.sh` trên VPS Linux để kiểm chứng đăng nhập seat (máy Windows hiện tại không kiểm thử được phần Linux/sudo).
+## 5. Cách tiếp tục
+1. Đọc `docs/deploy-vps.md` (triển khai, rủi ro còn lại, danh sách kiểm tra VPS) và `docs/v3-release-notes.md`.
+2. Trên VPS: `scripts/install-server.sh` rồi spike (mục 9 của deploy-vps.md). Nếu spike hỏng thì dùng phương án dự phòng trong spec 6b.3 (admin chạy `dfctl claude-auth <id> login` qua SSH).
+3. Sửa những điều spike phát hiện (mẫu nhận diện lỗi seat, dạng `forceLoginOrgUUID`, quyền file trong `.git`), thêm test hồi quy cho mỗi lỗi.
+4. Khi VPS đạt: push nhánh, merge `feat/v3-multiuser` vào `main`, gắn tag.
+5. Quy trình đã dùng cho v1/v2/v3: mỗi task một subagent cài đặt (TDD) → reviewer độc lập → sửa → review tổng thể → merge fast-forward.
 
 ## 6. Lưu ý vận hành
 - Không chạy `npm audit fix --force` (hạ phiên bản exceljs/archiver, làm hỏng build). Lỗ hổng đã xử lý bằng `overrides` trong `package.json`.
@@ -37,11 +37,20 @@
 - Thư mục gốc `D:\source\automationWorkFlow` chứa bộ khung `/lah` cá nhân của chủ dự án — không liên quan DevFlow, không sửa.
 - Mẫu tài liệu công ty gốc: `D:\source\automationWorkFlow\templates\` (bản copy trong `devflow/templates/default/`).
 
-## 7. Tiến độ v3 (cập nhật theo từng task)
-Kế hoạch: `docs/superpowers/plans/2026-11-07-v3-implementation.md` (Task N = FEAT-00N trong `lah status`). Không push/PR; chủ dự án push.
-- FEAT-002 (Task 2: quyền hạn và Google SSO) xong — commit 79a82c3, 6aba3ed.
-- FEAT-003 (Task 3: dự án, thành viên, workspace theo thư mục) xong — commit 5cd4e67.
-- FEAT-004 (Task 4: dfctl, SeatRunner, đăng nhập seat) xong — commits ad52b31..ae3b62b. CẦN kiểm chứng trên VPS: chạy 'sudo scripts/spike-claude-login.sh' (bước 8, 9) trước khi bật seat; xem rủi ro còn lại trong báo cáo Task 4.
-- FEAT-005 (Task 5: engine seat, duyệt theo vai, worktree song song) xong — commits 27994b2..6d98b8b.
-- FEAT-006 (Task 6: web dự án, hộp việc, phân công, seat, quản trị) xong — commits cf31ea5..4e49bb4.
-- FEAT-007 (Task 7: khu vực giám sát cho CTO/trưởng/phó phòng/admin) xong — commits b074be5..d65926e. Bộ lọc log là lớp phòng thủ bổ sung (best-effort); các vai giám sát đọc được log dự án.
+## 7. Tiến độ v3 và ánh xạ hàng đợi lah
+Hàng đợi `lah` (state/feature_list.json): Task N của kế hoạch = `FEAT-00N`.
+
+| Task | Mục | Nội dung | Commit chính |
+|---|---|---|---|
+| 1 | FEAT-001 | Mô hình dữ liệu v3 | d7252ec, 0da8080 |
+| 2 | FEAT-002 | Quyền hạn và Google SSO | 79a82c3, 6aba3ed |
+| 3 | FEAT-003 | Dự án, thành viên, workspace theo thư mục | 5cd4e67 |
+| 4 | FEAT-004 | dfctl, SeatRunner, đăng nhập seat | ad52b31..ae3b62b |
+| 5 | FEAT-005 | Engine: seat, duyệt theo vai, worktree song song | 27994b2..6d98b8b |
+| 6 | FEAT-006 | Web: dự án, hộp việc, phân công, seat, quản trị | cf31ea5..4e49bb4 |
+| 7 | FEAT-007 | Khu vực giám sát | b074be5..d65926e |
+| 8 | FEAT-008 | E2E, tài liệu triển khai, release | xem `git log feat/FEAT-008` |
+
+Báo cáo từng task (kèm rủi ro còn lại): `.superpowers/sdd/2026-11-07-v3-implementation/task-N-report.md`. Không push/PR từ Claude; chủ dự án tự push.
+
+Lỗi tích hợp tìm thấy nhờ E2E (Task 8): một job "dispatcher" của DEVELOP còn tồn trong hàng đợi chạy sau khi yêu cầu đã sang bước khác và kéo yêu cầu quay lại cổng DEVELOP. Đã sửa (bỏ job cũ) kèm test hồi quy trong `tests/engine/v3-parallel.test.ts`.

@@ -10,12 +10,13 @@
 2. [Yêu cầu hệ thống](#yêu-cầu-hệ-thống)
 3. [Cài đặt chạy local](#cài-đặt-chạy-local)
 4. [Cài đặt trên VPS (server mode)](#cài-đặt-trên-vps-server-mode)
-5. [Cấu hình](#cấu-hình)
-6. [Sử dụng](#sử-dụng)
-7. [Mẫu tài liệu](#mẫu-tài-liệu)
-8. [Lưu ý bảo mật](#lưu-ý-bảo-mật)
-9. [Giới hạn subscription](#giới-hạn-subscription)
-10. [Phát triển](#phát-triển)
+5. [DevFlow v3: nhiều người dùng trên VPS dùng chung](#devflow-v3-nhiều-người-dùng-trên-vps-dùng-chung)
+6. [Cấu hình](#cấu-hình)
+7. [Sử dụng](#sử-dụng)
+8. [Mẫu tài liệu](#mẫu-tài-liệu)
+9. [Lưu ý bảo mật](#lưu-ý-bảo-mật)
+10. [Giới hạn subscription](#giới-hạn-subscription)
+11. [Phát triển](#phát-triển)
 
 ## Giới thiệu và quy trình
 
@@ -77,6 +78,8 @@ Mở trình duyệt tại **http://127.0.0.1:3700** (hoặc `http://localhost:37
 
 ## Cài đặt trên VPS (server mode)
 
+> Phần này mô tả cách chạy v2 (một tài khoản Claude, đăng nhập bằng mật khẩu). Với **v3** (nhiều người, Google SSO, mỗi người một seat Claude) hãy làm theo [`docs/deploy-vps.md`](docs/deploy-vps.md); không trộn hai cách.
+
 Dùng một VPS **riêng cho DevFlow** (không phải máy chủ GitLab, xem [Lưu ý bảo mật](#lưu-ý-bảo-mật)).
 
 1. Tạo user riêng, cài Node 24, git, Claude Code; đăng nhập Claude bằng chính user đó và cài plugin superpowers:
@@ -133,6 +136,41 @@ Dùng một VPS **riêng cho DevFlow** (không phải máy chủ GitLab, xem [L�
 
 Ở server mode mọi trang đều cần đăng nhập, **trừ** `/s/*` (khảo sát khách hàng) và `/static/*`.
 
+## DevFlow v3: nhiều người dùng trên VPS dùng chung
+
+v3 cho hai phòng ban (**DEV** và **SGLOBAL**) làm việc trên cùng một VPS: đăng nhập Google bằng email công ty, mỗi dự án là một thư mục git, nhiều yêu cầu chạy song song (mỗi yêu cầu và mỗi task một git worktree riêng), và **mỗi lần gọi Claude chạy bằng seat Claude Team của chính người phụ trách bước đó**. Hướng dẫn triển khai: [`docs/deploy-vps.md`](docs/deploy-vps.md). Thay đổi so với v2: [`docs/v3-release-notes.md`](docs/v3-release-notes.md).
+
+### Vai trò
+
+- **Vai trò hệ thống:** `admin` (cấu hình, đổi vai trò, không có quyền dự án nếu không là thành viên), `cto` (xem cả hai phòng), `head` (trưởng phòng) và `deputy` (phó phòng) thuộc đúng một phòng, `member`. Cờ độc lập `can_be_pm`: trưởng/phó phòng bật cho người trong phòng mình để người đó được tạo dự án.
+- **Vai trò dự án:** `PM`, `BA`, `SE`, `DEV`, `REVIEWER`, `TESTER`; một vai trò có thể có nhiều người (người đứng đầu danh sách là người chạy Claude, một người duyệt là đủ, một người từ chối là trả lại bước). Thành viên dự án chỉ lấy từ phòng của dự án.
+
+### Bước, người chạy và người duyệt
+
+| Bước | Seat chạy Claude | Người duyệt |
+|---|---|---|
+| CODEBASE_SCAN | SE | SE |
+| ANALYSIS | BA | BA |
+| CLARIFY | (không chạy) | BA trả lời, PM cũng được |
+| BREAKDOWN | BA | BA |
+| DESIGN | SE | SE |
+| PLANNING | DEV (task) và TESTER (test case) | chỉ PM |
+| DEVELOP | DEV được giao task; REVIEWER review | REVIEWER |
+| TEST | TESTER | không có cổng |
+| BUGFIX | DEV của task có chức năng lỗi; REVIEWER review | không có cổng |
+| CHANGE | BA phân tích | PM quyết định từng CR |
+| DONE | (không chạy) | chỉ PM |
+
+PM duyệt được mọi cổng. Mọi kiểm tra quyền làm ở phía máy chủ và mọi thao tác ghi đều vào `audit_log`.
+
+### Khu vực giám sát (chỉ đọc)
+
+CTO, trưởng/phó phòng (phòng mình) và admin vào **Giám sát**: người dùng và công việc từng người, dự án, tiến độ, điểm nghẽn (chờ seat, bị từ chối chờ sửa, chờ khách trả lời, CR chờ PM, lỗi, bug quá số lần sửa), nội dung dự án (tài liệu, mã nguồn, log). File `.env*`, `*.pem`, `*.key`, `.claude/`, `.git/` không hiển thị, log được lọc bí mật theo kiểu best-effort, và mỗi lần xem nội dung được ghi vào audit.
+
+### Mô hình seat
+
+Mỗi người dùng có tài khoản Linux riêng `dfu-<id>`; DevFlow chạy binary `claude` nguyên bản dưới tài khoản đó qua `sudo -n dfctl` (script đặc quyền duy nhất, do root cài). Người dùng tự kết nối seat ở trang **Claude của tôi**; DevFlow không đọc, lưu hay ghi log thông tin đăng nhập Claude. Seat hết hạn giữa chừng thì yêu cầu chuyển `awaiting_seat` và chạy tiếp sau khi người đó kết nối lại. Đổi người chạy hoặc gỡ thành viên giữa chừng thì lần chạy hiện tại dừng (không tính là lỗi hay lần thử lại) và bước chạy lại bằng seat của người mới.
+
 ## Cấu hình
 
 Cấu hình qua biến môi trường (hoặc file `.env`); xem [`.env.example`](.env.example). GitLab URL/token, group mặc định và số job song song còn có thể đặt trong trang **Cài đặt** (giá trị trong trang Cài đặt ghi đè biến môi trường). `CLAUDE_BIN` **chỉ** đặt qua biến môi trường (lệnh này được thực thi trên máy chủ nên không cho sửa từ giao diện web).
@@ -147,7 +185,7 @@ Cấu hình qua biến môi trường (hoặc file `.env`); xem [`.env.example`]
 | `CLAUDE_BIN` | `claude` | Lệnh Claude Code; chỉ đặt qua biến môi trường. Trên VPS (systemd) dùng đường dẫn đầy đủ, ví dụ `/opt/devflow/.local/bin/claude`. Trên Windows có thể trỏ thẳng tới file `.cmd` |
 | `CLAUDE_BIN_ARGS` | (trống) | Tham số đặt trước tham số của claude (JSON mảng hoặc cách nhau bằng dấu cách); chủ yếu cho kiểm thử |
 | `CLAUDE_MOCK` | `0` | `1` = dùng Claude giả lập (chỉ cho kiểm thử, không dùng khi chạy thật) |
-| `MAX_CONCURRENT_JOBS` | `1` (local) / `2` (server) | Số job Claude chạy đồng thời |
+| `MAX_CONCURRENT_JOBS` | `1` (local) / `4` (server) | Số job Claude chạy đồng thời |
 | `SURVEY_TTL_DAYS` | `14` | Số ngày link khảo sát còn hiệu lực |
 | `PUBLIC_BASE_URL` | `http://localhost:<PORT>` (local) | URL công khai, dùng cho link khảo sát và kiểm tra Origin. **Bắt buộc** ở server mode |
 | `GITLAB_URL` | (trống) | Địa chỉ GitLab, ví dụ `https://gitlab.example.com` |
@@ -157,6 +195,13 @@ Cấu hình qua biến môi trường (hoặc file `.env`); xem [`.env.example`]
 | `STAGE_TIMEOUT_MIN` | `120` | Thời gian tối đa (phút) cho một lần chạy Claude; quá hạn thì DevFlow dừng tiến trình Claude và coi lần chạy đó là lỗi (bước bị lỗi thì bấm **Chạy lại bước**). `0` = không giới hạn |
 | `CR_AUTO_ACCEPT_MAX_MH` | `40` | Ngưỡng nỗ lực (man-hour) để tự chấp nhận yêu cầu thay đổi ở chế độ auto; CR bỏ phạm vi hoặc vượt ngưỡng luôn chờ người quyết định |
 | `TRUST_PROXY` | `false` | `true` hoặc số tầng proxy khi đứng sau reverse proxy |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | (trống) | v3: đăng nhập Google, bắt buộc ở server mode (callback `<PUBLIC_BASE_URL>/auth/google/callback`) |
+| `ALLOWED_EMAIL_DOMAINS` | (trống) | v3: tên miền email được đăng nhập; phải khác rỗng |
+| `ADMIN_EMAILS`, `CTO_EMAILS`, `HEAD_EMAILS`, `DEPUTY_EMAILS` | (trống) | v3: gán vai trò ở lần đăng nhập đầu; head/deputy dạng `DEV:a@x,b@x;SGLOBAL:c@x` |
+| `PROJECT_ROOTS` | (trống) | v3: thư mục gốc chứa dự án |
+| `SEAT_CONCURRENCY` | `1` | v3: số lần chạy Claude đồng thời trên mỗi seat |
+| `DFCTL_PATH` | `/usr/local/lib/devflow/dfctl` | v3: đường dẫn dfctl; server mode không chạy nếu thiếu |
+| `BREAKGLASS_ADMIN` | (trống) | v3: tài khoản admin dùng mật khẩu khi Google hỏng (`npm run admin:set-password`) |
 | `ANDROID_HOME` | (trống) | (Tùy chọn) Android SDK cho kiểm thử mobile; DevFlow chỉ đọc để báo cho Tester |
 
 ## Sử dụng
