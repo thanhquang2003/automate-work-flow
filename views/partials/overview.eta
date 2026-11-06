@@ -36,6 +36,7 @@
       <% if (it.canPm && b.candidates.length) { %>
       <form method="post" action="/requests/<%= it.r.id %>/assignees" class="row">
         <input type="hidden" name="role" value="<%= b.role %>"><input type="hidden" name="op" value="add">
+        <input type="hidden" name="expect_runner" value="<%= b.list[0] ? b.list[0].id : '' %>">
         <select name="user"><% for (const c of b.candidates) { %><option value="<%= c.id %>"><%= c.name %></option><% } %></select>
         <button class="btn" type="submit">Thêm</button>
       </form>

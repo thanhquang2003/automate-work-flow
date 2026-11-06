@@ -304,7 +304,7 @@ export class ProjectService {
   // ---- request assignees ----
 
   /** Ordered people for one role of a request (first = runner). Persists only; the engine reacts in Task 5. */
-  setAssignees(requestId: string, role: ProjectRole, userIds: number[], byId: number): void {
+  setAssignees(requestId: string, role: ProjectRole, userIds: number[], byId: number): Promise<void> {
     try { assertProjectRole(role); } catch { throw new ProjectError(`Vai trò không hợp lệ: ${String(role)}`); }
     const req = this.repo.getRequest(requestId);
     if (!req || req.projectId == null) throw new ProjectError('Không tìm thấy yêu cầu thuộc dự án.');
@@ -322,7 +322,8 @@ export class ProjectService {
       this.repo.web.addAudit({ projectId: project.id, requestId, userId: by.id, action: 'request.assignees.set', detail: JSON.stringify({ role, before, after: ids }) });
     });
     // A new runner takes over a running job of that role (stopped and re-run on the new seat).
-    void this.hooks?.assigneesChanged?.(requestId).catch(() => undefined);
+    // Validation errors above throw synchronously; the returned promise resolves once a stopped run has ended.
+    return this.hooks?.assigneesChanged?.(requestId).catch(() => undefined) ?? Promise.resolve();
   }
 
   // ---- requests ----

@@ -18,7 +18,7 @@ export function adminUserRoutes(app: FastifyInstance, cfg: Config, { repo }: Web
   };
   const go = (reply: FastifyReply, path: string, kind: 'ok' | 'err', msg: string) => reply.redirect(`${path}?${kind}=${encodeURIComponent(msg.slice(0, 300))}`);
   const targetOf = (req: FastifyRequest): UserRow | undefined => repo.web.getUser(Number((req.params as { id: string }).id));
-  const ctxOf = (u: UserRow): Ctx => ({ targetUser: { departmentId: u.departmentId, sysRole: u.sysRole } });
+  const ctxOf = (u: UserRow): Ctx => ({ targetUser: { userId: u.id, departmentId: u.departmentId, sysRole: u.sysRole } });
   const isManager = (req: FastifyRequest): boolean => { const a = actorOf(repo, req.user); return !!a && (a.sysRole === 'head' || a.sysRole === 'deputy'); };
   const isAdmin = (req: FastifyRequest): boolean => { const a = actorOf(repo, req.user); return !!a && can(a, 'admin.settings'); };
 
@@ -55,9 +55,11 @@ export function adminUserRoutes(app: FastifyInstance, cfg: Config, { repo }: Web
     return `Đã đổi vai trò của ${u.email ?? u.username}.`;
   });
   adminWrite('department', 'user.setDepartment', (u, b, req) => {
-    const d = b.department_id ? repo.web.getDepartment(Number(b.department_id)) : undefined;
-    if (b.department_id && !d) throw new Error('Phòng không tồn tại.');
-    if (u.departmentId !== null && d && u.departmentId !== d.id && repo.listProjectsForUser(u.id).length) throw new Error('Người này đang thuộc dự án; hãy gỡ khỏi dự án trước khi đổi phòng.');
+    const raw = (b.department_id ?? '').trim();
+    const d = raw ? repo.web.getDepartment(Number(raw)) : undefined;
+    if (raw && !d) throw new Error('Phòng không tồn tại.');
+    // A project member must keep a department (the project's rule): an empty value must not bypass this.
+    if ((d ? d.id : null) !== u.departmentId && repo.listProjects({ includeArchived: true }).some(p => repo.getProjectMember(p.id, u.id))) throw new Error('Người này đang là thành viên dự án nên không thể gỡ hoặc đổi phòng; hãy gỡ khỏi các dự án trước.');
     repo.web.setUserDepartment(u.id, d ? d.id : null);
     auditWeb(repo, req, 'user.setDepartment', { detail: { userId: u.id, departmentId: d?.id ?? null } });
     return `Đã đổi phòng của ${u.email ?? u.username}.`;
@@ -101,7 +103,7 @@ export function adminUserRoutes(app: FastifyInstance, cfg: Config, { repo }: Web
   app.post('/dept/pm/:id/assign', async (req, reply) => {
     const a = actorOf(repo, req.user);
     const u = targetOf(req);
-    if (!a || !u || a.departmentId === null || !can(a, 'user.setDepartment', { ...ctxOf(u), targetDepartmentId: a.departmentId })) return forbidPage(cfg, req, reply);
+    if (!a || !u || u.disabled || a.departmentId === null || !can(a, 'user.setDepartment', { ...ctxOf(u), targetDepartmentId: a.departmentId })) return forbidPage(cfg, req, reply);
     repo.web.setUserDepartment(u.id, a.departmentId);
     auditWeb(repo, req, 'user.setDepartment', { detail: { userId: u.id, departmentId: a.departmentId } });
     return go(reply, '/dept/pm', 'ok', `Đã đưa ${u.email ?? u.username} vào phòng của bạn.`);

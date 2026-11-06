@@ -10,8 +10,8 @@ const proj = { project: { departmentId: 1 } };
 describe('permissions', () => {
   it('head cannot act on other department', () => {
     const head = actor({ sysRole: 'head', departmentId: 1 });
-    expect(can(head, 'user.setCanBePm', { targetUser: { departmentId: 1 } })).toBe(true);
-    expect(can(head, 'user.setCanBePm', { targetUser: { departmentId: 2 } })).toBe(false);
+    expect(can(head, 'user.setCanBePm', { targetUser: { userId: 9, departmentId: 1, sysRole: 'member' } })).toBe(true);
+    expect(can(head, 'user.setCanBePm', { targetUser: { userId: 9, departmentId: 2, sysRole: 'member' } })).toBe(false);
     expect(can(head, 'oversight.view', { project: { departmentId: 2 } })).toBe(false);
     expect(can(head, 'oversight.content', { project: { departmentId: 1 } })).toBe(true);
     expect(can(head, 'user.setDepartment', { targetUser: { departmentId: null, sysRole: 'member' }, targetDepartmentId: 2 })).toBe(false);
@@ -88,6 +88,32 @@ describe('permissions', () => {
       expect(can(h, 'user.setCanBePm', { targetUser: { departmentId: 2, sysRole: 'member' } })).toBe(false);
     }
     expect(can(actor({ sysRole: 'admin', departmentId: null }), 'user.setDepartment', { targetUser: { departmentId: null, sysRole: 'cto' }, targetDepartmentId: 1 })).toBe(true);
+  });
+  it('head/deputy cannot set can_be_pm on self, privileged users or other departments', () => {
+    for (const sys of ['head', 'deputy'] as const) {
+      const h = actor({ sysRole: sys, departmentId: 1, userId: 5 });
+      const t = (userId: number, sysRole: 'member' | 'head' | 'deputy' | 'admin' | 'cto', departmentId: number | null) => ({ targetUser: { userId, sysRole, departmentId } });
+      expect(can(h, 'user.setCanBePm', t(5, sys, 1))).toBe(false);
+      expect(can(h, 'user.setCanBePm', t(6, 'head', 1))).toBe(false);
+      expect(can(h, 'user.setCanBePm', t(6, 'deputy', 1))).toBe(false);
+      expect(can(h, 'user.setCanBePm', t(6, 'admin', 1))).toBe(false);
+      expect(can(h, 'user.setCanBePm', t(6, 'cto', 1))).toBe(false);
+      expect(can(h, 'user.setCanBePm', t(6, 'member', 2))).toBe(false);
+      expect(can(h, 'user.setCanBePm', { targetUser: { departmentId: 1, sysRole: 'member' } })).toBe(false);
+      expect(can(h, 'user.setCanBePm', t(6, 'member', 1))).toBe(true);
+    }
+  });
+  it('cr.create is PM or BA; clarify.write is PM or an assignee of the BA role', () => {
+    const all: ProjectRole[] = ['PM', 'BA', 'SE', 'DEV', 'REVIEWER', 'TESTER'];
+    for (const r of all) {
+      expect(can(roles(r), 'cr.create', proj), r).toBe(r === 'PM' || r === 'BA');
+      expect(can(roles(r), 'clarify.write', proj), r).toBe(r === 'PM' || r === 'BA');
+    }
+    // BA project role but not a BA assignee of this request: read-only
+    expect(can(roles('BA'), 'clarify.write', { ...proj, requestRoles: ['DEV'] })).toBe(false);
+    expect(can(roles('BA'), 'clarify.write', { ...proj, requestRoles: ['BA'] })).toBe(true);
+    expect(can(roles('PM'), 'clarify.write', { ...proj, requestRoles: [] })).toBe(true);
+    for (const sys of ['admin', 'cto', 'head', 'deputy'] as const) expect(can(actor({ sysRole: sys, departmentId: 1 }), 'cr.create', proj)).toBe(false);
   });
   it('stages without an approver cannot be approved by anyone; DONE and CHANGE are PM only', () => {
     const all: ProjectRole[] = ['PM', 'BA', 'SE', 'DEV', 'REVIEWER', 'TESTER'];

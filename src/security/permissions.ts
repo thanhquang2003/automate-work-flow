@@ -13,7 +13,7 @@ export interface Ctx {
   /** The project the action targets. */
   project?: { departmentId: number | null };
   /** The user an admin/department action targets. */
-  targetUser?: { departmentId: number | null; sysRole?: SysRole };
+  targetUser?: { userId?: number; departmentId: number | null; sysRole?: SysRole };
   /** For `user.setDepartment`: the department the user is being moved to. */
   targetDepartmentId?: number | null;
   /** For `project.members.edit`: department of every user in the proposed member list. */
@@ -24,6 +24,7 @@ export interface Ctx {
 
 export type Action =
   | 'project.create' | 'project.members.edit' | 'request.create' | 'task.assign' | 'cr.decide'
+  | 'cr.create' | 'clarify.write'
   | 'user.setCanBePm' | 'user.setSysRole' | 'user.setDepartment'
   | 'oversight.view' | 'oversight.content' | 'admin.settings'
   | { type: 'gate.approve'; stage: Stage; part?: string };
@@ -81,9 +82,21 @@ export function can(actor: Actor, action: Action, ctx: Ctx = {}): boolean {
     case 'user.setSysRole':
     case 'admin.settings':
       return sys === 'admin';
-    case 'user.setCanBePm':
+    case 'cr.create':
+      return isPm || roles.includes('BA');
+    case 'clarify.write': {
+      // PM, or an assignee of the BA role on this request (project role BA when ctx.requestRoles is absent)
+      if (isPm) return true;
+      const held = ctx.requestRoles ? roles.filter(r => ctx.requestRoles!.includes(r)) : roles;
+      return held.includes('BA');
+    }
+    case 'user.setCanBePm': {
       if (sys === 'admin') return true;
-      return manager && ownDept(ctx.targetUser?.departmentId);
+      // A head/deputy may only grant it to ordinary members of the own department, never to themselves
+      // (that would make them PM) nor to admin/cto/head/deputy.
+      const t = ctx.targetUser;
+      return manager && !!t && t.userId !== undefined && t.userId !== actor.userId && t.sysRole === 'member' && ownDept(t.departmentId);
+    }
     case 'user.setDepartment':
       if (sys === 'admin') return true;
       // head/deputy only pull unassigned users into their own department

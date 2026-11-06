@@ -4,13 +4,12 @@ import { createSeatRunner } from './claude/seat-runner.js';
 import { loadConfig, loadDotEnv } from './config.js';
 import { openDb } from './db/db.js';
 import { Repo } from './db/repo.js';
-import type { RequestRow } from './domain/types.js';
 import { Pipeline } from './engine/pipeline.js';
 import { registerAllStages } from './engine/stages/index.js';
 import { Worker } from './engine/worker.js';
 import { reconcileProjects } from './projects/reconcile.js';
 import { wireProjects } from './projects/wire.js';
-import { applySettings, gitlabFor } from './settings.js';
+import { applySettings, gitlabFor, gitlabForUser } from './settings.js';
 import { NoopSystemOps, SudoSystemOps, checkServerPrereqs, type SystemOps } from './system/ops.js';
 import { buildServer } from './web/server.js';
 
@@ -30,7 +29,7 @@ async function main(): Promise<void> {
   registerAllStages();
   const systemOps: SystemOps = cfg.mode === 'server' ? new SudoSystemOps({ dfctlPath: cfg.dfctlPath }) : new NoopSystemOps();
   // ProjectService with the real system ops, joined to the pipeline both ways (member removal stops jobs first).
-  const projects = wireProjects({ cfg, repo, pipeline, systemOps, gitlabFor: uid => gitlabFor(cfg, repo, { createdBy: uid } as RequestRow) });
+  const projects = wireProjects({ cfg, repo, pipeline, systemOps, gitlabFor: uid => gitlabForUser(cfg, repo, uid) });
   if (cfg.mode === 'server') {
     // Heal Linux groups/members left behind by a failed ensureProjectGroup/setMembers (idempotent).
     const rec = await reconcileProjects(repo, systemOps);

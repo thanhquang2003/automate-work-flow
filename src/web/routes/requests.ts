@@ -10,6 +10,7 @@ import { STAGES } from '../../domain/types.js';
 import { loadImpact } from '../../engine/changes.js';
 import { changeDir, readFlowState, readProjectInfo } from '../../engine/stages/common.js';
 import { Workspace } from '../../engine/workspace.js';
+import { StaleActionError } from '../../engine/pipeline.js';
 import { PermissionError } from '../../projects/service.js';
 import { PROJECT_ROLES, type ProjectRole } from '../../domain/types.js';
 import { GATE_APPROVER } from '../../security/permissions.js';
@@ -326,21 +327,24 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
     const target = Number(b.user);
     const cur = repo.listRequestAssignees(r.id, role).map(a => a.userId);
     if (!Number.isInteger(target) || target <= 0) throw new Error('Người dùng không hợp lệ.');
-    let next = cur;
+    // Stale-click token: the page states who was first (runner) when it was drawn; server mode requires it.
+    if (server && b.expect_runner === undefined) throw new StaleActionError();
+    const expected = b.expect_runner === undefined ? undefined : b.expect_runner === '' ? null : Number(b.expect_runner);
+    if (expected !== undefined && (cur[0] ?? null) !== expected) throw new StaleActionError();
     if (b.op === 'first') {
-      // The runner changes: the pipeline moves a running job of that role onto the new seat.
-      const expected = b.expect_runner === '' || b.expect_runner === undefined ? undefined : Number(b.expect_runner);
-      await pipeline.setRunner(r.id, role, target, uid, expected === undefined ? (cur[0] ?? null) : expected);
+      // The runner changes: the pipeline moves a running job of that role onto the new seat and awaits the stop.
+      await pipeline.setRunner(r.id, role, target, uid, expected);
       return;
     }
     const i = cur.indexOf(target);
+    let next = cur;
     if (b.op === 'add') next = i >= 0 ? cur : [...cur, target];
     else if (b.op === 'remove') next = cur.filter(x => x !== target);
     else if (b.op === 'up' && i > 0) next = cur.map((x, k) => (k === i - 1 ? target : k === i ? cur[i - 1]! : x));
     else if (b.op === 'down' && i >= 0 && i < cur.length - 1) next = cur.map((x, k) => (k === i + 1 ? target : k === i ? cur[i + 1]! : x));
     else if (!['add', 'remove', 'up', 'down'].includes(b.op ?? '')) throw new Error('Thao tác không hợp lệ.');
-    // setAssignees persists and tells the engine, which moves a running job when the first person changed.
-    projects.setAssignees(r.id, role, next, uid);
+    // Persists, tells the engine and waits for a run stopped because the runner changed.
+    await projects.setAssignees(r.id, role, next, uid);
   }, false);
 
   app.post('/requests/:id/tasks/:task/assign', async (req, reply) => {

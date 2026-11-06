@@ -54,13 +54,18 @@ export function applySettings(cfg: Config, repo: Repo): void {
 }
 
 /** GitLab client for a request: the creator's own token (from /me) wins over the shared token. */
-export function gitlabFor(cfg: Config, repo: Repo, req: RequestRow): GitLabClient | undefined {
+export function gitlabFor(cfg: Config, repo: Repo, req: Pick<RequestRow, 'createdBy'>): GitLabClient | undefined {
+  return gitlabForUser(cfg, repo, req.createdBy);
+}
+
+/** GitLab client for a person (own token wins over the shared one); null = shared token only. */
+export function gitlabForUser(cfg: Config, repo: Repo, userId: number | null): GitLabClient | undefined {
   const eff = effectiveConfig(bases.get(cfg) ?? cfg, repo);
   let token = eff.gitlab.token;
-  if (req.createdBy !== null) {
-    const enc = repo.web.getUser(req.createdBy)?.gitlabTokenEnc;
+  if (userId !== null) {
+    const enc = repo.web.getUser(userId)?.gitlabTokenEnc;
     if (enc) {
-      try { token = decrypt(enc, getSecretKey(cfg)); } catch { warnOnce(`user.${req.createdBy}`, `Không giải mã được token GitLab cá nhân của người dùng #${req.createdBy}; dùng token chung.`); }
+      try { token = decrypt(enc, getSecretKey(cfg)); } catch { warnOnce(`user.${userId}`, `Không giải mã được token GitLab cá nhân của người dùng #${userId}; dùng token chung.`); }
     }
   }
   return eff.gitlab.url && token ? new GitLabClient(eff.gitlab.url, token) : undefined;

@@ -6,6 +6,7 @@ import { createSurveyLink, surveyUrl } from '../../engine/survey.js';
 import { questionsFileName } from '../../engine/stages/clarify.js';
 import { openQuestions } from '../../engine/stages/common.js';
 import { exportQuestions, importAnswers } from '../../office/questions-xlsx.js';
+import { PermissionError } from '../../projects/service.js';
 import { allowedOnRequest, auditWeb, forbidPage } from '../authz.js';
 import type { WebDeps } from '../server.js';
 import { render, type LayoutData } from '../view.js';
@@ -30,6 +31,8 @@ export function questionsTabData(repo: Repo, cfg: Config, r: RequestRow): Record
 
 export function questionRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline }: WebDeps): void {
   const layout = (req: FastifyRequest, title: string): LayoutData => ({ user: req.user, mode: cfg.mode, title });
+  /** Server mode: the acting person (null = nobody). Local mode: undefined (no accounts, no checks). */
+  const actorArg = (req: FastifyRequest): number | null | undefined => (cfg.mode === 'server' ? (req.user?.id ?? null) : undefined);
   const back = (reply: FastifyReply, id: string, kind: 'ok' | 'err', msg: string) =>
     reply.redirect(`/requests/${id}?tab=questions&${kind}=${encodeURIComponent(msg.slice(0, 300))}`);
   const notFound = (req: FastifyRequest, reply: FastifyReply) =>
@@ -52,7 +55,7 @@ export function questionRoutes(app: FastifyInstance, cfg: Config, { repo, pipeli
     const { id } = req.params as { id: string };
     const r0 = repo.getRequest(id);
     if (!r0) return notFound(req, reply);
-    if (!allowedOnRequest(cfg, repo, req.user, r0, 'member')) return forbidPage(cfg, req, reply);
+    if (!allowedOnRequest(cfg, repo, req.user, r0, 'clarify.write')) return forbidPage(cfg, req, reply);
     if (!req.isMultipart()) return back(reply, id, 'err', 'Biểu mẫu phải gửi dạng multipart.');
     const part = await req.file();
     if (!part || !part.filename) return back(reply, id, 'err', 'Vui lòng chọn file Excel (.xlsx).');
@@ -61,21 +64,20 @@ export function questionRoutes(app: FastifyInstance, cfg: Config, { repo, pipeli
     let parsed;
     try { parsed = await importAnswers(buf); } catch { return back(reply, id, 'err', 'Không đọc được file Excel.'); }
     const known = new Set(repo.listQuestions(id).map(q => q.id));
-    const latest = repo.latestAnswers(id);
-    let saved = 0;
     let unknown = parsed.unknownRows;
-    repo.tx(() => {
-      for (const a of parsed.answers) {
-        if (!known.has(a.id)) { unknown++; continue; }
-        if (latest.get(a.id) === a.answer) continue;
-        repo.saveAnswer(id, a.id, a.answer.slice(0, MAX_ANSWER), 'excel');
-        saved++;
-      }
-    });
+    const rows: { qid: string; answer: string }[] = [];
+    for (const a of parsed.answers) {
+      if (!known.has(a.id)) { unknown++; continue; }
+      rows.push({ qid: a.id, answer: a.answer.slice(0, MAX_ANSWER) });
+    }
+    let saved: number;
+    try { saved = pipeline.saveAnswers(id, rows, 'excel', actorArg(req)); } catch (e) {
+      if (e instanceof PermissionError) return forbidPage(cfg, req, reply, e.message);
+      throw e;
+    }
     let msg = `Đã nhập ${saved} câu trả lời từ Excel.`;
     if (unknown) msg += ` ${unknown} dòng không khớp câu hỏi nào.`;
     if (parsed.duplicateIds.length) msg += ` Trùng mã: ${parsed.duplicateIds.join(', ')} (lấy dòng cuối).`;
-    auditWeb(repo, req, 'answers.import', { projectId: r0.projectId, requestId: id, detail: { saved } });
     return back(reply, id, 'ok', msg);
   });
 
@@ -83,12 +85,14 @@ export function questionRoutes(app: FastifyInstance, cfg: Config, { repo, pipeli
     const { id } = req.params as { id: string };
     const r0 = repo.getRequest(id);
     if (!r0) return notFound(req, reply);
-    if (!allowedOnRequest(cfg, repo, req.user, r0, 'member')) return forbidPage(cfg, req, reply);
+    if (!allowedOnRequest(cfg, repo, req.user, r0, 'clarify.write')) return forbidPage(cfg, req, reply);
     const b = (req.body ?? {}) as Record<string, string | undefined>;
     const qid = (b.qid ?? '').trim();
     if (!repo.listQuestions(id).some(q => q.id === qid)) return back(reply, id, 'err', 'Câu hỏi không tồn tại.');
-    repo.saveAnswer(id, qid, (b.answer ?? '').trim().slice(0, MAX_ANSWER), 'staff');
-    auditWeb(repo, req, 'answer.save', { projectId: r0.projectId, requestId: id, detail: { qid } });
+    try { pipeline.saveAnswers(id, [{ qid, answer: (b.answer ?? '').trim().slice(0, MAX_ANSWER) }], 'staff', actorArg(req)); } catch (e) {
+      if (e instanceof PermissionError) return forbidPage(cfg, req, reply, e.message);
+      throw e;
+    }
     return back(reply, id, 'ok', `Đã lưu câu trả lời ${qid}.`);
   });
 
@@ -96,7 +100,7 @@ export function questionRoutes(app: FastifyInstance, cfg: Config, { repo, pipeli
     const { id } = req.params as { id: string };
     const r = repo.getRequest(id);
     if (!r) return notFound(req, reply);
-    if (!allowedOnRequest(cfg, repo, req.user, r, 'member')) return forbidPage(cfg, req, reply);
+    if (!allowedOnRequest(cfg, repo, req.user, r, 'clarify.write')) return forbidPage(cfg, req, reply);
     if (cfg.mode !== 'server') return back(reply, id, 'err', 'Link khảo sát chỉ khả dụng ở chế độ server.');
     createSurveyLink(repo, cfg, id, r.clarifyRound + 1);
     auditWeb(repo, req, 'survey.link', { projectId: r.projectId, requestId: id });
@@ -107,10 +111,13 @@ export function questionRoutes(app: FastifyInstance, cfg: Config, { repo, pipeli
     const { id } = req.params as { id: string };
     const r = repo.getRequest(id);
     if (!r) return notFound(req, reply);
-    if (!allowedOnRequest(cfg, repo, req.user, r, 'member')) return forbidPage(cfg, req, reply);
+    if (!allowedOnRequest(cfg, repo, req.user, r, 'clarify.write')) return forbidPage(cfg, req, reply);
     if (r.status !== 'awaiting_customer') return back(reply, id, 'err', 'Yêu cầu không ở trạng thái chờ khách hàng.');
-    auditWeb(repo, req, 'request.continue', { projectId: r.projectId, requestId: id });
-    try { pipeline.resumeAfterCustomer(id); } catch (e) { return back(reply, id, 'err', e instanceof Error ? e.message : String(e)); }
+    try { pipeline.resumeAfterCustomer(...(cfg.mode === 'server' ? [id, req.user?.id ?? null] as const : [id] as const)); } catch (e) {
+      if (e instanceof PermissionError) return forbidPage(cfg, req, reply, e.message);
+      auditWeb(repo, req, 'request.continue_failed', { projectId: r.projectId, requestId: id, detail: { error: e instanceof Error ? e.message.slice(0, 200) : String(e) } });
+      return back(reply, id, 'err', e instanceof Error ? e.message : String(e));
+    }
     return reply.redirect(`/requests/${id}`);
   });
 }

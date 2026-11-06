@@ -332,11 +332,36 @@ export class Pipeline {
     });
   }
 
-  resumeAfterCustomer(reqId: string): void {
-    this.expectStatus(reqId, 'awaiting_customer');
+  /**
+   * `by`: undefined = trusted internal call (the customer's survey answered); a number or null is a person:
+   * multi-user mode then needs can(clarify.write) (PM or BA assignee of the request). Audited after success.
+   */
+  resumeAfterCustomer(reqId: string, by?: number | null): void {
+    const req = this.expectStatus(reqId, 'awaiting_customer');
+    if (by !== undefined) this.requireRequestRight(req, by, 'clarify.write', 'tiếp tục yêu cầu đang chờ khách hàng');
     // CLARIFY reruns with ctx.resume=true and decides where to go next (e.g. goto ANALYSIS).
-    this.setStatus(reqId, 'CLARIFY', 'running');
-    this.enqueue(reqId, 'CLARIFY', undefined, true);
+    this.repo.tx(() => {
+      this.setStatus(reqId, 'CLARIFY', 'running');
+      this.enqueue(reqId, 'CLARIFY', undefined, true);
+      if (by != null) this.audit(req, by, 'request.continue', {});
+    });
+  }
+
+  /** Staff answers to the CLARIFY questions (form or Excel import): PM or BA assignee. One audit row per call. */
+  saveAnswers(reqId: string, answers: { qid: string; answer: string }[], source: 'staff' | 'excel', by?: number | null): number {
+    const req = this.mustGet(reqId);
+    if (by !== undefined) this.requireRequestRight(req, by, 'clarify.write', 'trả lời câu hỏi làm rõ');
+    const latest = this.repo.latestAnswers(reqId);
+    let saved = 0;
+    this.repo.tx(() => {
+      for (const a of answers) {
+        if (latest.get(a.qid) === a.answer) continue;
+        this.repo.saveAnswer(reqId, a.qid, a.answer, source);
+        saved++;
+      }
+      if (by != null) this.audit(req, by, source === 'excel' ? 'answers.import' : 'answer.save', { count: saved, qids: answers.map(a => a.qid).slice(0, 50) });
+    });
+    return saved;
   }
 
   cancel(reqId: string): void {
@@ -533,13 +558,15 @@ export class Pipeline {
    * dropped as stale), queued/paused jobs are failed and CHANGE runs. While CHANGE is already running the CR only waits
    * (CHANGE runs again before the decision gate); at the decision gate CHANGE re-runs so it is analysed first.
    */
-  submitChange(reqId: string, input: ChangeInput): ChangeRequestRow {
+  submitChange(reqId: string, input: ChangeInput, by?: number | null): ChangeRequestRow {
     const req = this.mustGet(reqId);
+    if (by !== undefined) this.requireRequestRight(req, by, 'cr.create', 'tạo yêu cầu thay đổi (chỉ PM hoặc BA)');
     if (req.status === 'cancelled') throw new CrNotAllowedError(reqId);
     return this.repo.tx(() => {
       const cr = this.repo.createChangeRequest(reqId, {
         title: input.title, description: input.description, kind: input.kind, source: input.source ?? 'staff', createdBy: input.createdBy ?? null, status: 'pending',
       });
+      if (by != null) this.audit(req, by, 'cr.create', { crId: cr.id });
       return this.startChange(req, cr.id);
     });
   }
@@ -1300,6 +1327,15 @@ export class Pipeline {
     const actor = this.actorFor(req, by);
     const project = this.projectCtx(req);
     if (!actor || !project || !can(actor, action, { project })) throw new PermissionError(`Bạn không có quyền ${what}.`);
+  }
+
+  /** Like require, with the actor's assignee roles on this request (multi-user mode only). */
+  private requireRequestRight(req: RequestRow, by: number | null | undefined, action: Action, what: string): void {
+    if (!this.multiUser) return;
+    const actor = this.actorFor(req, by);
+    const project = this.projectCtx(req);
+    const requestRoles = this.repo.listRequestAssignees(req.id).filter(a => a.userId === by).map(a => a.role);
+    if (!actor || !project || !can(actor, action, { project, requestRoles })) throw new PermissionError(`Bạn không có quyền ${what}.`);
   }
 
   /** Gate approve/reject: PM, or an assignee of the gate's role on this request (multi-user mode only). */

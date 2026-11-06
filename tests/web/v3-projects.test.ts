@@ -86,13 +86,18 @@ describe('v3 projects, inbox, admin pages', () => {
       const payload = fields.map(([k, v]) => `--${b}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`).join('') + `--${b}--\r\n`;
       return { payload, headers: { 'content-type': `multipart/form-data; boundary=${b}`, origin: 'http://localhost:3000', host: 'localhost:3000', cookie: w.cookie(w.pm.id) } };
     };
-    const base: [string, string][] = [['title', 't'], ['description', 'd']];
+    const base: [string, string][] = [['title', 't'], ['description', 'd'],
+      ...([['PM', w.pm.id], ['BA', w.ba.id], ['SE', w.se.id], ['DEV', w.dev.id], ['REVIEWER', w.rev.id], ['TESTER', w.tester.id]] as const).map(([r, id]): [string, string] => [`a_${r}`, String(id)])];
     const send = (code: string) => w.app.inject({ method: 'POST', url: `/projects/${w.p.id}/requests`, ...mp([['code', code], ...base]) });
     expect((await send('bad code!')).statusCode).toBe(400);
     expect((await send('ERP-001')).statusCode).toBe(302);
     expect((await send('erp-001')).statusCode).toBe(400);
     expect(w.repo.listRequestsByProject(w.p.id)).toHaveLength(1);
     expect(w.repo.listRequestAssignees(w.repo.listRequestsByProject(w.p.id)[0]!.id, 'DEV').length).toBeGreaterThan(0);
+    // an emptied role is a validation error, not a silent default
+    const noDev = await w.app.inject({ method: 'POST', url: `/projects/${w.p.id}/requests`, ...mp([['code', 'ERP-050'], ...base.filter(([k]) => k !== 'a_DEV')]) });
+    expect(noDev.statusCode).toBe(400);
+    expect(noDev.body).toContain('DEV');
     // non-PM
     const dev = await w.app.inject({ method: 'POST', url: `/projects/${w.p.id}/requests`, ...mp([['code', 'ERP-009'], ...base]), headers: { ...mp([]).headers, cookie: w.cookie(w.dev.id) } });
     expect(dev.statusCode).toBe(403);

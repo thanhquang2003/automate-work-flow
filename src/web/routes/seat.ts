@@ -50,6 +50,10 @@ export function seatRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline, 
         pipeline.seatReconnected(id);
       } else { at.state = 'failed'; at.reason = REASONS[r.reason ?? 'failed']; }
       auditWeb(repo, req, r.success ? 'seat.login' : 'seat.login_failed', { detail: { reason: r.reason ?? null } });
+    }).catch((e: unknown) => {
+      // A failing follow-up (wake-up, audit) must never become an unhandled rejection that kills the server.
+      if (attempts.get(id) === at && at.state === 'waiting') { at.state = 'failed'; at.reason = REASONS.failed; }
+      console.error('seat login follow-up failed:', e instanceof Error ? e.message : 'error');
     });
     return reply.redirect('/seat');
   });

@@ -38,7 +38,7 @@ export function allowedOnRequest(cfg: Config, repo: Repo, user: SessionUser | un
   if (need === 'read' || need === 'member') return true;
   const ctx: Ctx = { project: { departmentId: project.departmentId } };
   if (need === 'pm') return can(actor, 'task.assign', ctx);
-  if (typeof need === 'object' && need.type === 'gate.approve') {
+  if (need === 'clarify.write' || (typeof need === 'object' && need.type === 'gate.approve')) {
     ctx.requestRoles = repo.listRequestAssignees(r.id).filter(a => a.userId === actor.userId).map(a => a.role);
   }
   return can(actor, need, ctx);

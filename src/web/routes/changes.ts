@@ -53,7 +53,7 @@ export function changeRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
     const { id } = req.params as { id: string };
     const r = repo.getRequest(id);
     if (!r) return errPage(req, reply, 404, 'Không tìm thấy yêu cầu.');
-    if (!allowedOnRequest(cfg, repo, req.user, r, 'member')) return forbidPage(cfg, req, reply);
+    if (!allowedOnRequest(cfg, repo, req.user, r, 'cr.create')) return forbidPage(cfg, req, reply);
     if (r.status === 'cancelled') return errPage(req, reply, 409, 'Yêu cầu đã bị hủy, không thể tạo yêu cầu thay đổi.');
     if (!req.isMultipart()) return errPage(req, reply, 400, 'Biểu mẫu phải gửi dạng multipart.');
 
@@ -86,8 +86,9 @@ export function changeRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
 
       let crId: string;
       try {
-        crId = pipeline.submitChange(id, { title: title.slice(0, 300), description, kind, createdBy: req.user?.id ?? null }).id;
+        crId = pipeline.submitChange(id, { title: title.slice(0, 300), description, kind, createdBy: req.user?.id ?? null }, cfg.mode === 'server' ? (req.user?.id ?? null) : undefined).id;
       } catch (e) {
+        if (e instanceof PermissionError) return forbidPage(cfg, req, reply, e.message);
         return back(reply, id, 'changes', msgOf(e));
       }
       // The CHANGE job runs on a later worker tick, so attaching synchronously here is visible to it.
@@ -109,7 +110,6 @@ export function changeRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
         }
       }
       if (failed.length) return back(reply, id, 'changes', `Đã tạo ${crId} nhưng không lưu được tệp: ${failed.join(', ')}`);
-      auditWeb(repo, req, 'cr.create', { projectId: r.projectId, requestId: id, detail: { crId } });
       return reply.redirect(`/requests/${id}?tab=changes&ok=${encodeURIComponent(`Đã ghi nhận yêu cầu thay đổi ${crId}`)}`);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });

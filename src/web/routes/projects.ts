@@ -9,7 +9,7 @@ import { safeWriteFile } from '../../engine/safe-fs.js';
 import { Workspace } from '../../engine/workspace.js';
 import { PermissionError, ProjectError } from '../../projects/service.js';
 import { can } from '../../security/permissions.js';
-import { actorOf, auditWeb, forbidPage, statusOfError } from '../authz.js';
+import { actorOf, forbidPage, statusOfError } from '../authz.js';
 import type { WebDeps } from '../server.js';
 import { render, type LayoutData } from '../view.js';
 import { cleanName } from './requests.js';
@@ -37,10 +37,6 @@ export function projectRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
     return { project, roles: actor.projectRoles };
   };
   const idOf = (req: FastifyRequest): number => Number((req.params as { id: string }).id);
-  const denied = (req: FastifyRequest, reply: FastifyReply, e: unknown) =>
-    statusOfError(e) === 403
-      ? forbidPage(cfg, req, reply, (e as Error).message)
-      : html(reply, render('error', layout(req, 'Lỗi'), { code: statusOfError(e), message: (e as Error).message }), statusOfError(e));
 
   // ---- list ----
   app.get('/projects', async (req, reply) => {
@@ -172,7 +168,8 @@ export function projectRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
         let ids = (fields[`a_${role}`] ?? []).map(Number).filter(n => Number.isInteger(n) && n > 0);
         const runner = Number(f(`runner_${role}`));
         if (ids.includes(runner)) ids = [runner, ...ids.filter(x => x !== runner)];
-        if (ids.length) assignees[role] = ids;
+        if (!ids.length) return newRequestPage(req, reply, m.project, form, { flash: `Vai trò ${role} cần ít nhất một người phụ trách: hãy tick ít nhất một người.`, flashKind: 'error' }, 400);
+        assignees[role] = ids;
       }
       let row;
       try {
@@ -202,5 +199,4 @@ export function projectRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
     }
   });
 
-  void denied; void auditWeb;
 }
