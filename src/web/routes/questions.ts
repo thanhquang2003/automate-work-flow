@@ -113,7 +113,7 @@ export function questionRoutes(app: FastifyInstance, cfg: Config, { repo, pipeli
     if (!r) return notFound(req, reply);
     if (!allowedOnRequest(cfg, repo, req.user, r, 'clarify.write')) return forbidPage(cfg, req, reply);
     if (r.status !== 'awaiting_customer') return back(reply, id, 'err', 'Yêu cầu không ở trạng thái chờ khách hàng.');
-    try { pipeline.resumeAfterCustomer(...(cfg.mode === 'server' ? [id, req.user?.id ?? null] as const : [id] as const)); } catch (e) {
+    try { (cfg.mode === 'server' ? pipeline.resumeAfterCustomer(id, req.user?.id ?? null) : pipeline.resumeAfterCustomer(id)); } catch (e) {
       if (e instanceof PermissionError) return forbidPage(cfg, req, reply, e.message);
       auditWeb(repo, req, 'request.continue_failed', { projectId: r.projectId, requestId: id, detail: { error: e instanceof Error ? e.message.slice(0, 200) : String(e) } });
       return back(reply, id, 'err', e instanceof Error ? e.message : String(e));
