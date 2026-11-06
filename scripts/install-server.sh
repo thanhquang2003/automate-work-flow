@@ -169,7 +169,9 @@ ExecStopPost=+$DFCTL_DST reap
 UMask=0002
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=15
+# Covers ExecStopPost too: reap stops orphaned seat scopes one by one, up to ~10 s each (TERM then KILL, 5 s
+# grace each). 120 s covers about 11 stubborn scopes; raise it if MAX_CONCURRENT_JOBS is higher (deploy-vps §9).
+TimeoutStopSec=120
 # NoNewPrivileges must stay off: DevFlow reaches dfctl through sudo.
 PrivateTmp=true
 

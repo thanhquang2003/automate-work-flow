@@ -96,7 +96,8 @@ Chưa có mục nào dưới đây được chạy ở nơi phát triển (khôn
 9. Trình duyệt: hiển thị các trang Eta mới (hộp việc, dự án, phân công, "Claude của tôi", quản trị, giám sát), SSE trang seat, luồng đăng nhập Google thật (`googleOidcClient` chưa được chạy với Google thật) — redirect URI phải khớp.
 10. Giám sát: với repo lớn thật, thời gian đọc (mỗi lần xem file chạy vài tiến trình git, chưa có cache); thử thấy `.env`/`*.pem` bị ẩn.
 11. Managed settings: file `/etc/claude-code/managed-settings.json` có tác dụng thật (mục 5).
-12. Tạo dự án từ repo "có sẵn": nếu repo có file hard-link trong `.git` (thường do `git clone` từ thư mục cục bộ), server mode từ chối — chạy `git repack -a -d`, xóa `.git/objects/info/alternates` (nếu có) hoặc clone lại với `--no-hardlinks`.
+12. **Dừng dịch vụ khi nhiều scope mồ côi:** chạy vài yêu cầu song song (≥ 3 seat đang chạy Claude), rồi `sudo systemctl kill -s KILL devflow` (giả lập sập) hoặc `systemctl stop devflow`, đo `journalctl -u devflow` từ lúc dừng tới khi `ExecStopPost … reap` báo xong, và kiểm `systemctl list-units 'dfctl-*.scope'` rỗng. `reap` dừng từng scope một, mỗi scope tối đa ~10 giây (TERM rồi KILL, mỗi bước chờ 5 giây); `TimeoutStopSec` của unit phủ cả `ExecStopPost`. install-server.sh đặt `TimeoutStopSec=120` (đủ cho khoảng 11 scope cứng đầu); nếu `MAX_CONCURRENT_JOBS` lớn hơn hoặc đo thấy reap bị systemd cắt ngang (`Stopping timed out`), tăng giá trị này rồi `systemctl daemon-reload`. Sau khi khởi động lại, log phải có dòng `Startup sweep: … dự án OK` trước khi job đầu tiên chạy.
+13. Tạo dự án từ repo "có sẵn": nếu repo có file hard-link trong `.git` (thường do `git clone` từ thư mục cục bộ), server mode từ chối — chạy `git repack -a -d`, xóa `.git/objects/info/alternates` (nếu có) hoặc clone lại với `--no-hardlinks`.
 
 ## 10. Rủi ro còn lại (nói thẳng)
 
@@ -108,7 +109,9 @@ Chưa có mục nào dưới đây được chạy ở nơi phát triển (khôn
 - **Yêu cầu cũ/không thuộc dự án (legacy)** không được hỗ trợ ở server mode: chúng không có seat và sẽ nằm mãi ở `awaiting_seat`. Không có dữ liệu v2 để chuyển (VPS mới, không có `migrate`).
 - **Clone thất bại** có thể để lại thư mục không rỗng; DevFlow không bao giờ xóa thư mục dự án, nên phải dọn tay rồi tạo lại dự án.
 - **Lưu trữ dự án** không gỡ thành viên khỏi group hệ điều hành.
-- Khóa/cờ chặn dự án sau "sweep failed" và khóa merge nằm trong bộ nhớ một tiến trình DevFlow duy nhất (đúng với một VPS, một dịch vụ).
+- Khóa/cờ chặn dự án sau "sweep failed" và khóa merge nằm trong bộ nhớ một tiến trình DevFlow duy nhất (đúng với một VPS, một dịch vụ). Sau khi khởi động lại, DevFlow **sweep mọi worktree của mọi dự án chưa lưu trữ trước khi worker chạy job nào** (kể cả job dở dang được xếp lại); dự án sweep thất bại bị chặn lại ngay (yêu cầu chuyển `needs_human`), và dfctl còn giữ dấu `/var/lib/dfctl/sweep-failed/<id>` nên cờ chặn không mất khi khởi động lại. Dự án chưa có worktree nào thì không có gì để sweep (seat chỉ chạy trong worktree). Trong lúc sweep, giao diện web đã mở nhưng job chỉ xếp hàng.
+- **Trang yêu cầu trên web đọc tệp qua safe-fs.** Mọi lần đọc/liệt kê/nén/ghi trong thư mục seat ghi được (`artifacts/`, `evidence/`, `inputs/`, tài liệu `docs/devflow/<mã>/` trong worktree, `impact.md`) đều kiểm từng thành phần đường dẫn bằng `lstat` (không symlink), mở với `O_NOFOLLOW|O_NONBLOCK`, chỉ nhận tệp thường; symlink hoặc FIFO do seat cài vào bị bỏ qua (403/404), không bao giờ trả nội dung đích. Rủi ro còn lại: giữa lúc liệt kê và lúc mở, tên tệp trong một thư mục bị thay bằng symlink thư mục chỉ làm lộ **tên** tệp (nội dung vẫn đọc qua safe-fs, có kiểm `/proc/self/fd`).
+- **Khóa tài khoản** (trang quản trị) dừng các job đang chạy trên seat đó, chuyển sang người kế tiếp của vai trò, rồi mới gỡ người đó khỏi group Linux của các dự án; mở khóa thì thêm lại.
 - Job đang chờ seat được kiểm tra lại mỗi 10 phút; người dùng kết nối lại ở trang "Claude của tôi" thì job chạy tiếp ngay.
 
 ## 11. Điều khoản Anthropic
