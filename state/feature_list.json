@@ -87,13 +87,13 @@
         "team:run requests in parallel on own seats"
       ],
       "complexity": "epic",
-      "status": "in-progress",
+      "status": "done",
       "layer": "Full-stack",
       "dependencies": [
         "FEAT-003",
         "FEAT-004"
       ],
-      "evidence": null,
+      "evidence": "commits 27994b2,4459366,1926bcb,adf0940,e57bf55,f859145,35225ea,6d98b8b on feat/v3-multiuser; gate green (459 tests); task review + 1 fix round, scoped re-review clean",
       "created": "2026-11-05",
       "updated": "2026-11-06"
     },
