@@ -70,12 +70,12 @@
         "staff:run Claude on own seat"
       ],
       "complexity": "large",
-      "status": "in-progress",
+      "status": "done",
       "layer": "Full-stack",
       "dependencies": [
         "FEAT-001"
       ],
-      "evidence": null,
+      "evidence": "commits ad52b31,84f692e,7d03343,9f9dbe1,a2c7006,ae3b62b on feat/v3-multiuser; gate green (420 tests, dfctl self-test 191); task review + 5 fix rounds; residual risks and VPS-only checks listed in the Task 4 report",
       "created": "2026-11-05",
       "updated": "2026-11-06"
     },
