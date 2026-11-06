@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync } from 'node:fs';
-import { safeWriteFile } from '../safe-fs.js';
+import { existsSync } from 'node:fs';
+import { safeMkdirp, safeWriteFile } from '../safe-fs.js';
 import { join } from 'node:path';
 import type { z } from 'zod';
 import { ReviewOut } from '../../domain/types.js';
@@ -107,7 +107,7 @@ async function ensureMr(ctx: StageContext, gl: ProjectGitLab, w: WorkItem, descr
 export async function developAndReview(ctx: StageContext, w: WorkItem): Promise<LoopResult> {
   const { ws } = ctx;
   const scratch = scratchDir(ws);
-  mkdirSync(scratch, { recursive: true });
+  safeMkdirp(scratch, ws.trustRoot);
   const gl = projectGitLab(ctx);
   const reviewFile = (n: number): string => join(scratch, `review-${w.key}-r${n}.json`);
   const summaryFile = join(scratch, `dev-${w.key}.md`);

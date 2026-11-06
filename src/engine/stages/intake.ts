@@ -1,5 +1,5 @@
 import { safeMkdirp, safeReadFile, safeWriteFile, UnsafePathError } from '../safe-fs.js';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync } from 'node:fs';
 import { extname, join, resolve } from 'node:path';
 import { GitLabError, type GlProject } from '../../gitlab/client.js';
 import { gitlabToken, type StageContext, type StageOutcome } from '../pipeline.js';
@@ -72,7 +72,7 @@ async function initLocal(ctx: StageContext, branch: string, why: string): Promis
   await ctx.git.init(branch);
   // One initial commit so HEAD, task branches and the scan cache have a base.
   const readme = join(ctx.ws.repoDir, 'README.md');
-  if (!existsSync(readme)) writeFileSync(readme, `# ${ctx.req.title}\n`, 'utf8');
+  if (!lstatSync(readme, { throwIfNoEntry: false })) safeWriteFile(readme, `# ${ctx.req.title}\n`, ctx.ws.trustRoot);
   await ctx.git.commitPaths(['README.md'], 'chore: khởi tạo dự án');
   writeProjectInfo(ctx.ws, { gitlab: false, branch });
   ctx.log(`${why} Khởi tạo repo git cục bộ trên nhánh ${branch}; tài liệu và code sẽ chỉ nằm trên máy này.`, 'warn');
@@ -92,7 +92,7 @@ async function cloneProject(ctx: StageContext, p: GlProject, branch: string): Pr
     // Empty project (new): seed the default branch with one commit so the final MR has a target.
     const def = p.default_branch || 'main';
     await ctx.git.checkout(def, true);
-    writeFileSync(join(ctx.ws.repoDir, 'README.md'), `# ${ctx.req.title}\n`, 'utf8');
+    safeWriteFile(join(ctx.ws.repoDir, 'README.md'), `# ${ctx.req.title}\n`, ctx.ws.trustRoot);
     await ctx.git.commitPaths(['README.md'], 'chore: khởi tạo dự án');
     await ctx.git.push(def);
     p = { ...p, default_branch: def };
@@ -135,7 +135,7 @@ async function intakeProject(ctx: StageContext): Promise<StageOutcome> {
   } else if (await pg.refExists(`origin/${def}`) && await pg.isAncestor(def, `origin/${def}`)) {
     base = `origin/${def}`; // remote is ahead: start from the newest code
   }
-  mkdirSync(join(ws.repoDir, '..'), { recursive: true });
+  safeMkdirp(join(ws.repoDir, '..'), ws.trustRoot);
   await pg.worktreeAdd(ws.repoDir, branch, base);
 
   let info: ProjectInfo = { gitlab: false, defaultBranch: def, branch };

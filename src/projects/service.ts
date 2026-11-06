@@ -1,4 +1,5 @@
-import { existsSync, lstatSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { safeWriteFile } from '../engine/safe-fs.js';
+import { existsSync, lstatSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Config } from '../config.js';
 import type { Repo } from '../db/repo.js';
@@ -222,7 +223,7 @@ export class ProjectService {
   private async initialCommit(git: Git, path: string, name: string, branch: string, init: boolean): Promise<void> {
     if (init) await git.init(branch);
     const readme = join(path, 'README.md');
-    if (!existsSync(readme)) writeFileSync(readme, `# ${name}\n`, 'utf8');
+    if (!lstatSync(readme, { throwIfNoEntry: false })) safeWriteFile(readme, `# ${name}\n`, path);
     await git.commitPaths(['README.md'], 'chore: khởi tạo dự án');
   }
 

@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { safeMkdirp } from '../safe-fs.js';
+import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Repo } from '../../db/repo.js';
 import { renderDocx } from '../../office/docx.js';
@@ -90,7 +91,7 @@ export function withChangeHistory(md: string, section: string): string {
 export async function design(ctx: StageContext): Promise<StageOutcome> {
   const { ws, req, repo } = ctx;
   const dir = join(ws.devflowDir, 'design');
-  mkdirSync(dir, { recursive: true });
+  safeMkdirp(dir, ws.trustRoot);
   const files = { stack: join(dir, 'tech-stack.md'), tkct: join(dir, 'tkct.md'), tkdb: join(dir, 'tkdb.md') };
   const all = repo.listFeatures(req.id).filter(f => f.kind === 'function');
   const fns = all.filter(f => f.scopeStatus === 'active');

@@ -1,5 +1,5 @@
 import { safeMkdirp, safeWriteFile } from '../safe-fs.js';
-import { existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
   CR_REENTER_STAGES, ImpactOut, STAGE_LABELS, type ChangeRequestRow, type CrKind, type ImpactOutT, type Question, type RequestStatus, type Stage,
@@ -216,7 +216,7 @@ export async function change(ctx: StageContext): Promise<StageOutcome> {
   };
 
   const files = crs.map(c => ({ cr: c, md: join(changeDir(ws, c.id), 'impact.md'), json: join(changeDir(ws, c.id), 'impact.json') }));
-  for (const f of files) mkdirSync(changeDir(ws, f.cr.id), { recursive: true });
+  for (const f of files) safeMkdirp(changeDir(ws, f.cr.id), ws.trustRoot);
   const crBlocks = files.map(({ cr, md, json }) => {
     const atts = copyCrAttachments(ctx, cr.id);
     return [
