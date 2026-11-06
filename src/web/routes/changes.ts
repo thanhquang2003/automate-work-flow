@@ -1,4 +1,4 @@
-import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
+import { createWriteStream, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { pipeline as streamPipeline } from 'node:stream/promises';
@@ -7,12 +7,13 @@ import type { Config } from '../../config.js';
 import type { CrKind } from '../../domain/types.js';
 import { loadImpact } from '../../engine/changes.js';
 import { changeDir } from '../../engine/stages/common.js';
+import { safeMkdirp, safeWriteFile } from '../../engine/safe-fs.js';
 import { Workspace } from '../../engine/workspace.js';
 import { markdownToHtml } from '../markdown-html.js';
 import { PermissionError } from '../../projects/service.js';
 import type { WebDeps } from '../server.js';
 import { render, type LayoutData } from '../view.js';
-import { cleanName } from './requests.js';
+import { cleanName, readRequestText } from './requests.js';
 import { allowedOnRequest, auditWeb, forbidPage, statusOfError, type Need } from '../authz.js';
 
 const KINDS: CrKind[] = ['add', 'modify', 'remove', 'nfr', 'other'];
@@ -94,7 +95,10 @@ export function changeRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
         return back(reply, id, 'changes', msgOf(e));
       }
       // The CHANGE job runs on a later worker tick, so attaching synchronously here is visible to it.
-      const dir = join(Workspace.forRequest(cfg, repo, repo.getRequest(id)!).ensure().inputsDir, 'changes', crId);
+      // inputs/ is seat-writable: the folder is created and every file written through safe-fs (no symlinked folder
+      // on the way, O_NOFOLLOW, descriptor path checked), so a planted `inputs/changes` link cannot redirect the write.
+      const ws = Workspace.forRequest(cfg, repo, repo.getRequest(id)!);
+      const dir = join(ws.inputsDir, 'changes', crId);
       const used = new Set<string>();
       const failed: string[] = [];
       for (const s of saved) {
@@ -102,9 +106,10 @@ export function changeRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
         for (let i = 2; used.has(name); i++) name = `${i}_${s.name}`;
         used.add(name);
         try {
-          mkdirSync(dir, { recursive: true });
+          ws.ensure();
+          safeMkdirp(dir, ws.trustRoot);
           const dest = join(dir, name);
-          renameSync(s.tmp, dest);
+          safeWriteFile(dest, readFileSync(s.tmp), ws.trustRoot);
           repo.addCrAttachment(id, crId, name, dest);
         } catch (e) {
           console.error(`CR attachment ${name} not saved`, e);
@@ -160,9 +165,9 @@ export function changeRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
     if (!r || !cr) return errPage(req, reply, 404, 'Không tìm thấy yêu cầu thay đổi.');
     if (!allowedOnRequest(cfg, repo, req.user, r, 'read')) return forbidPage(cfg, req, reply);
     const ws = Workspace.forRequest(cfg, repo, r);
-    const md = join(changeDir(ws, crId), 'impact.md');
+    const md = readRequestText(ws, join(changeDir(ws, crId), 'impact.md'));
     return html(reply, render('impact', layout(req, `${cr.id} - Tác động`), {
-      r, cr, impact: loadImpact(ws, crId), impactHtml: existsSync(md) ? markdownToHtml(readFileSync(md, 'utf8')) : '',
+      r, cr, impact: loadImpact(ws, crId), impactHtml: md ? markdownToHtml(md) : '',
     }));
   });
 }

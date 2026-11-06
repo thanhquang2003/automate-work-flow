@@ -1,6 +1,6 @@
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
+import { closeSync, createWriteStream, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { basename, extname, join, relative, resolve, sep } from 'node:path';
+import { basename, extname, join, resolve, sep } from 'node:path';
 import { pipeline as streamPipeline } from 'node:stream/promises';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { ZipArchive } from 'archiver';
@@ -9,6 +9,7 @@ import type { BugRow, ProjectKind, RequestRow, RunMode, SoftwareType } from '../
 import { STAGES } from '../../domain/types.js';
 import { loadImpact } from '../../engine/changes.js';
 import { changeDir, readFlowState, readProjectInfo } from '../../engine/stages/common.js';
+import { SafeFileStream, safeListTree, safeOpenRead, safeReadText, safeWriteFile, UnsafePathError } from '../../engine/safe-fs.js';
 import { Workspace } from '../../engine/workspace.js';
 import { StaleActionError } from '../../engine/pipeline.js';
 import { PermissionError } from '../../projects/service.js';
@@ -51,19 +52,32 @@ function bugsWithLinks(ws: Workspace, bugs: BugRow[]): (BugRow & { issueUrl?: st
   });
 }
 
-function listFiles(dir: string, base = dir): FileEntry[] {
-  if (!existsSync(dir)) return [];
-  const out: FileEntry[] = [];
-  for (const d of readdirSync(dir, { withFileTypes: true })) {
-    const p = join(dir, d.name);
-    if (d.isDirectory()) out.push(...listFiles(p, base));
-    else if (d.isFile()) {
-      const st = statSync(p);
-      const rel = relative(base, p).split(sep).join('/');
-      out.push({ rel, size: st.size, mtime: st.mtimeMs, image: IMAGE_RE.test(rel) });
-    }
+/**
+ * Regular files under a request folder a seat can write (artifacts/, evidence/). Read through safe-fs: symlinks and
+ * special files are left out, a symlinked folder on the way (or the folder itself) gives an empty list.
+ */
+function listFiles(ws: Workspace, dir: string): FileEntry[] {
+  try {
+    return safeListTree(dir, ws.trustRoot).map(e => ({ rel: e.rel, size: e.size, mtime: e.mtimeMs, image: IMAGE_RE.test(e.rel) }));
+  } catch (e) {
+    if (e instanceof UnsafePathError || (e as NodeJS.ErrnoException).code === 'ENOTDIR') return [];
+    throw e;
   }
-  return out.sort((a, b) => a.rel.localeCompare(b.rel));
+}
+
+/**
+ * Text of a file in a seat-writable request folder (analysis.md, impact.md) through safe-fs; '' when it is missing or
+ * unsafe (symlink anywhere on the way, FIFO, device...). Never follows a planted link.
+ */
+export function readRequestText(ws: Workspace, path: string): string {
+  try {
+    return safeReadText(path, ws.trustRoot);
+  } catch (e) {
+    if (e instanceof UnsafePathError) { console.warn(`refused to read ${path}: ${e.message}`); return ''; }
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return '';
+    throw e;
+  }
 }
 
 /** Resolves a user-supplied relative path under `root`; undefined when it escapes. */
@@ -175,7 +189,7 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
         for (let i = 2; used.has(name); i++) name = `${i}_${s.name}`;
         used.add(name);
         const dest = join(ws.inputsDir, name);
-        renameSync(s.tmp, dest);
+        safeWriteFile(dest, readFileSync(s.tmp), ws.trustRoot);
         repo.addAttachment(row.id, name, dest, s.size);
       }
       pipeline.start(row.id);
@@ -196,12 +210,12 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
     const ws = Workspace.forRequest(cfg, repo, r);
     const data: Record<string, unknown> = { r, tab, TABS, attachments: repo.listAttachments(id), stageRuns: repo.listStageRuns(id) };
     if (tab === 'analysis') {
-      const p = join(ws.devflowDir, 'analysis.md');
-      data.analysisHtml = existsSync(p) ? markdownToHtml(readFileSync(p, 'utf8')) : '';
+      const md = readRequestText(ws, join(ws.devflowDir, 'analysis.md'));
+      data.analysisHtml = md ? markdownToHtml(md) : '';
     } else if (tab === 'questions') {
       data.questionsHtml = renderPartial('partials/questions', questionsTabData(repo, cfg, r));
     } else if (tab === 'docs') {
-      const files = listFiles(ws.artifactsDir);
+      const files = listFiles(ws, ws.artifactsDir);
       data.docs = files.filter(f => !f.rel.startsWith('evidence/'));
       data.docGroups = groupByVersion(data.docs as FileEntry[]);
       data.evidence = files.filter(f => f.rel.startsWith('evidence/'));
@@ -209,7 +223,7 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
       data.tasks = repo.listTasks(id);
       data.features = repo.listFeatures(id);
     } else if (tab === 'tests') {
-      const have = new Set([...listFiles(ws.artifactsDir).map(f => f.rel), ...listFiles(ws.evidenceDir).map(f => `evidence/${f.rel}`)]);
+      const have = new Set([...listFiles(ws, ws.artifactsDir).map(f => f.rel), ...listFiles(ws, ws.evidenceDir).map(f => `evidence/${f.rel}`)]);
       data.tests = repo.listTestCases(id).map(t => ({
         ...t,
         evidenceLinks: t.evidence.map(e => ({ name: e, rel: have.has(e) ? e : have.has(`evidence/${e}`) ? `evidence/${e}` : e, image: IMAGE_RE.test(e) })),
@@ -223,8 +237,8 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
     data.decisions = [];
     if (r.stage === 'CHANGE' && r.status === 'awaiting_approval') {
       data.decisions = crs.filter(c => c.status === 'awaiting_decision').map(cr => {
-        const md = join(changeDir(ws, cr.id), 'impact.md');
-        return { cr, impact: loadImpact(ws, cr.id), impactHtml: existsSync(md) ? markdownToHtml(readFileSync(md, 'utf8')) : '' };
+        const md = readRequestText(ws, join(changeDir(ws, cr.id), 'impact.md'));
+        return { cr, impact: loadImpact(ws, cr.id), impactHtml: md ? markdownToHtml(md) : '' };
       });
     }
     // Stepper: CHANGE is not a normal step; while in CHANGE the position of the interrupted stage is shown.
@@ -234,7 +248,7 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
     data.stepIdx = at === null ? -1 : steps.indexOf(at as (typeof steps)[number]);
     if (tab === 'changes') {
       const feats = new Map(repo.listFeatures(id).map(f => [f.id, f]));
-      data.crRows = crs.map(c => ({ ...c, attachments: repo.listCrAttachments(id, c.id), hasImpact: existsSync(join(changeDir(ws, c.id), 'impact.md')) }));
+      data.crRows = crs.map(c => ({ ...c, attachments: repo.listCrAttachments(id, c.id), hasImpact: readRequestText(ws, join(changeDir(ws, c.id), 'impact.md')) !== '' }));
       const pm = /^(remove|modify):(F-[\w-]+)$/.exec((q as { prefill?: string }).prefill ?? '');
       const pf = pm && feats.get(pm[2]!);
       data.prefill = pf
@@ -379,15 +393,39 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
     if (!getReq(id)) return notFound(req, reply);
     if (!ok(req, getReq(id)!, 'read')) return forbidPage(cfg, req, reply);
     const ws = Workspace.forRequest(cfg, repo, getReq(id)!);
-    let file = safeJoin(ws.artifactsDir, rel);
-    if (file && !(existsSync(file) && statSync(file).isFile()) && rel.startsWith('evidence/')) file = safeJoin(ws.evidenceDir, rel.slice('evidence/'.length));
-    if (!file) return html(reply, render('error', layout(req, 'Bị từ chối'), { code: 403, message: 'Đường dẫn không hợp lệ.' }), 403);
-    if (!existsSync(file) || !statSync(file).isFile()) return notFound(req, reply);
-    const inline = INLINE_TYPES[extname(file).toLowerCase()];
-    reply.header('X-Content-Type-Options', 'nosniff');
-    reply.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
-    reply.header('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(basename(file))}`);
-    return reply.type(inline ?? 'application/octet-stream').send(createReadStream(file));
+    const denied = () => html(reply, render('error', layout(req, 'Bị từ chối'), { code: 403, message: 'Đường dẫn không hợp lệ.' }), 403);
+    // Lexical check first (no ../), then every open goes through safe-fs: no symlink at any component below the
+    // request root, O_NOFOLLOW|O_NONBLOCK, regular files only. A seat-planted link or FIFO gets 403, never its target.
+    const cands: string[] = [];
+    const a = safeJoin(ws.artifactsDir, rel);
+    if (a) cands.push(a);
+    if (rel.startsWith('evidence/')) { const e = safeJoin(ws.evidenceDir, rel.slice('evidence/'.length)); if (e) cands.push(e); }
+    if (!cands.length) return denied();
+    let opened: { fd: number; file: string } | undefined;
+    let unsafe = false;
+    for (const file of cands) {
+      try {
+        opened = { fd: safeOpenRead(file, ws.trustRoot).fd, file };
+        break;
+      } catch (e) {
+        if (e instanceof UnsafePathError) { unsafe = true; continue; }
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') continue;
+        throw e;
+      }
+    }
+    if (!opened) return unsafe ? denied() : notFound(req, reply);
+    const { fd, file } = opened;
+    try {
+      const inline = INLINE_TYPES[extname(file).toLowerCase()];
+      reply.header('X-Content-Type-Options', 'nosniff');
+      reply.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+      reply.header('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(basename(file))}`);
+      return reply.type(inline ?? 'application/octet-stream').send(new SafeFileStream(file, ws.trustRoot, fd));
+    } catch (e) {
+      closeSync(fd);
+      throw e;
+    }
   });
 
   app.get('/requests/:id/bundle.zip', async (req, reply) => {
@@ -397,8 +435,14 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
     const ws = Workspace.forRequest(cfg, repo, getReq(id)!);
     const zip = new ZipArchive({ zlib: { level: 6 } });
     zip.on('error', () => zip.abort());
-    if (existsSync(ws.artifactsDir)) zip.directory(ws.artifactsDir, false);
-    if (existsSync(ws.evidenceDir) && !existsSync(join(ws.artifactsDir, 'evidence'))) zip.directory(ws.evidenceDir, 'evidence');
+    // Built from a safe-fs listing, each entry read through safe-fs (never zip.directory, which follows links).
+    const arts = listFiles(ws, ws.artifactsDir);
+    for (const f of arts) zip.append(new SafeFileStream(join(ws.artifactsDir, ...f.rel.split('/')), ws.trustRoot), { name: f.rel });
+    if (!arts.some(f => f.rel.startsWith('evidence/'))) {
+      for (const f of listFiles(ws, ws.evidenceDir)) {
+        zip.append(new SafeFileStream(join(ws.evidenceDir, ...f.rel.split('/')), ws.trustRoot), { name: `evidence/${f.rel}` });
+      }
+    }
     void zip.finalize();
     reply.header('Content-Disposition', `attachment; filename="${id}-ketqua.zip"`);
     return reply.type('application/zip').send(zip);

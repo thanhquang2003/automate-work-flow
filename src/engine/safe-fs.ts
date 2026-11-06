@@ -1,5 +1,6 @@
+import { Readable } from 'node:stream';
 import {
-  closeSync, constants, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, readdirSync, readlinkSync, readSync, realpathSync,
+  close as fsClose, read as fsRead, closeSync, constants, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, readdirSync, readlinkSync, readSync, realpathSync,
   rmSync, unlinkSync, writeSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -204,6 +205,111 @@ export function safeListFiles(dir: string, root?: string): { name: string; size:
     if (e?.isFile()) out.push({ name, size: e.size, mtimeMs: e.mtimeMs });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export interface TreeEntry { rel: string; size: number; mtimeMs: number }
+
+/**
+ * Regular files under `dir`, recursively (relative paths with forward slashes, sorted). Symlinks (to files or folders)
+ * and special files are left out and never followed; `dir` and every folder above it up to the root must be real
+ * folders. Missing dir: [].
+ */
+export function safeListTree(dir: string, root?: string): TreeEntry[] {
+  const d = resolve(dir);
+  const r = rootFor(d, root);
+  checkParents(join(d, 'x'), r, false);
+  const st = lstatSync(d, { throwIfNoEntry: false });
+  if (!st) return [];
+  if (!st.isDirectory()) throw new UnsafePathError(`${d} is not a directory; refusing`);
+  const out: TreeEntry[] = [];
+  const walk = (rel: string): void => {
+    const cur = rel ? join(d, rel) : d;
+    for (const name of readdirSync(cur)) {
+      const childRel = rel ? join(rel, name) : name;
+      const e = lstatSync(join(d, childRel), { throwIfNoEntry: false });
+      if (!e) continue;
+      if (e.isDirectory()) walk(childRel);
+      else if (e.isFile()) out.push({ rel: childRel.split(sep).join('/'), size: e.size, mtimeMs: e.mtimeMs });
+    }
+  };
+  walk('');
+  return out.sort((a, b) => a.rel.localeCompare(b.rel));
+}
+
+/**
+ * Opens a regular file for reading with the same checks as safeReadFile (no symlink at any component, O_NOFOLLOW |
+ * O_NONBLOCK, fstat must say regular file, /proc/self/fd check on Linux). The caller owns the descriptor.
+ */
+export function safeOpenRead(path: string, root?: string): { fd: number; size: number } {
+  const p = resolve(path);
+  const r = rootFor(p, root);
+  checkParents(p, r, false);
+  const fd = openChecked(p, constants.O_RDONLY, r, false);
+  return { fd, size: fstatSync(fd).size };
+}
+
+/**
+ * A readable stream over a regular file opened through safeOpenRead. Pass an already opened `fd` (so the caller can
+ * answer 403/404 before sending headers), or let the stream open the file lazily on its first read (zip entries: no
+ * descriptor is held before the archiver gets to the entry). A lazily opened file that turns out unsafe or missing
+ * yields an empty stream with `skipped` set instead of an error, so one planted entry does not break a whole archive.
+ */
+export class SafeFileStream extends Readable {
+  private pos = 0;
+  skipped = false;
+  constructor(private readonly path: string, private readonly root: string | undefined, private fd?: number) {
+    super({ highWaterMark: 64 * 1024 });
+  }
+
+  override _read(n: number): void {
+    if (this.fd === undefined) {
+      try {
+        this.fd = safeOpenRead(this.path, this.root).fd;
+      } catch (e) {
+        if (e instanceof UnsafePathError || (e as NodeJS.ErrnoException).code === 'ENOENT') {
+          this.skipped = true;
+          this.push(null);
+          return;
+        }
+        this.destroy(e as Error);
+        return;
+      }
+    }
+    const b = Buffer.allocUnsafe(Math.max(n, 16 * 1024));
+    fsRead(this.fd, b, 0, b.length, this.pos, (err, bytes) => {
+      if (err) { this.destroy(err); return; }
+      if (bytes === 0) { this.push(null); return; }
+      this.pos += bytes;
+      this.push(b.subarray(0, bytes));
+    });
+  }
+
+  override _destroy(err: Error | null, cb: (e?: Error | null) => void): void {
+    const fd = this.fd;
+    this.fd = undefined;
+    if (fd === undefined) { cb(err); return; }
+    fsClose(fd, () => cb(err));
+  }
+}
+
+/**
+ * Creates `dir` (and missing folders above it) below the root; every existing component must be a real folder, never a
+ * symlink, so a planted link cannot redirect the creation elsewhere.
+ */
+export function safeMkdirp(dir: string, root?: string): void {
+  const d = resolve(dir);
+  const r = rootFor(d, root);
+  if (r && d === r) {
+    const st = lstatSync(d, { throwIfNoEntry: false });
+    if (!st) mkdirSync(d, { recursive: true });
+    else if (!st.isDirectory()) throw new UnsafePathError(`${d} is not a directory; refusing`);
+    return;
+  }
+  checkParents(d, r, true);
+  const st = lstatSync(d, { throwIfNoEntry: false });
+  if (!st) mkdirSync(d);
+  else if (st.isSymbolicLink()) throw new UnsafePathError(`${d} is a symlink; refusing`);
+  else if (!st.isDirectory()) throw new UnsafePathError(`${d} is not a directory; refusing`);
 }
 
 /** True when `path` is an existing regular file (a symlink counts as missing). */

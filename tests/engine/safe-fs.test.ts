@@ -164,3 +164,48 @@ describe('safe-fs non-regular targets (never block the event loop)', () => {
     expect(() => safeRemove(join(e.root, 'd'), e.root)).toThrow(UnsafePathError);
   });
 });
+
+describe('safe-fs: web helpers (C1)', () => {
+  it('safeListTree lists regular files recursively and never follows links', async () => {
+    const { safeListTree } = await import('../../src/engine/safe-fs.js');
+    const e = env();
+    mkdirSync(join(e.root, 'art', 'sub'), { recursive: true });
+    writeFileSync(join(e.root, 'art', 'a.txt'), 'a');
+    writeFileSync(join(e.root, 'art', 'sub', 'b.txt'), 'bb');
+    symlinkSync(e.secret, join(e.root, 'art', 'leak.txt'));
+    symlinkSync(e.outside, join(e.root, 'art', 'dirlink'));
+    execFileSync('mkfifo', [join(e.root, 'art', 'pipe')]);
+    expect(safeListTree(join(e.root, 'art'), e.root).map(x => [x.rel, x.size])).toEqual([['a.txt', 1], ['sub/b.txt', 2]]);
+    expect(safeListTree(join(e.root, 'missing'), e.root)).toEqual([]);
+    expect(() => safeListTree(join(e.root, 'art', 'dirlink'), e.root)).toThrow(UnsafePathError);
+  });
+
+  it('safeOpenRead / SafeFileStream refuse links, FIFOs and symlinked folders; lazy streams skip them', async () => {
+    const { safeOpenRead, SafeFileStream } = await import('../../src/engine/safe-fs.js');
+    const e = env();
+    writeFileSync(join(e.root, 'ok.txt'), 'fine');
+    symlinkSync(e.secret, join(e.root, 'leak.txt'));
+    symlinkSync(e.outside, join(e.root, 'dir'));
+    execFileSync('mkfifo', [join(e.root, 'pipe')]);
+    for (const p of ['leak.txt', 'dir/secret.txt', 'pipe']) expect(() => safeOpenRead(join(e.root, p), e.root), p).toThrow(UnsafePathError);
+    const read = async (s: NodeJS.ReadableStream) => { let t = ''; for await (const c of s) t += String(c); return t; };
+    const { fd } = safeOpenRead(join(e.root, 'ok.txt'), e.root);
+    expect(await read(new SafeFileStream(join(e.root, 'ok.txt'), e.root, fd))).toBe('fine');
+    for (const p of ['leak.txt', 'dir/secret.txt', 'pipe', 'nope']) {
+      const s = new SafeFileStream(join(e.root, p), e.root);
+      expect(await read(s), p).toBe('');
+      expect(s.skipped, p).toBe(true);
+    }
+  });
+
+  it('safeMkdirp creates folders but refuses a symlink anywhere on the way', async () => {
+    const { safeMkdirp } = await import('../../src/engine/safe-fs.js');
+    const e = env();
+    safeMkdirp(join(e.root, 'x', 'y', 'z'), e.root);
+    expect(existsSync(join(e.root, 'x', 'y', 'z'))).toBe(true);
+    symlinkSync(e.outside, join(e.root, 'inputs'));
+    expect(() => safeMkdirp(join(e.root, 'inputs', 'changes', 'CR-1'), e.root)).toThrow(UnsafePathError);
+    expect(() => safeMkdirp(join(e.root, 'inputs'), e.root)).toThrow(UnsafePathError);
+    expect(existsSync(join(e.outside, 'changes'))).toBe(false);
+  });
+});

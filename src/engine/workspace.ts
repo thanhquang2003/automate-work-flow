@@ -1,8 +1,7 @@
-import { mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { Config } from '../config.js';
 import type { Repo } from '../db/repo.js';
-import { addTrustedRoot } from './safe-fs.js';
+import { addTrustedRoot, safeMkdirp } from './safe-fs.js';
 
 /** Minimal request shape needed to locate a workspace. */
 export interface WorkspaceReq { id: string; projectId?: number | null; code?: string | null }
@@ -45,6 +44,9 @@ export class Workspace {
   }
 
   get isProjectRooted(): boolean { return this.projectDir !== undefined; }
+
+  /** The registered folder safe-fs checks this request's paths from (project folder, or the legacy workspace). */
+  get trustRoot(): string { return this.projectDir ?? this.root; }
 
   /** Legacy layout (request id based). */
   static for(cfg: Config, reqId: string): Workspace {
@@ -94,7 +96,8 @@ export class Workspace {
   ensure(): this {
     const dirs = [this.root, this.inputsDir, this.artifactsDir, this.evidenceDir, this.logsDir];
     if (!this.projectDir) dirs.push(this.repoDir);
-    for (const d of dirs) mkdirSync(d, { recursive: true });
+    // Seat-writable folders: a planted symlink must not redirect the creation (safeMkdirp checks every component).
+    for (const d of dirs) safeMkdirp(d, this.trustRoot);
     return this;
   }
 }

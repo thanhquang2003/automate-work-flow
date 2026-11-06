@@ -15,5 +15,30 @@
     "id_format": "TASK-NNN",
     "evidence_rule": "Tasks cannot move to done without evidence."
   },
-  "tasks": []
+  "tasks": [
+    {
+      "id": "TASK-001",
+      "title": "Final review fixes: web symlink safety, startup sweep, pause on awaiting_seat, department invariant",
+      "description": "From the whole-branch review of feat/v3-multiuser (see .superpowers/sdd/2026-11-07-v3-implementation/progress.md FINAL REVIEW lines). C1 web routes follow seat-planted symlinks; I1 startup sweep; I2 pause/awaiting_seat flapping; I3 admin sys-role vs department invariant; plus minors.",
+      "type": "chore",
+      "priority": "high",
+      "complexity": "medium",
+      "status": "in-progress",
+      "depends_on": [],
+      "blocks_feature": null,
+      "assigned_session": "2026-11-06T14:26:25.223Z",
+      "started": "2026-11-06",
+      "completed_session": null,
+      "fix_commit": null,
+      "evidence": null,
+      "notes": null,
+      "work_log": [
+        {
+          "session": "2026-11-06T14:26:25.223Z",
+          "done": "Starting work.",
+          "remaining": "TBD"
+        }
+      ]
+    }
+  ]
 }
