@@ -153,8 +153,9 @@ function renderBlock(b: Block, styles: Styles): string {
 }
 
 /**
- * Renders the docx to a buffer, then writes it only through safe-fs (fresh temp name + rename under `root`): the
- * output folder is seat-writable, a library write by name could follow a link planted while rendering.
+ * Renders the docx to a buffer, then writes it only through safeWriteFile under `root`: an in-place checked write
+ * (verified parent folder descriptor, O_NOFOLLOW, no truncation before every check passed). The output folder is
+ * seat-writable, so a library write by name could follow a link planted while rendering.
  */
 export async function renderDocx(templatePath: string, markdown: string, outPath: string, root?: string): Promise<void> {
   safeWriteFile(outPath, await renderDocxBuffer(templatePath, markdown), root);
