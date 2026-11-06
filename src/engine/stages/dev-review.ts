@@ -149,7 +149,8 @@ export async function developAndReview(ctx: StageContext, w: WorkItem): Promise<
     const revPrompt = buildPrompt('reviewer', {
       ...common, round: String(round), max_rounds: String(MAX_REVIEW_ROUNDS), dev_summary: `\`${summaryFile}\``, previous_review: prev,
     }, promptExtras(ctx, [{ path: out, description: 'Kết quả review: approved và danh sách nhận xét.', example: REVIEW_EXAMPLE }]));
-    const rev = await runClaudeStep(ctx, { prompt: revPrompt, clean: [out], validate: () => readJsonOutput(out, ReviewOut) });
+    // The review runs on the REVIEWER seat of the request (spec v3 §5.4).
+    const rev = await runClaudeStep(ctx, { prompt: revPrompt, clean: [out], validate: () => readJsonOutput(out, ReviewOut), seatRole: 'REVIEWER' });
     if (!rev.ok) return { kind: 'fail', error: `Reviewer (${w.kind}): ${rev.error}` };
     if ((await ctx.git.currentBranch()) !== w.branch) await ctx.git.checkout(w.branch);
     last = rev.value;

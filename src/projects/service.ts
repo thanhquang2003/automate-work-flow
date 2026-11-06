@@ -29,6 +29,16 @@ export class NoopProjectSystemOps implements ProjectSystemOps {
   setMembers(): void { /* local mode / tests */ }
 }
 
+/**
+ * Engine side of membership changes (Pipeline implements it): jobs of leaving members are stopped and moved to
+ * the next person of the role BEFORE the DB and the OS group change; assignee changes reseat running jobs.
+ */
+export interface MemberChangeHooks {
+  beforeMembersRemoved(projectId: number, changes: { userId: number; roles: ProjectRole[] }[]): Promise<void>;
+  afterMembersChanged(projectId: number): void;
+  assigneesChanged?(requestId: string): Promise<void>;
+}
+
 export interface ProjectServiceDeps {
   cfg: Pick<Config, 'projectRoots' | 'mode'>;
   repo: Repo;
@@ -37,6 +47,8 @@ export interface ProjectServiceDeps {
   gitlab?: GitLabClient;
   /** Token for git clone/push; defaults to `gitlab.token`. */
   gitlabToken?: string;
+  /** Engine hooks (the Pipeline); can also be attached later with attachEngine. */
+  engine?: MemberChangeHooks;
 }
 
 export interface CreateProjectInput {
@@ -91,9 +103,12 @@ export class ProjectService {
   private readonly repo: Repo;
   private readonly systemOps: ProjectSystemOps;
 
+  private hooks?: MemberChangeHooks;
+
   constructor(private deps: ProjectServiceDeps) {
     this.repo = deps.repo;
     this.systemOps = deps.systemOps ?? new NoopProjectSystemOps();
+    this.hooks = deps.engine;
   }
 
   // ---- actors ----
@@ -240,6 +255,25 @@ export class ProjectService {
     if (!clean.some(m => m.roles.includes('PM'))) throw new ProjectError('Dự án phải còn ít nhất một PM.');
 
     const before = this.repo.listProjectMembers(projectId);
+    // Members leaving (or losing roles): their running jobs are stopped and moved first (spec v3 §6b.1).
+    const nextRoles = new Map(clean.map(m => [m.userId, m.roles]));
+    const changes = before
+      .map(m => ({ userId: m.userId, roles: m.roles.filter(r => !(nextRoles.get(m.userId) ?? []).includes(r)) }))
+      .filter(c => c.roles.length);
+    if (changes.length && this.hooks) await this.hooks.beforeMembersRemoved(projectId, changes);
+    try {
+      this.applyMembers(projectId, before, clean, by.id);
+    } finally {
+      this.hooks?.afterMembersChanged(projectId);
+    }
+    await this.systemOps.setMembers(projectId, clean.map(m => m.userId));
+  }
+
+  /** Attaches the engine (Pipeline) after construction. */
+  attachEngine(hooks: MemberChangeHooks): void { this.hooks = hooks; }
+
+  private applyMembers(projectId: number, before: { userId: number; roles: ProjectRole[] }[], clean: MemberInput[], byId: number): void {
+    const by = { id: byId };
     this.repo.tx(() => {
       const keep = new Map(clean.map(m => [m.userId, m.roles]));
       for (const old of before) {
@@ -262,7 +296,6 @@ export class ProjectService {
         detail: JSON.stringify({ before: before.map(m => ({ u: m.userId, r: m.roles })), after: clean.map(m => ({ u: m.userId, r: m.roles })) }),
       });
     });
-    await this.systemOps.setMembers(projectId, clean.map(m => m.userId));
   }
 
   // ---- request assignees ----
@@ -285,6 +318,8 @@ export class ProjectService {
       this.repo.setRequestAssignees(requestId, role, ids);
       this.repo.web.addAudit({ projectId: project.id, requestId, userId: by.id, action: 'request.assignees.set', detail: JSON.stringify({ role, before, after: ids }) });
     });
+    // A new runner takes over a running job of that role (stopped and re-run on the new seat).
+    void this.hooks?.assigneesChanged?.(requestId).catch(() => undefined);
   }
 
   // ---- requests ----

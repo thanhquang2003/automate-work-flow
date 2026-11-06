@@ -7,7 +7,8 @@ import { writeTestCases } from '../../office/testcase-xlsx.js';
 import { templatePath } from '../../office/templates.js';
 import { buildPrompt } from '../prompt.js';
 import type { StageContext, StageOutcome } from '../pipeline.js';
-import { OutputError, readJsonOutput, runClaudeStep } from './claude-json.js';
+import { OutputError, readJsonOutput, runClaudeStep, type StepResult } from './claude-json.js';
+import type { PlanningPart } from '../seats.js';
 import {
   artifactName, contextFileVars, crResponsible, designFile, ensureOnBranch, fileRef, integrationBranch, isIncremental, promptExtras,
   pushIfRemote, sortedTestCases, tcSheetRow, updateFlowState,
@@ -15,6 +16,12 @@ import {
 
 type TaskOut = z.infer<typeof TasksOut>['tasks'][number];
 type TestCaseOut = z.infer<typeof TestCasesOut>['test_cases'][number];
+
+/** Which list a v3 PLANNING run writes (the other one is read-only context). */
+const PART_NOTE: Record<PlanningPart, string> = {
+  tasks: '**Lần chạy này chỉ lập `tasks.json` (phần của Dev).** Không ghi `testcases.json`: Tester lập test case trong một lần chạy riêng. Bỏ qua mục "testcases.json" bên dưới.',
+  testcases: '**Lần chạy này chỉ lập `testcases.json` (phần của Tester).** Danh sách task đã có ở `{{tasks_file}}` (chỉ đọc, không sửa). Bỏ qua mục "tasks.json" bên dưới.',
+};
 
 const TASKS_EXAMPLE = {
   tasks: [
@@ -55,24 +62,28 @@ export function orderTasks<T extends { id: string; dependsOn: string[] }>(tasks:
  * `fns`: functions every one of which needs an (active) task and test case; `known`: every feature a task/TC may
  * reference (cancelled ones included, for cancelled rows kept after a change request).
  */
-function checkPlan(tasks: TaskOut[], tcs: TestCaseOut[], fns: FeatureRow[], known: FeatureRow[] = fns): void {
+function checkPlan(tasks: TaskOut[], tcs: TestCaseOut[], fns: FeatureRow[], known: FeatureRow[] = fns, only?: PlanningPart): void {
   const errs: string[] = [];
+  const checkTasks = only !== 'testcases';
+  const checkTcs = only !== 'tasks';
   const fById = new Map(known.map(f => [f.id, f]));
   const taskIds = new Set<string>();
-  if (!tasks.length) errs.push('tasks.json chưa có task nào');
-  for (const t of tasks) {
+  if (checkTasks && !tasks.length) errs.push('tasks.json chưa có task nào');
+  for (const t of checkTasks ? tasks : []) {
     if (!/^T-\d{2,}$/.test(t.id)) errs.push(`task id "${t.id}" phải có dạng T-01`);
     if (taskIds.has(t.id)) errs.push(`task ${t.id} bị trùng id`);
     taskIds.add(t.id);
     if (!fById.has(t.feature_id)) errs.push(`task ${t.id}: feature_id "${t.feature_id}" không có trong danh sách chức năng`);
   }
-  try {
-    orderTasks(tasks.map(t => ({ id: t.id, dependsOn: t.depends_on })));
-  } catch (e) {
-    errs.push(`tasks.json: ${(e as Error).message}`);
+  if (checkTasks) {
+    try {
+      orderTasks(tasks.map(t => ({ id: t.id, dependsOn: t.depends_on })));
+    } catch (e) {
+      errs.push(`tasks.json: ${(e as Error).message}`);
+    }
   }
   const tcIds = new Set<string>();
-  for (const tc of tcs) {
+  for (const tc of checkTcs ? tcs : []) {
     if (tcIds.has(tc.id)) errs.push(`test case ${tc.id} bị trùng id`);
     tcIds.add(tc.id);
     const f = fById.get(tc.feature_id);
@@ -80,8 +91,8 @@ function checkPlan(tasks: TaskOut[], tcs: TestCaseOut[], fns: FeatureRow[], know
     if (!new RegExp(`^TC-${f.code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-\\d{2,}$`).test(tc.id)) errs.push(`test case ${tc.id}: id phải có dạng TC-${f.code}-NN`);
   }
   for (const f of fns) {
-    if (!tasks.some(t => t.feature_id === f.id && t.scope_status === 'active')) errs.push(`chức năng ${f.id} (${f.code}) chưa có task nào`);
-    if (!tcs.some(tc => tc.feature_id === f.id && tc.scope_status === 'active')) errs.push(`chức năng ${f.id} (${f.code}) chưa có test case nào`);
+    if (checkTasks && !tasks.some(t => t.feature_id === f.id && t.scope_status === 'active')) errs.push(`chức năng ${f.id} (${f.code}) chưa có task nào`);
+    if (checkTcs && !tcs.some(tc => tc.feature_id === f.id && tc.scope_status === 'active')) errs.push(`chức năng ${f.id} (${f.code}) chưa có test case nào`);
   }
   if (errs.length) throw new OutputError(`Kế hoạch chưa đạt:\n- ${errs.join('\n- ')}`);
 }
@@ -162,7 +173,7 @@ export async function planning(ctx: StageContext): Promise<StageOutcome> {
   const cancelledFns = allFns.filter(f => f.scopeStatus === 'cancelled');
   const files = { tasks: join(ws.devflowDir, 'tasks.json'), tcs: join(ws.devflowDir, 'testcases.json') };
 
-  const prompt = buildPrompt('planner', {
+  const vars = {
     ...contextFileVars(ctx),
     feature_list: [
       ...fns.map(f => `- ${f.id} — ${f.code} — ${f.name}`),
@@ -170,31 +181,61 @@ export async function planning(ctx: StageContext): Promise<StageOutcome> {
     ].join('\n'),
     tkct_file: fileRef(designFile(ctx.ws, 'tkct.md'), '(chưa có TKCT)'),
     tkdb_file: fileRef(designFile(ctx.ws, 'tkdb.md'), '(chưa có TKDB)'),
-  }, promptExtras(ctx, [
-    { path: files.tasks, description: 'Danh sách task phát triển có phụ thuộc.', example: TASKS_EXAMPLE },
-    { path: files.tcs, description: 'Danh sách test case (trạng thái để trống).', example: TESTCASES_EXAMPLE },
-  ]));
+  };
+  const tasksOut = { path: files.tasks, description: 'Danh sách task phát triển có phụ thuộc.', example: TASKS_EXAMPLE };
+  const tcsOut = { path: files.tcs, description: 'Danh sách test case (trạng thái để trống).', example: TESTCASES_EXAMPLE };
+  /** Reads both files and checks the plan as it will be stored (`only`: the part just written). */
+  const readPlan = async (only?: PlanningPart) => {
+    const { tasks } = await readJsonOutput(files.tasks, TasksOut);
+    const { test_cases } = await readJsonOutput(files.tcs, TestCasesOut);
+    if (incremental) {
+      // Rows Claude omits are kept, so the plan is checked as it will be stored.
+      const seenT = new Set(tasks.map(t => t.id));
+      const seenC = new Set(test_cases.map(t => t.id));
+      const keptT = repo.listTasks(req.id).filter(t => !seenT.has(t.id)).map(taskOut);
+      const keptC = repo.listTestCases(req.id).filter(t => !seenC.has(t.id)).map(tcOut);
+      checkPlan([...tasks, ...keptT], [...test_cases, ...keptC], fns, allFns, only);
+    } else {
+      checkPlan(tasks, test_cases, fns, fns, only);
+    }
+    return { tasks, test_cases };
+  };
+  const keep = ctx.feedback || incremental;
 
-  const r = await runClaudeStep(ctx, {
-    prompt,
-    // After accepted CRs Claude updates the existing plan files in place.
-    clean: ctx.feedback || incremental ? [] : Object.values(files),
-    validate: async () => {
-      const { tasks } = await readJsonOutput(files.tasks, TasksOut);
-      const { test_cases } = await readJsonOutput(files.tcs, TestCasesOut);
-      if (incremental) {
-        // Rows Claude omits are kept, so the plan is checked as it will be stored.
-        const seenT = new Set(tasks.map(t => t.id));
-        const seenC = new Set(test_cases.map(t => t.id));
-        const keptT = repo.listTasks(req.id).filter(t => !seenT.has(t.id)).map(taskOut);
-        const keptC = repo.listTestCases(req.id).filter(t => !seenC.has(t.id)).map(tcOut);
-        checkPlan([...tasks, ...keptT], [...test_cases, ...keptC], fns, allFns);
-      } else {
-        checkPlan(tasks, test_cases, fns);
-      }
-      return { tasks, test_cases };
-    },
-  });
+  let r: StepResult<{ tasks: TaskOut[]; test_cases: TestCaseOut[] }>;
+  if (!ctx.ws.isProjectRooted) {
+    // v2 / legacy requests: one Claude run writes both lists.
+    r = await runClaudeStep(ctx, {
+      prompt: buildPrompt('planner', { ...vars, part_note: '' }, promptExtras(ctx, [tasksOut, tcsOut])),
+      // After accepted CRs Claude updates the existing plan files in place.
+      clean: keep ? [] : Object.values(files),
+      validate: () => readPlan(),
+    });
+  } else {
+    // v3 (spec §5.4): two Claude runs — the DEV seat writes the tasks, the TESTER seat the test cases. A PM
+    // rejection with a part reruns only that part.
+    r = { ok: true, value: { tasks: [], test_cases: [] } };
+    if (!ctx.part || ctx.part === 'tasks') {
+      const t = await runClaudeStep(ctx, {
+        prompt: buildPrompt('planner', { ...vars, part_note: PART_NOTE.tasks }, promptExtras(ctx, [tasksOut])),
+        clean: keep ? [] : [files.tasks],
+        validate: async () => { await readJsonOutput(files.tasks, TasksOut).then(x => checkPlan(x.tasks, [], fns, incremental ? allFns : fns, 'tasks')); },
+      });
+      if (!t.ok) return { kind: 'fail', error: `Lập task (Dev): ${t.error}` };
+    }
+    if (!ctx.part || ctx.part === 'testcases') {
+      const note = PART_NOTE.testcases.replace('{{tasks_file}}', files.tasks);
+      r = await runClaudeStep(ctx, {
+        prompt: buildPrompt('planner', { ...vars, part_note: note }, promptExtras(ctx, [tcsOut])),
+        clean: keep ? [] : [files.tcs],
+        validate: () => readPlan('testcases'),
+        seatRole: 'TESTER',
+      });
+      if (!r.ok) return { kind: 'fail', error: `Lập test case (Tester): ${r.error}` };
+    }
+    // Both files exist now: check the whole plan once.
+    try { r = { ok: true, value: await readPlan() }; } catch (e) { return { kind: 'fail', error: (e as Error).message }; }
+  }
   if (!r.ok) return { kind: 'fail', error: r.error };
 
   if (incremental) {

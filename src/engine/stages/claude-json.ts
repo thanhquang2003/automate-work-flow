@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { UnsafePathError, safeReadText } from '../safe-fs.js';
 import { z } from 'zod';
+import type { ProjectRole } from '../../domain/types.js';
 import type { StageContext } from '../pipeline.js';
 
 /** Thrown by output validators; the message is fed back to Claude on retry. */
@@ -59,6 +60,8 @@ export interface ClaudeStepOpts<T> {
   /** Stale output files removed before the first run so an old file is never mistaken for a new one. */
   clean?: string[];
   maxRetries?: number;
+  /** Run on the current runner of this role (review seat, PLANNING test cases) instead of the job's seat. */
+  seatRole?: ProjectRole;
 }
 
 /**
@@ -74,7 +77,8 @@ export async function runClaudeStep<T>(ctx: StageContext, o: ClaudeStepOpts<T>):
   let lastError = '';
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (ctx.signal.aborted) return { ok: false, error: 'Đã hủy' };
-    const res = await ctx.claude(prompt, resumeSessionId ? { resumeSessionId } : {});
+    const extra = resumeSessionId ? { resumeSessionId } : {};
+    const res = o.seatRole ? await ctx.claudeAs(ctx.seatFor(o.seatRole), prompt, extra, o.seatRole) : await ctx.claude(prompt, extra);
     try {
       return { ok: true, value: await o.validate() };
     } catch (e) {

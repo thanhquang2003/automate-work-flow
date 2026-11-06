@@ -459,6 +459,11 @@ export class Pipeline {
     await Promise.allSettled(stopped);
   }
 
+  /** Hook for ProjectService.setAssignees: running/queued jobs follow the new order of assignees. */
+  async assigneesChanged(reqId: string): Promise<void> {
+    await Promise.allSettled(this.reseatRequest(reqId));
+  }
+
   /** Hook for ProjectService.setMembers after the DB commit (or a failure): exclusions of that project are dropped. */
   afterMembersChanged(projectId: number): void {
     this.exclusions = this.exclusions.filter(e => e.projectId !== projectId);

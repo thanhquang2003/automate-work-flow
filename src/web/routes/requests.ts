@@ -226,13 +226,13 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
   });
 
   // ---- actions ----
-  const act = (name: string, fn: (r: RequestRow, body: Record<string, string | undefined>) => void) => {
+  const act = (name: string, fn: (r: RequestRow, body: Record<string, string | undefined>, userId: number | null) => void) => {
     app.post(`/requests/:id/${name}`, async (req, reply) => {
       const { id } = req.params as { id: string };
       const r = getReq(id);
       if (!r) return notFound(req, reply);
       try {
-        fn(r, (req.body ?? {}) as Record<string, string | undefined>);
+        fn(r, (req.body ?? {}) as Record<string, string | undefined>, req.user?.id ?? null);
       } catch (e) {
         const msg = e instanceof Error && e.name === 'PipelineBusyError'
           ? 'Bước hiện tại đang chạy, vui lòng thử lại sau khi hoàn tất.'
@@ -242,11 +242,11 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
       return reply.redirect(`/requests/${id}`);
     });
   };
-  act('approve', r => pipeline.approve(r.id));
-  act('reject', (r, b) => {
+  act('approve', (r, b, uid) => pipeline.approve(r.id, uid, b.part || undefined));
+  act('reject', (r, b, uid) => {
     const fb = (b.feedback ?? '').trim();
     if (!fb) throw new Error('Vui lòng nhập nội dung phản hồi khi từ chối.');
-    pipeline.reject(r.id, fb);
+    pipeline.reject(r.id, fb, uid, b.part || undefined);
   });
   act('pause', r => pipeline.pause(r.id));
   act('resume', r => pipeline.resume(r.id));

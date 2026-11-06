@@ -78,12 +78,14 @@ describe('web: local mode', () => {
     const reject = vi.spyOn(pipeline, 'reject').mockImplementation(() => undefined);
     const res = await app.inject({ method: 'POST', url: `/requests/${r.id}/approve` });
     expect(res.statusCode).toBe(302);
-    expect(approve).toHaveBeenCalledWith(r.id);
+    // v3: the acting user (and an optional PLANNING part) are passed for the engine's permission check.
+    expect(approve.mock.calls[0]!.slice(0, 1)).toEqual([r.id]);
+    expect(approve.mock.calls[0]![2]).toBeUndefined();
     const bad = await app.inject({ method: 'POST', url: `/requests/${r.id}/reject`, payload: 'feedback=+', headers: { 'content-type': 'application/x-www-form-urlencoded' } });
     expect(bad.headers.location).toContain('err=');
     expect(reject).not.toHaveBeenCalled();
     await app.inject({ method: 'POST', url: `/requests/${r.id}/reject`, payload: 'feedback=l%C3%A0m+l%E1%BA%A1i', headers: { 'content-type': 'application/x-www-form-urlencoded' } });
-    expect(reject).toHaveBeenCalledWith(r.id, 'làm lại');
+    expect(reject.mock.calls[0]!.slice(0, 2)).toEqual([r.id, 'làm lại']);
   });
 
   it('busy pipeline shows a flash error instead of 500', async () => {

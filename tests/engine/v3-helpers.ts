@@ -86,7 +86,8 @@ export function registerStubs(over: Partial<Record<Stage, StageHandler>> = {}): 
   registerStage('INTAKE', intake, { gate: false });
   const stages: Stage[] = ['CODEBASE_SCAN', 'ANALYSIS', 'CLARIFY', 'BREAKDOWN', 'DESIGN', 'PLANNING', 'DEVELOP', 'TEST', 'BUGFIX', 'DONE', 'CHANGE'];
   for (const s of stages) {
-    registerStage(s, over[s] ?? (async ctx => { await ctx.claude(`ROLE: ${s}`); return { kind: 'next' }; }), { gate: GATES.includes(s) });
+    const noClaude = s === 'CLARIFY' || s === 'DONE';
+    registerStage(s, over[s] ?? (async ctx => { if (!noClaude) await ctx.claude(`ROLE: ${s}`); return { kind: 'next' }; }), { gate: GATES.includes(s) });
   }
 }
 
