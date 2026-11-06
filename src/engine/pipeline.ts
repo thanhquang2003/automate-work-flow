@@ -1,3 +1,4 @@
+import { readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { Config } from '../config.js';
 import type { Repo } from '../db/repo.js';
@@ -535,6 +536,36 @@ export class Pipeline {
 
   /** Reason a project is stopped after a failed sweep, if it is. */
   isProjectBlocked(projectId: number): string | undefined { return this.blockedProjects.get(projectId); }
+
+  /**
+   * Server start (I1): after a crash/restart DevFlow must not run git on a worktree a seat may have touched before
+   * dfctl swept the project. Sweeps every request/task worktree (`<project>/.devflow/worktrees/*`) of every
+   * non-archived project, one project after the other; a project whose sweep fails is stopped exactly like a failed
+   * post-run sweep (blocked, queued jobs failed, requests needs_human). Must complete before the worker starts.
+   * A project without any worktree has had no seat run left to sweep (seats only run inside worktrees).
+   */
+  async startupSweep(): Promise<{ swept: number[]; blocked: { projectId: number; error: string }[] }> {
+    const swept: number[] = [];
+    const blocked: { projectId: number; error: string }[] = [];
+    for (const p of this.repo.listProjects()) {
+      const dir = join(p.path, '.devflow', 'worktrees');
+      try {
+        let names: string[] = [];
+        try { names = readdirSync(dir).sort(); } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`cannot list ${dir}: ${(e as Error).message}`);
+        }
+        // Names only: dfctl itself refuses a worktree path that is (or contains) a symlink.
+        for (const n of names) await this.seatRunner.sweepProject(p.id, join(dir, n));
+        swept.push(p.id);
+      } catch (e) {
+        // Fail closed: any error (SeatSweepError or dfctl not reachable) stops the project until an admin clears it.
+        const msg = e instanceof Error ? e.message : String(e);
+        blocked.push({ projectId: p.id, error: msg });
+        this.stopProject(p.id, msg);
+      }
+    }
+    return { swept, blocked };
+  }
 
   /** True when a job may start now (worker: per-seat concurrency and per-seat rate limit). */
   canStart(job: JobRow): boolean {

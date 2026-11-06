@@ -6,6 +6,7 @@ import { openDb } from './db/db.js';
 import { Repo } from './db/repo.js';
 import { Pipeline } from './engine/pipeline.js';
 import { registerAllStages } from './engine/stages/index.js';
+import { startEngine } from './engine/startup.js';
 import { Worker } from './engine/worker.js';
 import { reconcileProjects } from './projects/reconcile.js';
 import { wireProjects } from './projects/wire.js';
@@ -36,9 +37,11 @@ async function main(): Promise<void> {
     for (const f of rec.failed) console.error(`Không đồng bộ được nhóm Linux của dự án #${f.projectId}: ${f.error}`);
   }
   const worker = new Worker(cfg, repo, pipeline);
-  worker.start();
   const app = await buildServer(cfg, { repo, pipeline, systemOps, seatRunner, projects });
   await app.listen({ host: cfg.host, port: cfg.port });
+  // Server mode: dfctl sweeps every project's worktrees BEFORE the worker requeues/runs any job (I1);
+  // a project whose sweep fails stays blocked. The web UI is already up meanwhile (jobs only queue).
+  await startEngine(cfg, pipeline, worker);
   console.log(`DevFlow (${cfg.mode}) đang chạy tại http://${cfg.host === '0.0.0.0' ? 'localhost' : cfg.host}:${cfg.port}`);
 
   let stopping = false;
