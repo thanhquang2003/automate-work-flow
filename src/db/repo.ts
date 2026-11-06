@@ -121,6 +121,20 @@ export class Repo {
     return `REQ-${String(max + 1).padStart(3, '0')}`;
   }
 
+  /**
+   * Removes a request that was created moments ago and could not be set up (its folder was unusable): the row and
+   * every row of any table keyed by request_id. Not for requests that have run (use cancel).
+   */
+  deleteRequest(id: string): void {
+    this.tx(() => {
+      const tables = this.all("select name from sqlite_master where type='table'")
+        .map(t => String(t.name))
+        .filter(n => n !== 'requests' && /^[a-z_]+$/.test(n) && this.all(`pragma table_info(${n})`).some(c => c.name === 'request_id'));
+      for (const t of tables) this.run(`delete from ${t} where request_id=?`, id);
+      this.run('delete from requests where id=?', id);
+    });
+  }
+
   createRequest(r: NewRequest): RequestRow {
     const id = this.nextRequestId();
     const now = Date.now();

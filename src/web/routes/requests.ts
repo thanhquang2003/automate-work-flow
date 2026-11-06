@@ -1,4 +1,4 @@
-import { closeSync, createWriteStream, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { closeSync, createWriteStream, lstatSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { basename, extname, join, resolve, sep } from 'node:path';
 import { pipeline as streamPipeline } from 'node:stream/promises';
@@ -9,7 +9,7 @@ import type { BugRow, ProjectKind, RequestRow, RunMode, SoftwareType } from '../
 import { STAGES } from '../../domain/types.js';
 import { loadImpact } from '../../engine/changes.js';
 import { changeDir, readFlowState, readProjectInfo } from '../../engine/stages/common.js';
-import { FileTooLargeError, SafeFileStream, safeListTree, safeOpenRead, safeReadText, safeStatFile, safeWriteFile, UnsafePathError } from '../../engine/safe-fs.js';
+import { FileTooLargeError, SafeFileStream, safeListTree, safeOpenRead, safeReadText, safeRemove, safeStatFile, safeWriteFile, UnsafePathError } from '../../engine/safe-fs.js';
 import { Workspace } from '../../engine/workspace.js';
 import { attachmentName, uniqueName } from '../../engine/stages/intake.js';
 import { StaleActionError } from '../../engine/pipeline.js';
@@ -182,18 +182,34 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
         : '';
       if (err) return html(reply, render('request-new', layout(req, 'Tạo yêu cầu mới', { flash: err, flashKind: 'error' }), { form, SOFTWARE_TYPES }), tooLarge ? 413 : 400);
 
-      const row = repo.createRequest({
-        title: form.title, description: form.description, perfReq: form.perf_req, nonfuncReq: form.nonfunc_req,
-        projectKind: form.project_kind as ProjectKind, gitlabProject: form.gitlab_project || null,
-        softwareTypes: form.software_types, runMode: form.run_mode as RunMode, createdBy: req.user?.id ?? null,
-      });
-      const ws = Workspace.for(cfg, row.id).ensure();
-      const used = new Set<string>();
-      for (const s of saved) {
-        const name = uniqueName(s.name, used);
-        const dest = join(ws.inputsDir, name);
-        safeWriteFile(dest, readFileSync(s.tmp), ws.trustRoot);
-        repo.addAttachment(row.id, name, dest, s.size);
+      // Row, folder and attachments together: a failing write (unsafe folder) rolls the row back (no orphan request)
+      // and removes what was written.
+      let row: RequestRow;
+      let wsRoot: string | undefined;
+      try {
+        row = repo.tx(() => {
+          const created = repo.createRequest({
+            title: form.title, description: form.description, perfReq: form.perf_req, nonfuncReq: form.nonfunc_req,
+            projectKind: form.project_kind as ProjectKind, gitlabProject: form.gitlab_project || null,
+            softwareTypes: form.software_types, runMode: form.run_mode as RunMode, createdBy: req.user?.id ?? null,
+          });
+          const ws = Workspace.for(cfg, created.id);
+          wsRoot = ws.root;
+          ws.ensure();
+          const used = new Set<string>();
+          for (const s of saved) {
+            const name = uniqueName(s.name, used);
+            const dest = join(ws.inputsDir, name);
+            safeWriteFile(dest, readFileSync(s.tmp), ws.trustRoot);
+            repo.addAttachment(created.id, name, dest, s.size);
+          }
+          return created;
+        });
+      } catch (e) {
+        if (!(e instanceof UnsafePathError)) throw e;
+        if (wsRoot) { try { safeRemove(wsRoot, resolve(cfg.dataDir, 'workspaces'), { recursive: true }); } catch { /* left for admin */ } }
+        console.error(`legacy request folder unusable, creation rolled back: ${e.message}`);
+        return html(reply, render('request-new', layout(req, 'Tạo yêu cầu mới', { flash: 'Không tạo được thư mục của yêu cầu (thư mục có liên kết hoặc tệp lạ).', flashKind: 'error' }), { form, SOFTWARE_TYPES }), 409);
       }
       pipeline.start(row.id);
       return reply.redirect(`/requests/${row.id}`);
@@ -407,6 +423,8 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
     let opened: { fd: number; file: string } | undefined;
     let unsafe = false;
     for (const file of cands) {
+      // A folder is "not found" (404), not "refused": only links and special files get 403.
+      if (safeStatFile(file, ws.trustRoot) === undefined && lstatSync(file, { throwIfNoEntry: false })?.isDirectory()) continue;
       try {
         opened = { fd: safeOpenRead(file, ws.trustRoot).fd, file };
         break;

@@ -5,7 +5,7 @@ import { pipeline as streamPipeline } from 'node:stream/promises';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Config } from '../../config.js';
 import { PROJECT_ROLES, type ProjectRole, type ProjectRow, type SoftwareType } from '../../domain/types.js';
-import { safeWriteFile } from '../../engine/safe-fs.js';
+import { safeWriteFile, UnsafePathError } from '../../engine/safe-fs.js';
 import { Workspace } from '../../engine/workspace.js';
 import { uniqueName } from '../../engine/stages/intake.js';
 import { PermissionError, ProjectError } from '../../projects/service.js';
@@ -183,13 +183,22 @@ export function projectRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
         if (e instanceof ProjectError) return newRequestPage(req, reply, m.project, form, { flash: e.message, flashKind: 'error' }, 400);
         throw e;
       }
-      const ws = Workspace.forRequest(cfg, repo, row).ensure();
-      const used = new Set<string>();
-      for (const s of saved) {
-        const name = uniqueName(s.name, used);
-        const dest = join(ws.inputsDir, name);
-        safeWriteFile(dest, readFileSync(s.tmp));
-        repo.addAttachment(row.id, name, dest, s.size);
+      // The request folder may be unusable (a seat pre-planted requests/<next code> as a link or file): then the
+      // just-created row is removed again (no orphan request) and the form says why.
+      try {
+        const ws = Workspace.forRequest(cfg, repo, row).ensure();
+        const used = new Set<string>();
+        for (const s of saved) {
+          const name = uniqueName(s.name, used);
+          const dest = join(ws.inputsDir, name);
+          safeWriteFile(dest, readFileSync(s.tmp), ws.trustRoot);
+          repo.addAttachment(row.id, name, dest, s.size);
+        }
+      } catch (e) {
+        if (!(e instanceof UnsafePathError)) throw e;
+        repo.deleteRequest(row.id);
+        console.error(`request ${row.id} folder unusable, creation rolled back: ${e.message}`);
+        return newRequestPage(req, reply, m.project, form, { flash: `Không tạo được thư mục của yêu cầu ${form.code} (thư mục có liên kết hoặc tệp lạ). Hãy báo admin kiểm tra dự án.`, flashKind: 'error' }, 409);
       }
       pipeline.start(row.id);
       return reply.redirect(`/requests/${row.id}`);
