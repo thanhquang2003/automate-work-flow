@@ -153,4 +153,49 @@ describe('v3 parallel tasks', () => {
     t.pipeline.approve(r.id, t.pm.id);
     expect(t.repo.getRequest(r.id)!.status).toBe('done');
   });
+
+  it('the dispatcher never runs git in the request worktree while a task merge holds it', async () => {
+    const t = await v3Env({ maxConcurrentJobs: 4 });
+    const dev2 = await t.addMember('dev2', ['DEV']);
+    const r = await atDevelop(t, [task('T-01', [], t.dev.id), task('T-02', [], dev2.id)]);
+    const reqWt = Workspace.forRequest(t.cfg, t.repo, r).repoDir;
+    let mergeHeld = false;
+    let releaseMerge!: () => void;
+    const mergeGate = new Promise<void>(res => { releaseMerge = res; });
+    let mergeReached!: () => void;
+    const reached = new Promise<void>(res => { mergeReached = res; });
+    const violations: string[] = [];
+    const origMerge = Git.prototype.merge;
+    vi.spyOn(Git.prototype, 'merge').mockImplementation(async function (this: Git, branch: string, msg: string) {
+      mergeHeld = true;
+      mergeReached();
+      await mergeGate;
+      try { return await origMerge.call(this, branch, msg); } finally { mergeHeld = false; }
+    });
+    for (const name of ['currentBranch', 'checkout', 'pull', 'commitPaths'] as const) {
+      const orig = Git.prototype[name] as (...a: unknown[]) => Promise<unknown>;
+      vi.spyOn(Git.prototype, name).mockImplementation(async function (this: Git, ...a: unknown[]) {
+        if (mergeHeld && (this as unknown as { cwd: string }).cwd === reqWt) violations.push(name);
+        return orig.apply(this, a);
+      } as never);
+    }
+    const ok = devMock();
+    t.seats.setBehave(async c => {
+      // T-02's developer waits until T-01 is inside its merge, then fails (no summary): its job ends and the
+      // dispatcher re-enters while the merge is still held.
+      if (roleOf(c.prompt) === 'developer' && /\*\*Task T-02/.test(c.prompt)) { await reached; return { ok: true, resultText: 'ok' }; }
+      return ok.behave(c);
+    });
+    t.pipeline.rerunStage(r.id, 'DEVELOP');
+    await until(t.worker, () => t.repo.getTask(r.id, 'T-02')!.status === 'failed');
+    // Let the re-entered dispatcher reach the lock while the merge is held.
+    for (let i = 0; i < 20; i++) { await t.worker.tick(); await new Promise(res => setTimeout(res, 10)); }
+    expect(t.repo.listJobs(r.id).some(j => j.kind === 'run_stage' && (j.payload as { dispatch?: boolean }).dispatch)).toBe(true);
+    releaseMerge();
+    await t.worker.drain();
+    expect(violations).toEqual([]);
+    expect(t.repo.getTask(r.id, 'T-01')!.status).toBe('done');
+    expect(git(t.p.path, 'show', 'devflow/ERP-001:T-01.txt')).toBe('T-01');
+    expect(t.repo.getRequest(r.id)).toMatchObject({ stage: 'DEVELOP', status: 'failed' });
+  });
 });

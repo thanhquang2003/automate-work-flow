@@ -51,6 +51,9 @@ export async function develop(ctx: StageContext): Promise<StageOutcome> {
   return developSequential(ctx);
 }
 
+/** Lock serializing git in a request worktree (dispatcher preparation, task merges, task worktree add/remove). */
+export const mergeLockKey = (reqId: string): string => `merge:${reqId}`;
+
 const FEEDBACK_KEY = /^feedback-\d+$/;
 /** Task states that stop a task from being dispatched again until DEVELOP is re-entered by a person. */
 const STUCK = new Set(['failed', 'needs_human']);
@@ -71,7 +74,9 @@ async function dispatchTasks(ctx: StageContext): Promise<StageOutcome> {
   } catch (e) {
     return { kind: 'fail', error: `Danh sách task không hợp lệ: ${(e as Error).message}` };
   }
-  await prepareIntegration(ctx);
+  // Task jobs merge into devflow/<code> in the same request worktree: every git operation there (and on the
+  // shared refs: worktree add/remove) goes through the per-request merge lock.
+  await ctx.serialize(mergeLockKey(req.id), () => prepareIntegration(ctx));
   const live = ctx.liveTasks();
   if (!ctx.reentry) {
     // A person re-entered DEVELOP (rerun, gate rejection): failed / needs-human tasks get another go on their
@@ -115,18 +120,18 @@ async function developTask(ctx: StageContext, taskId: string): Promise<StageOutc
   const base = integrationBranch(ws.key);
   const projectGit = ctx.makeGit(ws.projectDir!);
   const reqGit = ctx.requestGit ?? ctx.git;
-  const serializeMerge = <T>(fn: () => Promise<T>): Promise<T> => ctx.serialize(`merge:${req.id}`, fn);
+  const serializeMerge = <T>(fn: () => Promise<T>): Promise<T> => ctx.serialize(mergeLockKey(req.id), fn);
 
   const enter = async (key: string, branch: string): Promise<string> => {
     const wt = ws.taskWorktree(key);
-    if (!existsSync(join(wt, '.git'))) await projectGit.worktreeAdd(wt, branch, base);
+    if (!existsSync(join(wt, '.git'))) await serializeMerge(() => projectGit.worktreeAdd(wt, branch, base));
     ctx.ws = ws.withRepoDir(wt);
     ctx.git = ctx.makeGit(wt);
     if ((await ctx.git.currentBranch()) !== branch) await ctx.git.checkout(branch);
     return wt;
   };
   const leave = async (wt: string): Promise<void> => {
-    try { await projectGit.worktreeRemove(wt, true); } catch (e) { ctx.log(`Không gỡ được worktree ${wt}: ${(e as Error).message}`, 'warn'); }
+    try { await serializeMerge(() => projectGit.worktreeRemove(wt, true)); } catch (e) { ctx.log(`Không gỡ được worktree ${wt}: ${(e as Error).message}`, 'warn'); }
   };
 
   if (FEEDBACK_KEY.test(taskId)) {
