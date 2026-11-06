@@ -55,3 +55,4 @@ Báo cáo từng task (kèm rủi ro còn lại): `.superpowers/sdd/2026-11-07-v
 
 Lỗi tích hợp tìm thấy nhờ E2E (Task 8): một job "dispatcher" của DEVELOP còn tồn trong hàng đợi chạy sau khi yêu cầu đã sang bước khác và kéo yêu cầu quay lại cổng DEVELOP. Đã sửa (bỏ job cũ) kèm test hồi quy trong `tests/engine/v3-parallel.test.ts`.
 - FEAT-008 (Task 8: E2E, tài liệu triển khai, ghi chú phát hành) xong — commits 97dc11e..2723cbb. Cả 8 task v3 đã xong; còn review toàn nhánh và kiểm chứng trên VPS (xem docs/deploy-vps.md §9).
+- TASK-001 (sửa theo review toàn nhánh: chặn symlink ở web và engine, quét khi khởi động, tạm dừng khi chờ seat, quy tắc phòng ban, giới hạn kích thước đọc file) xong — commits 037fbb7..2467323. Cần chạy lại init.sh trên máy rảnh/VPS: 4 test e2e/dfctl timeout khi máy quá tải.

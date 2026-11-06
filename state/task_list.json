@@ -23,20 +23,25 @@
       "type": "chore",
       "priority": "high",
       "complexity": "medium",
-      "status": "in-progress",
+      "status": "done",
       "depends_on": [],
       "blocks_feature": null,
       "assigned_session": "2026-11-06T14:26:25.223Z",
       "started": "2026-11-06",
-      "completed_session": null,
-      "fix_commit": null,
-      "evidence": null,
+      "completed_session": "2026-11-06T20:19:51.035Z",
+      "fix_commit": "2467323",
+      "evidence": "commits 037fbb7..2467323 on feat/v3-multiuser (whole-branch review fixes: web+engine symlink safety, startup sweep, pause/awaiting_seat, department invariant, size caps); 645/649 tests, 4 load-related timeouts documented in the ledger; 2 scoped re-reviews + mini re-review clean",
       "notes": null,
       "work_log": [
         {
           "session": "2026-11-06T14:26:25.223Z",
           "done": "Starting work.",
-          "remaining": "TBD"
+          "remaining": null
+        },
+        {
+          "session": "2026-11-06T20:19:51.035Z",
+          "done": "Done. Evidence: commits 037fbb7..2467323 on feat/v3-multiuser (whole-branch review fixes: web+engine symlink safety, startup sweep, pause/awaiting_seat, department invariant, size caps); 645/649 tests, 4 load-related timeouts documented in the ledger; 2 scoped re-reviews + mini re-review clean",
+          "remaining": null
         }
       ]
     }
