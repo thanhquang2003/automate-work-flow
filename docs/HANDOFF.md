@@ -54,3 +54,4 @@ Hàng đợi `lah` (state/feature_list.json): Task N của kế hoạch = `FEAT-
 Báo cáo từng task (kèm rủi ro còn lại): `.superpowers/sdd/2026-11-07-v3-implementation/task-N-report.md`. Không push/PR từ Claude; chủ dự án tự push.
 
 Lỗi tích hợp tìm thấy nhờ E2E (Task 8): một job "dispatcher" của DEVELOP còn tồn trong hàng đợi chạy sau khi yêu cầu đã sang bước khác và kéo yêu cầu quay lại cổng DEVELOP. Đã sửa (bỏ job cũ) kèm test hồi quy trong `tests/engine/v3-parallel.test.ts`.
+- FEAT-008 (Task 8: E2E, tài liệu triển khai, ghi chú phát hành) xong — commits 97dc11e..2723cbb. Cả 8 task v3 đã xong; còn review toàn nhánh và kiểm chứng trên VPS (xem docs/deploy-vps.md §9).

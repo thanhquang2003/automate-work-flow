@@ -141,13 +141,13 @@
         "owner:deploy v3 on the VPS"
       ],
       "complexity": "large",
-      "status": "in-progress",
+      "status": "done",
       "layer": "Full-stack",
       "dependencies": [
         "FEAT-006",
         "FEAT-007"
       ],
-      "evidence": null,
+      "evidence": "commits 97dc11e,d169d1f,d1093a9,2723cbb on feat/v3-multiuser; final gate green (571 tests, tsc, build); E2E found and fixed a stale DEVELOP dispatcher re-entry bug; task review + 1 fix round",
       "created": "2026-11-05",
       "updated": "2026-11-06"
     }
