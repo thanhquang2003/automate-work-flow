@@ -266,17 +266,51 @@ export function safeListTree(dir: string, root?: string): TreeEntry[] {
   if (!st) return [];
   if (!st.isDirectory()) throw new UnsafePathError(`${d} is not a directory; refusing`);
   const out: TreeEntry[] = [];
-  const walk = (rel: string): void => {
-    const cur = rel ? join(d, rel) : d;
-    for (const name of readdirSync(cur)) {
-      const childRel = rel ? join(rel, name) : name;
-      const e = lstatSync(join(d, childRel), { throwIfNoEntry: false });
-      if (!e) continue;
-      if (e.isDirectory()) walk(childRel);
-      else if (e.isFile()) out.push({ rel: childRel.split(sep).join('/'), size: e.size, mtimeMs: e.mtimeMs });
+  const add = (rel: string, e: { size: number; mtimeMs: number }): void => { out.push({ rel: rel.split(sep).join('/'), size: e.size, mtimeMs: e.mtimeMs }); };
+  if (process.platform === 'linux') {
+    // Walk through directory descriptors (/proc/self/fd/N): every folder is opened with O_NOFOLLOW|O_DIRECTORY and
+    // listed through its descriptor, so a folder swapped for a symlink after the lstat is never entered.
+    const DIRFLAGS = constants.O_RDONLY | (constants.O_DIRECTORY ?? 0) | NOFOLLOW | NONBLOCK;
+    const walkFd = (fd: number, rel: string): void => {
+      const base = `/proc/self/fd/${fd}`;
+      for (const name of readdirSync(base)) {
+        const childRel = rel ? join(rel, name) : name;
+        const e = lstatSync(`${base}/${name}`, { throwIfNoEntry: false });
+        if (!e) continue;
+        if (e.isFile()) { add(childRel, e); continue; }
+        if (!e.isDirectory()) continue;
+        let cfd: number;
+        try { cfd = openSync(`${base}/${name}`, DIRFLAGS); } catch { continue; } // became a link (ELOOP) or vanished
+        try {
+          const cst = fstatSync(cfd);
+          if (cst.isDirectory() && cst.ino === e.ino && cst.dev === e.dev) walkFd(cfd, childRel);
+        } finally { closeSync(cfd); }
+      }
+    };
+    let fd: number;
+    try { fd = openSync(d, DIRFLAGS); } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ELOOP' || (e as NodeJS.ErrnoException).code === 'ENOTDIR') throw new UnsafePathError(`${d} is not a directory; refusing`);
+      throw e;
     }
-  };
-  walk('');
+    try {
+      const fst = fstatSync(fd);
+      if (!fst.isDirectory() || fst.ino !== st.ino || fst.dev !== st.dev) throw new UnsafePathError(`${d} changed while listing; refusing`);
+      checkFd(fd, d, r);
+      walkFd(fd, '');
+    } finally { closeSync(fd); }
+  } else {
+    const walk = (rel: string): void => {
+      const cur = rel ? join(d, rel) : d;
+      for (const name of readdirSync(cur)) {
+        const childRel = rel ? join(rel, name) : name;
+        const e = lstatSync(join(d, childRel), { throwIfNoEntry: false });
+        if (!e) continue;
+        if (e.isDirectory()) walk(childRel);
+        else if (e.isFile()) add(childRel, e);
+      }
+    };
+    walk('');
+  }
   return out.sort((a, b) => a.rel.localeCompare(b.rel));
 }
 
