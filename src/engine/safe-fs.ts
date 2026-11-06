@@ -1,10 +1,9 @@
 import { Readable } from 'node:stream';
 import {
   close as fsClose, read as fsRead, closeSync, constants, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, readdirSync, readlinkSync, readSync, realpathSync,
-  renameSync, rmSync, unlinkSync, writeSync,
+  rmSync, unlinkSync, writeSync,
 } from 'node:fs';
-import { randomBytes } from 'node:crypto';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /**
  * Symlink-safe file access for DevFlow writes/reads under folders that Claude seats can write
@@ -120,45 +119,32 @@ function openChecked(path: string, flags: number, root: string | undefined, writ
 
 /**
  * Writes (replaces) a file. Missing folders are created; a symlink, hard-linked file or special file at `path` is
- * refused (UnsafePathError). The data never goes into an existing inode: it is written to a fresh devflow-owned temp
- * name in the verified folder (O_CREAT|O_EXCL|O_NOFOLLOW, descriptor path checked) and then renamed over `path`;
- * rename(2) replaces the directory entry and never follows a link planted there in the meantime.
+ * refused (UnsafePathError). Every folder below the root is checked with lstat, the file is opened with O_NOFOLLOW
+ * (O_EXCL when it did not exist) and WITHOUT O_TRUNC, and only after the descriptor's real path was checked under the
+ * root is it truncated and written: a link or folder swapped in at any point is refused before any byte changes.
+ * (Not temp-file + rename: worktrees are shared with concurrent `git add -A` runs that would pick temp names up.)
  */
 export function safeWriteFile(path: string, data: string | Uint8Array, root?: string): void {
   const p = resolve(path);
   const r = rootFor(p, root);
   checkParents(p, r, true);
-  const pre = lstatSync(p, { throwIfNoEntry: false });
-  if (pre && !pre.isFile()) throw new UnsafePathError(`${p} is not a regular file (${kindOf(pre)}); refusing to write it`);
-  if (pre && pre.nlink > 1) throw new UnsafePathError(`${p} has ${pre.nlink} hard links; refusing to write it`);
-  const tmp = join(dirname(p), `.${basename(p).slice(0, 80)}.devflow-${randomBytes(6).toString('hex')}.tmp`);
+  const existed = lstatSync(p, { throwIfNoEntry: false }) !== undefined;
   let fd: number;
   try {
-    fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NOFOLLOW | NONBLOCK, 0o664);
+    fd = openChecked(p, constants.O_WRONLY | constants.O_CREAT | (existed ? 0 : constants.O_EXCL), r, true);
   } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    if (code === 'ELOOP' || code === 'EEXIST' || code === 'ENOTDIR') throw new UnsafePathError(`cannot create a private temp file next to ${p} (${code}); refusing`);
+    // A file this call created in a folder swapped for a link after the checks: remove it again (it is empty).
+    if (!existed && e instanceof UnsafePathError && /resolved to/.test(e.message)) { try { unlinkSync(p); } catch { /* gone */ } }
+    if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new UnsafePathError(`${p} appeared while writing it; refusing`);
     throw e;
   }
-  let renamed = false;
   try {
-    try {
-      if (!fstatSync(fd).isFile()) throw new UnsafePathError(`${tmp} is not a regular file; refusing`);
-      checkFd(fd, tmp, r);
-      const buf = typeof data === 'string' ? Buffer.from(data, 'utf8') : data;
-      let off = 0;
-      while (off < buf.length) off += writeSync(fd, buf, off, buf.length - off, off);
-    } finally {
-      closeSync(fd);
-    }
-    // The folder may have been swapped since the checks: verify again right before the rename.
-    checkParents(p, r, false);
-    const now = lstatSync(p, { throwIfNoEntry: false });
-    if (now && now.isDirectory()) throw new UnsafePathError(`${p} became a directory; refusing`);
-    renameSync(tmp, p);
-    renamed = true;
+    ftruncateSync(fd, 0);
+    const buf = typeof data === 'string' ? Buffer.from(data, 'utf8') : data;
+    let off = 0;
+    while (off < buf.length) off += writeSync(fd, buf, off, buf.length - off, off);
   } finally {
-    if (!renamed) { try { unlinkSync(tmp); } catch { /* already gone */ } }
+    closeSync(fd);
   }
 }
 
