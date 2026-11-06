@@ -381,8 +381,10 @@ export class Pipeline {
 
   pause(reqId: string): void {
     const req = this.mustGet(reqId);
-    // Only work in progress can be paused; waiting states (awaiting_*, needs_human, failed, done) are left as they are.
-    if (req.status !== 'running' && req.status !== 'paused') return;
+    // Work in progress (running, or waiting for a seat) can be paused; other waiting states (awaiting_approval,
+    // awaiting_customer, needs_human, failed, done) are left as they are. Seat-parked jobs stay parked (their
+    // re-check is pushed to FAR_FUTURE, seatReconnected skips a paused request) until resume().
+    if (req.status !== 'running' && req.status !== 'paused' && req.status !== 'awaiting_seat') return;
     this.setStatus(reqId, req.stage, 'paused');
     for (const j of this.repo.listJobs(reqId)) if (j.status === 'queued' || j.status === 'paused') this.repo.pauseJob(j.id, FAR_FUTURE);
   }
@@ -416,6 +418,8 @@ export class Pipeline {
     for (const j of this.repo.listJobs()) {
       const p = j.payload as JobPayload;
       if (j.status !== 'paused' || p.awaitSeat !== userId || !j.requestId) continue;
+      // A request the PM paused stays paused: resume() wakes its jobs.
+      if (this.repo.getRequest(j.requestId)?.status === 'paused') continue;
       this.repo.pauseJob(j.id, now);
       n++;
       const req = this.repo.getRequest(j.requestId);
@@ -1051,7 +1055,17 @@ export class Pipeline {
       const who = seat === null ? `chưa có người phụ trách vai ${role ?? '?'}` : `seat Claude của ${this.userName(seat)} chưa kết nối hoặc đã hết hạn`;
       this.log(req.id, 'warn', `${job.kind === 'run_task' ? payload.taskId : `Giai đoạn ${payload.stage}`}: ${who} — chờ kết nối lại (tự kiểm tra mỗi 10 phút)`);
     }
-    if (cur.status !== 'paused' && cur.status !== 'cancelled') this.setStatus(req.id, job.kind === 'run_task' ? cur.stage : payload.stage!, 'awaiting_seat');
+    // The request shows awaiting_seat only when nothing else of it is live (sibling task jobs still running or
+    // due): otherwise it stays as it is and the last finishing job decides (see the `wait` outcome).
+    if (cur.status !== 'paused' && cur.status !== 'cancelled' && this.onlySeatParked(req.id)) {
+      this.setStatus(req.id, job.kind === 'run_task' ? cur.stage : payload.stage!, 'awaiting_seat');
+    }
+  }
+
+  /** True when every unfinished job of the request is parked waiting for a seat (and at least one is). */
+  private onlySeatParked(reqId: string, kinds?: JobRow['kind'][]): boolean {
+    const open = this.repo.listJobs(reqId).filter(j => (!kinds || kinds.includes(j.kind)) && ['queued', 'paused', 'running'].includes(j.status));
+    return open.length > 0 && open.every(j => j.status === 'paused' && (j.payload as JobPayload).awaitSeat !== undefined);
   }
 
   /** Re-evaluates the seats of a request's jobs; returns the `done` promises of runs stopped for a reseat. */
@@ -1169,8 +1183,7 @@ export class Pipeline {
         repo.finishStageRun(run.id, 'done');
         repo.finishJob(job.id);
         // Only task jobs waiting for a seat are left: show the request as awaiting_seat (a blocker).
-        const tasks = repo.listJobs(req.id).filter(j => j.kind === 'run_task' && ['queued', 'paused', 'running'].includes(j.status));
-        const waitingSeat = tasks.length > 0 && tasks.every(j => j.status === 'paused' && (j.payload as JobPayload).awaitSeat !== undefined);
+        const waitingSeat = this.onlySeatParked(req.id, ['run_task']);
         this.setStatus(req.id, stage, userPaused ? 'paused' : waitingSeat ? 'awaiting_seat' : 'running');
         return;
       }
