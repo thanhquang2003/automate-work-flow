@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process';
-import { appendFile, chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, lstat, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
+import { safeReadText, UnsafePathError } from '../engine/safe-fs.js';
 
 export interface GitOpts {
   /** DEVFLOW_MODE of the caller (Config.mode). Default 'server', the safe side. */
@@ -47,6 +48,14 @@ export function gitArgv(args: string[], mode: GitMode): string[] {
 }
 
 /** A v3 request/task worktree: `<project>/.devflow/worktrees/<name>`. */
+/** Largest worktree pointer file (.git, gitdir, commondir) DevFlow reads; they hold one path. */
+const GIT_POINTER_MAX = 64 * 1024;
+
+/** A one-line git pointer file under a seat-writable folder, read through safe-fs; '' when missing or unsafe. */
+function readPointer(path: string, root: string): string {
+  try { return safeReadText(path, root, { maxBytes: GIT_POINTER_MAX }).trim(); } catch { return ''; }
+}
+
 const WORKTREE_RE = /^(.*)[\\/]\.devflow[\\/]worktrees[\\/]([^\\/]+)$/;
 
 /** Files git reads as configuration; kept owner-only even though DevFlow runs with umask 002. */
@@ -95,7 +104,8 @@ export class Git {
     const project = m[1]!;
     const commonDir = join(project, '.git');
     let text: string;
-    try { text = await readFile(join(cwd, '.git'), 'utf8'); } catch {
+    // Seat-writable: read through safe-fs (regular file only, O_NONBLOCK so a FIFO fails at once, small cap).
+    try { text = safeReadText(join(resolve(cwd), '.git'), project, { maxBytes: GIT_POINTER_MAX }); } catch {
       throw new Error(`DevFlow worktree ${cwd} has no readable .git file; refusing to run git there`);
     }
     const g = /^gitdir:\s*(.+?)\s*$/m.exec(text)?.[1];
@@ -111,12 +121,12 @@ export class Git {
     if (!gst?.isDirectory()) throw new Error(`DevFlow worktree ${cwd}: ${gitDir} is not a directory; refusing to run git there`);
     // The git dir must belong to THIS worktree: its gitdir back-pointer names our .git file (a seat could
     // otherwise point its worktree at another request's git dir in the same project).
-    const back = (await readFile(join(gitDir, 'gitdir'), 'utf8').catch(() => '')).trim();
+    const back = readPointer(join(gitDir, 'gitdir'), project);
     if (!back || resolve(back) !== join(resolve(cwd), '.git')) {
       throw new Error(`DevFlow worktree ${cwd}: ${join(gitDir, 'gitdir')} does not point back to this worktree; refusing to run git there`);
     }
     // git still reads refs through <gitDir>/commondir, so it must lead back to the project repository.
-    const cd = (await readFile(join(gitDir, 'commondir'), 'utf8').catch(() => '')).trim();
+    const cd = readPointer(join(gitDir, 'commondir'), project);
     const cdReal = cd ? await realpath(resolve(gitDir, cd)).catch(() => '') : '';
     if (!cdReal || cdReal !== await realpath(commonDir)) {
       throw new Error(`DevFlow worktree ${cwd}: ${join(gitDir, 'commondir')} does not lead to the project repository; refusing to run git there`);
@@ -417,7 +427,10 @@ export class Git {
     if (!entry || /[\r\n\0]/.test(entry)) throw new Error(`Invalid exclude entry: ${JSON.stringify(entry)}`);
     const rel = (await this.run(['rev-parse', '--git-path', 'info/exclude'])).trim();
     const file = resolve(this.cwd, rel);
-    const cur = await readFile(file, 'utf8').catch(() => '');
+    let cur = '';
+    try { cur = safeReadText(file, dirname(dirname(file)), { maxBytes: 1024 * 1024 }); } catch (e) {
+      if (e instanceof UnsafePathError) throw e;
+    }
     if (cur.split(/\r?\n/).some(l => l.trim() === entry)) return;
     await mkdir(dirname(file), { recursive: true });
     await appendFile(file, `${cur && !cur.endsWith('\n') ? '\n' : ''}${entry}\n`, 'utf8');

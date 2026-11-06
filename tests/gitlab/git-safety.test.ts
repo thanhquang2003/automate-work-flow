@@ -171,6 +171,31 @@ describe.runIf(posix)('worktree pinning', () => {
     await expect(new Git(wt).currentBranch()).rejects.toThrow(/worktree/i);
   });
 
+  // Round 2 item 3: these files are seat-writable; a FIFO must fail fast (never block a threadpool thread) and a
+  // sparse huge file must never be read whole.
+  it('a FIFO or a sparse huge file as the worktree .git file is refused fast', async () => {
+    const { wt } = await withWorktree();
+    execFileSync('rm', ['-f', join(wt, '.git')]);
+    execFileSync('mkfifo', [join(wt, '.git')]);
+    await expect(new Git(wt).currentBranch()).rejects.toThrow(/worktree/i);
+    execFileSync('rm', ['-f', join(wt, '.git')]);
+    execFileSync('truncate', ['-s', '20G', join(wt, '.git')]);
+    await expect(new Git(wt).currentBranch()).rejects.toThrow(/worktree/i);
+  }, 20_000);
+
+  it('a FIFO or a sparse huge file as gitdir / commondir under .git/worktrees/<n> is refused fast', async () => {
+    for (const f of ['gitdir', 'commondir']) {
+      for (const kind of ['fifo', 'sparse']) {
+        const { proj, wt } = await withWorktree();
+        const p = join(proj, '.git', 'worktrees', 'R1', f);
+        execFileSync('rm', ['-f', p]);
+        if (kind === 'fifo') execFileSync('mkfifo', [p]);
+        else execFileSync('truncate', ['-s', '20G', p]);
+        await expect(new Git(wt).currentBranch(), `${f} ${kind}`).rejects.toThrow(/worktree/i);
+      }
+    }
+  }, 60_000);
+
   it('normal worktree operations still work', async () => {
     const { wt } = await withWorktree();
     const git = new Git(wt);
