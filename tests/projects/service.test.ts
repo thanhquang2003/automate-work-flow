@@ -76,6 +76,22 @@ describe('createProject', () => {
     expect(p.gitlabProject).toBe('g/a');
     expect(readFileSync(join(path, '.git', 'info', 'exclude'), 'utf8')).toContain('.devflow/');
   });
+  it('a cloned project keeps no GitLab token in .git/config (token only via env for the clone)', async () => {
+    const e = mkEnv();
+    const bare = join(e.base, 'r.git'); const seed = join(e.base, 'seed');
+    mkGitRepo(seed, 'main'); git(e.base, 'clone', '-q', '--bare', seed, bare);
+    const token = 'glpat-SECRET-TOKEN-xyz123';
+    const gitlab = { token, getProject: async () => ({ id: 3, path_with_namespace: 'g/a', default_branch: 'main', http_url_to_repo: bare }) } as any;
+    const { ProjectService } = await import('../../src/projects/service.js');
+    const svc = new ProjectService({ cfg: e.cfg, repo: e.repo, systemOps: e.systemOps, gitlab, gitlabToken: token });
+    const path = join(e.root, 'tk');
+    await svc.createProject({ mode: 'clone', key: 'TK', name: 't', path, gitlabProject: 'g/a', createdBy: e.pm.id });
+    const conf = readFileSync(join(path, '.git', 'config'), 'utf8');
+    expect(conf).not.toContain(token);
+    expect(conf).not.toContain(Buffer.from(`oauth2:${token}`).toString('base64'));
+    expect(conf.toLowerCase()).not.toContain('extraheader');
+    expect(git(path, 'remote', 'get-url', 'origin')).toBe(bare);
+  });
   it('rejects paths outside roots, symlink escapes, duplicate path and key', async () => {
     const e = mkEnv();
     const out = join(e.base, 'out'); mkdirSync(out);
