@@ -106,6 +106,30 @@ describe.skipIf(!hasBash)('SudoSeatRunner', () => {
     await vi.waitFor(() => expect(f.calls()).toContainEqual(['stop-claude', '9', runId]), { timeout: 10_000 });
   });
 
+  it('abort waits for stop-claude to return (stop is awaitable)', async () => {
+    const { f, runner, cwd } = setup();
+    f.set('mode', 'hang');
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 300);
+    const r = await runner.run(9, { cwd, prompt: 'p', signal: ac.signal });
+    expect(r.aborted).toBe(true);
+    expect(f.read('stop-done')).toBe('done\n'); // no waiting: stop-claude has already returned
+  });
+
+  it('an aborted run does not hide a failed post-run sweep', async () => {
+    const { f, runner, cwd } = setup();
+    f.set('mode', 'abort86');
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 300);
+    await expect(runner.run(9, { cwd, prompt: 'p', signal: ac.signal })).rejects.toBeInstanceOf(SeatSweepError);
+  });
+
+  it('a timed-out run does not hide a failed post-run sweep', async () => {
+    const { f, runner, cwd } = setup();
+    f.set('mode', 'abort86');
+    await expect(runner.run(9, { cwd, prompt: 'p', timeoutMs: 300 })).rejects.toBeInstanceOf(SeatSweepError);
+  });
+
   it('an already-aborted signal reports aborted without spawning sudo', async () => {
     const { f, runner, cwd } = setup();
     const ac = new AbortController();
@@ -154,14 +178,15 @@ describe.skipIf(!hasBash)('SudoSeatRunner', () => {
 
   it('sweepProject calls dfctl sweep-project and throws on failure', async () => {
     const { f, runner } = setup();
-    await runner.sweepProject(4, '/srv/p/.devflow/worktrees/R1');
-    await runner.sweepProject(4);
-    expect(f.calls().slice(-2)).toEqual([['sweep-project', '4', '/srv/p/.devflow/worktrees/R1'], ['sweep-project', '4']]);
+    const wt = '/srv/p/.devflow/worktrees/R1';
+    await runner.sweepProject(4, wt);
+    expect(f.calls().at(-1)).toEqual(['sweep-project', '4', wt]);
     f.set('sweep-fail', '1');
-    await expect(runner.sweepProject(4)).rejects.toThrow(/hard-linked/);
-    await expect(runner.sweepProject(4)).rejects.toBeInstanceOf(SeatSweepError);
-    await expect(runner.sweepProject(0)).rejects.toThrow(/project id/);
+    await expect(runner.sweepProject(4, wt)).rejects.toThrow(/hard-linked/);
+    await expect(runner.sweepProject(4, wt)).rejects.toBeInstanceOf(SeatSweepError);
+    await expect(runner.sweepProject(0, wt)).rejects.toThrow(/project id/);
     await expect(runner.sweepProject(4, 'rel')).rejects.toThrow(/absolute/);
+    await expect(runner.sweepProject(4, '')).rejects.toThrow(/absolute/);
   });
 
   it('logout calls dfctl claude-auth logout', async () => {
@@ -192,7 +217,7 @@ describe('LocalSeatRunner', () => {
     expect(r.ok).toBe(true);
     expect(JSON.parse(r.resultText).prompt).toBe('hi');
     expect((await new LocalSeatRunner(cfg).status(1)).state).toBe('unknown');
-    await new LocalSeatRunner(cfg).sweepProject(); // no-op
+    await new LocalSeatRunner(cfg).sweepProject(1, '/x/.devflow/worktrees/R1'); // no-op
   });
 
   it('v2 runClaude reports aborted on abort', async () => {

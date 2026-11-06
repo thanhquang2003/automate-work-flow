@@ -150,6 +150,15 @@ describe.runIf(posix)('worktree pinning', () => {
     await expect(new Git(wt).headSha()).rejects.toThrow(/commondir/);
   });
 
+  it('a worktree pointed at another request\'s git dir (gitdir back-pointer mismatch) is refused', async () => {
+    const { proj, wt } = await withWorktree();
+    const wt2 = join(proj, '.devflow', 'worktrees', 'R2');
+    await new Git(proj).worktreeAdd(wt2, 'devflow/R2', 'main');
+    writeFileSync(join(wt, '.git'), `gitdir: ${join(proj, '.git', 'worktrees', 'R2')}\n`);
+    await expect(new Git(wt).headSha()).rejects.toThrow(/does not point back/);
+    expect(await new Git(wt2).currentBranch()).toBe('devflow/R2');
+  });
+
   it('a worktree .git file pointing outside the project repo is refused', async () => {
     const { base, wt } = await withWorktree();
     writeFileSync(join(wt, '.git'), `gitdir: ${join(base, 'elsewhere')}\n`);

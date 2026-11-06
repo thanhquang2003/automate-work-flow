@@ -90,6 +90,15 @@ for r in "${ROOTS[@]}"; do
   fi
 done
 
+step "kernel protections and cron/at"
+[ "$(cat /proc/sys/fs/protected_hardlinks)" = 1 ] && [ "$(cat /proc/sys/fs/protected_symlinks)" = 1 ] \
+  || die "fs.protected_hardlinks and fs.protected_symlinks must be 1 (dfctl refuses seat runs otherwise)"
+# dfctl provision-user adds every dfu-* account to /etc/cron.deny and /etc/at.deny. Those files are ignored
+# when /etc/cron.allow or /etc/at.allow exists; then the allow file must not list any dfu-* account.
+for f in /etc/cron.allow /etc/at.allow; do
+  if [ -e "$f" ] && grep -q '^dfu-' "$f"; then die "$f lists dfu-* accounts; remove them"; fi
+done
+
 step "dfctl"
 install -d -m 0755 -o root -g root /usr/local/lib/devflow /etc/devflow
 install -m 0755 -o root -g root "$DEVFLOW_DIR/ops/dfctl" "$DFCTL_DST"
@@ -149,6 +158,8 @@ WorkingDirectory=$DEVFLOW_DIR
 EnvironmentFile=$ENV_FILE
 Environment=DEVFLOW_MODE=server
 ExecStart=$NODE_BIN dist/index.js
+# If DevFlow stops or crashes, dfctl processes in this cgroup die with it; stop the seat scopes they left.
+ExecStopPost=+$DFCTL_DST reap
 # Group-writable files so seat users (members of dfp-<project>) can work in shared project folders.
 UMask=0002
 Restart=on-failure

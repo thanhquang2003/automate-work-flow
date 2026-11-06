@@ -219,7 +219,7 @@ if [ -n "$SEAT" ]; then
       # The prompt keeps claude busy in a foreground `sleep 110`, so claude itself is alive at the stop and the
       # stop has to take down claude, its tool shell and the detached children together.
       sleep 3
-      if pgrep -u "$SU" -f "$CLAUDE_BIN|claude" >/dev/null; then pass "$label: claude is still running when stop-claude is sent"
+      if pgrep -u "$SU" -f -- "$CLAUDE_BIN" >/dev/null; then pass "$label: claude is still running when stop-claude is sent"
       else fail "$label: claude already exited before the stop (the probe does not exercise the scope kill)"; fi
     else
       sleep 5

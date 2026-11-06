@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Config } from '../config.js';
 import type { Repo } from '../db/repo.js';
@@ -69,6 +69,24 @@ const INIT_BRANCH = 'main';
 
 const isDirEmpty = (p: string): boolean => readdirSync(p).length === 0;
 
+/** First regular file under `dir` with more than one hard link (symlinks are not followed), or undefined. */
+export function findHardLinked(dir: string): string | undefined {
+  const stack = [dir];
+  while (stack.length) {
+    const d = stack.pop()!;
+    let names: string[];
+    try { names = readdirSync(d); } catch { continue; }
+    for (const n of names) {
+      const p = join(d, n);
+      let st;
+      try { st = lstatSync(p); } catch { continue; }
+      if (st.isDirectory()) stack.push(p);
+      else if (st.isFile() && st.nlink > 1) return p;
+    }
+  }
+  return undefined;
+}
+
 export class ProjectService {
   private readonly repo: Repo;
   private readonly systemOps: ProjectSystemOps;
@@ -126,6 +144,12 @@ export class ProjectService {
       if (!existsSync(path)) throw new ProjectError('Thư mục dự án có sẵn không tồn tại.');
       if (!statSync(path).isDirectory()) throw new ProjectError('Đường dẫn dự án không phải thư mục.');
       if (existsSync(join(path, '.git'))) {
+        // In server mode dfctl refuses hard-linked files under .git (they could tie the project to another
+        // repository's objects); say so now instead of failing later with a sweep error.
+        const linked = findHardLinked(join(path, '.git'));
+        if (linked) {
+          throw new ProjectError(`Repo có tệp hard-link trong .git (${linked.slice(path.length + 1)}), ví dụ do "git clone" từ thư mục cục bộ. Hãy chạy "git repack -a -d" rồi xóa .git/objects/info/alternates (nếu có), hoặc clone lại bằng --no-hardlinks, rồi thử lại.`);
+        }
         if (!(await git.hasCommits())) await this.initialCommit(git, path, name, INIT_BRANCH, false);
         defaultBranch = await git.currentBranch();
         if (defaultBranch === 'HEAD') throw new ProjectError('Repo đang ở trạng thái detached HEAD; hãy checkout nhánh mặc định trước.');

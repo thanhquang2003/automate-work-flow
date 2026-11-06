@@ -18,6 +18,8 @@
 #                                                    never starts (DevFlow cannot signal other users itself)
 #   sweep-project <projectId> [<worktree>]          root sweep of the project's git dirs (also run before and
 #                                                    after every run-claude); exit 86 when it fails
+#   reap                                             stop dfctl scopes whose dfctl died (devflow.service
+#                                                    ExecStopPost); also done before every sweep
 #   --self-test                                      pure checks plus temp-dir runs as the calling user; never
 #                                                    touches system state
 #
@@ -49,7 +51,7 @@ readonly SHORT_MAX_SEC=60
 readonly USER_PATH=/usr/local/bin:/usr/bin:/bin
 
 # Exit 2 = rejected arguments, 1 = runtime failure.
-usage_die() { printf 'dfctl: %s\n' "$*" >&2; printf 'usage: dfctl provision-user|ensure-project-group|set-members|run-claude|claude-auth|stop-claude|sweep-project ... | --self-test\n' >&2; exit 2; }
+usage_die() { printf 'dfctl: %s\n' "$*" >&2; printf 'usage: dfctl provision-user|ensure-project-group|set-members|run-claude|claude-auth|stop-claude|sweep-project|reap ... | --self-test\n' >&2; exit 2; }
 die() { printf 'dfctl: %s\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------- pure validators (no side effects)
@@ -125,6 +127,8 @@ validate_args() {
           is_run_id "$4" || { bad "invalid run id"; return 2; } ;;
         *) bad "claude-auth action must be login, status or logout"; return 2 ;;
       esac ;;
+    reap)
+      [ $# -eq 0 ] || { bad "reap takes no arguments"; return 2; } ;;
     sweep-project)
       [ $# -eq 1 ] || [ $# -eq 2 ] || { bad "sweep-project takes <projectId> [<worktree>]"; return 2; }
       is_id "$1" || { bad "invalid project id"; return 2; }
@@ -180,7 +184,13 @@ set -u
 umask 022
 dir=$1 owner=$2 full=$3 grp=$4
 fail() { printf "project hardening: %s\n" "$*" >&2; exit 1; }
-nochmod() { mode=$1; shift; find -P "$@" ! -type l -exec chmod "$mode" {} + || fail "chmod $mode $*"; }
+# chmod every non-symlink found; an entry that vanished meanwhile (lock, tmp_pack) is not an error.
+nochmod() {
+  mode=$1; shift
+  find -P "$@" ! -type l -print0 2>/dev/null | while IFS= read -r -d "" f; do
+    chmod "$mode" "$f" 2>/dev/null || [ ! -e "$f" ] || exit 1
+  done || fail "chmod $mode $*"
+}
 owned() { [ -z "$(find -P "$@" ! -user "$owner" -print -quit)" ]; }
 cd -- "$dir" || fail "cannot enter $dir"
 [ -d . ] && [ "$(stat -c %U .)" = "$owner" ] || fail "project folder not owned by $owner"
@@ -248,6 +258,20 @@ exit 0
 # Args: <project .git> <worktree or ""> <owner uid> <group or ""> <pack manifest file>.
 # Returns 1 with SWEEP_ERR set when something is left that DevFlow must not trust.
 SWEEP_ERR=""
+# Temporary files git leaves when killed (tmp_obj_* while finalising with link()+unlink(), tmp_pack_*,
+# tmp_idx_*, *.lock). Those of a seat account with no live process are deleted; others are ignored by the
+# checks below (git never reads them as objects).
+TMP_NAMES=( \( -name 'tmp_obj_*' -o -name 'tmp_pack_*' -o -name 'tmp_idx_*' -o -name 'tmp_rev_*' -o -name '*.lock' \) )
+seat_uid_dead() { ! pgrep -u "$1" >/dev/null 2>&1; }
+STRAGGLER_DEAD=seat_uid_dead
+clean_stragglers() {
+  local g=$1 keep_uid=$2 o
+  while IFS= read -r o; do
+    [ -n "$o" ] || continue
+    "$STRAGGLER_DEAD" "$o" || continue
+    find -P "$g" -type f -uid "$o" "${TMP_NAMES[@]}" -delete 2>/dev/null || true
+  done < <(find -P "$g" -type f ! -uid "$keep_uid" "${TMP_NAMES[@]}" -printf '%U\n' 2>/dev/null | LC_ALL=C sort -u)
+}
 sweep_root() {
   local g=$1 wt=$2 uid=$3 grp=$4 manifest=$5 z f n
   serr() { SWEEP_ERR=$*; return 1; }
@@ -255,7 +279,8 @@ sweep_root() {
   find -P "$g" -type l -delete 2>/dev/null || true
   z=$(find -P "$g" -type l -print -quit)
   [ -z "$z" ] || { serr "symlink could not be removed: $z"; return 1; }
-  z=$(find -P "$g" -type f -links +1 -print -quit)
+  clean_stragglers "$g" "$uid"
+  z=$(find -P "$g" -type f -links +1 ! \( -name 'tmp_*' -o -name '*.lock' \) -print -quit)
   [ -z "$z" ] || { serr "hard-linked file under .git: $z"; return 1; }
   [ "$(stat -c %u -- "$g")" = "$uid" ] || { serr "$g not owned by the service user"; return 1; }
   z=$(find -P "$g" -mindepth 1 -maxdepth 1 -type f ! -uid "$uid" -print -quit)
@@ -275,6 +300,7 @@ sweep_root() {
     # New packs a seat added are taken over, so they cannot be replaced later (pack/ is sticky).
     while IFS= read -r -d '' f; do
       n=${f##*/}
+      case $n in tmp_*|*.lock) continue ;; esac
       [[ $n =~ ^pack-[0-9a-f]{40,64}\.(pack|idx|rev|bitmap|mtimes|promisor|keep)$ ]] || { serr "unexpected file in objects/pack: $n"; return 1; }
       chown -h -- "$uid${grp:+:$grp}" "$f" || { serr "cannot take over $n"; return 1; }
     done < <(find -P "$g/objects/pack" -mindepth 1 -maxdepth 1 -type f ! -uid "$uid" -print0)
@@ -298,6 +324,9 @@ sweep_root() {
     n=${z#"gitdir: $g/worktrees/"}
     [ "$n" != "$z" ] && [[ $n =~ ^[A-Za-z0-9._-]+$ ]] && [ "$n" != . ] && [ "$n" != .. ] || { serr "$f does not point into $g/worktrees"; return 1; }
     [ -d "$g/worktrees/$n" ] && [ ! -L "$g/worktrees/$n" ] || { serr "worktree git dir $n missing"; return 1; }
+    # Back-pointer: that git dir must belong to THIS worktree (not another request's).
+    z="$g/worktrees/$n/gitdir"
+    [ -f "$z" ] && [ ! -L "$z" ] && [ "$(head -n 1 -- "$z")" = "$f" ] || { serr "$z does not point back to $f"; return 1; }
   fi
   return 0
 }
@@ -423,7 +452,7 @@ run_tracked_in() {
   ( set -o noclobber; : > "$TRACK_PIDF" ) 2>/dev/null || die "run id already in use"
   trap 'rm -f -- "$TRACK_PIDF" "$TRACK_PIDF.tmp" "$TRACK_STOPF"' EXIT
   [ -e "$TRACK_STOPF" ] && exit 143
-  setsid timeout -s TERM -k "$STOP_GRACE" "$max" "$@" <&0 &
+  setsid timeout -s TERM -k "$STOP_GRACE" "$max" "$@" <&0 7>&- 9>&- &
   local child=$! st
   st=$(proc_starttime "$child" || true)
   printf '%s %s\n' "$child" "${st:-0}" > "$TRACK_PIDF.tmp"
@@ -463,44 +492,118 @@ stop_in() {
   echo "stopped"
 }
 
-# Every tracked run also gets its own transient systemd scope (cgroup) when systemd is running, so children
-# that leave the process group (setsid, daemonised tool processes) are still found and killed: by
-# stop-claude, and when the run ends normally (no stray processes outlive a run).
+# Every tracked run also gets its own transient systemd scope (cgroup), so children that leave the process
+# group (setsid, daemonised tool processes) are still found and killed: by stop-claude, at the end of the run,
+# and, if dfctl itself died with devflow.service, by the reaper. RuntimeMaxSec bounds a scope whose dfctl is
+# gone.
 SCOPE_CMD=()
 scope_unit() { printf 'dfctl-%s-%s.scope\n' "$1" "$2"; }
 build_scope_cmd() {
-  SCOPE_CMD=(systemd-run --scope --quiet --collect "--unit=$(scope_unit "$1" "$2")" --)
+  SCOPE_CMD=(systemd-run --scope --quiet --collect "--unit=$(scope_unit "$1" "$2")"
+    "--property=RuntimeMaxSec=$(( $3 + 4 * STOP_GRACE ))" --)
 }
 have_systemd() { [ -d /run/systemd/system ] && command -v systemd-run >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; }
+scope_state() { systemctl show -p ActiveState --value -- "$1" 2>/dev/null || echo unknown; }
+# Fails closed: returns 1 if the scope is still active after TERM, grace, KILL, grace.
 stop_scope() {
-  local unit; unit=$(scope_unit "$1" "$2")
-  systemctl kill --signal=TERM -- "$unit" >/dev/null 2>&1 || return 0
-  local i
-  for ((i = 0; i < STOP_GRACE * 10; i++)); do
-    systemctl is-active --quiet -- "$unit" 2>/dev/null || return 0
-    sleep 0.1
+  local unit st i sig
+  unit=$(scope_unit "$1" "$2")
+  for sig in TERM KILL; do
+    st=$(scope_state "$unit")
+    case $st in inactive|failed) return 0 ;; esac
+    systemctl kill --signal="$sig" -- "$unit" >/dev/null 2>&1 || true
+    for ((i = 0; i < STOP_GRACE * 10; i++)); do
+      st=$(scope_state "$unit")
+      case $st in inactive|failed) return 0 ;; esac
+      sleep 0.1
+    done
   done
-  systemctl kill --signal=KILL -- "$unit" >/dev/null 2>&1 || true
+  printf 'dfctl: scope %s still %s after TERM and KILL\n' "$unit" "$st" >&2
+  return 1
+}
+
+# Pid of the live tracking `timeout` of <uid>-<rid> in <dir> (owner uid <owner>), or failure.
+tracked_pid() {
+  local dir=$1 uid=$2 rid=$3 owner=$4 pid="" st=""
+  [ -f "$dir/$uid-$rid" ] || return 1
+  read -r pid st < "$dir/$uid-$rid" 2>/dev/null || true
+  [[ $pid =~ ^[1-9][0-9]*$ && $st =~ ^[0-9]+$ ]] || return 1
+  [ -d "/proc/$pid" ] || return 1
+  [ "$(stat -c %u -- "/proc/$pid" 2>/dev/null)" = "$owner" ] || return 1
+  [ "$(cat -- "/proc/$pid/comm" 2>/dev/null || true)" = timeout ] || return 1
+  [ "$(proc_starttime "$pid" || true)" = "$st" ] || return 1
+  printf '%s\n' "$pid"
+}
+# "dfctl-<uid>-<rid>.scope" -> "<uid> <rid>" (pure).
+parse_scope_name() {
+  local n=${1-}
+  [[ $n =~ ^dfctl-([1-9][0-9]{0,8})-([A-Za-z0-9]{8,64})\.scope$ ]] || return 1
+  printf '%s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+}
+# The run id of the dfctl scope of seat <uid> that a /proc/<pid>/cgroup text belongs to (pure).
+scope_rid_of_cgroup() {
+  local cg=${1-} uid=$2 line unit
+  while IFS= read -r line; do
+    unit=${line##*/}
+    if [[ $unit =~ ^dfctl-${uid}-([A-Za-z0-9]{8,64})\.scope$ ]]; then printf '%s\n' "${BASH_REMATCH[1]}"; return 0; fi
+  done <<< "$cg"
+  return 1
+}
+# Orphan = a dfctl scope whose tracking dfctl/timeout is gone (devflow.service stop/restart/crash).
+is_orphan_run() { ! tracked_pid "$1" "$2" "$3" "$4" >/dev/null; }
+# Stops every orphaned dfctl scope (of seat <uid>, or all). Returns 1 if one could not be stopped.
+# A stale pid file left behind is harmless: its pid is dead, so the run counts as not live.
+reap_orphans() {
+  local only=${1-} unit ur u r bad=0
+  have_systemd || return 0
+  while read -r unit _; do
+    ur=$(parse_scope_name "$unit") || continue
+    read -r u r <<< "$ur"
+    [ -z "$only" ] || [ "$u" = "$only" ] || continue
+    case $(scope_state "$unit") in active|activating|deactivating|reloading) ;; *) continue ;; esac
+    is_orphan_run "$RUN_DIR" "$u" "$r" 0 || continue
+    printf 'dfctl: stopping orphaned %s\n' "$unit" >&2
+    stop_scope "$u" "$r" || bad=1
+  done < <(systemctl list-units --all --type=scope --no-legend --plain 'dfctl-*.scope' 2>/dev/null)
+  return "$bad"
+}
+# Backstop: every process of <seat os user> must be inside a live, tracked dfctl scope of <uid>. Others are
+# killed and reported (return 1).
+seat_strays() {
+  local user=$1 uid=$2 p cg rid bad=0
+  for p in $(pgrep -u "$user" 2>/dev/null); do
+    cg=$(cat -- "/proc/$p/cgroup" 2>/dev/null) || continue
+    if rid=$(scope_rid_of_cgroup "$cg" "$uid") && ! is_orphan_run "$RUN_DIR" "$uid" "$rid" 0; then continue; fi
+    printf 'dfctl: process %s of %s is outside any live dfctl scope; killing it\n' "$p" "$user" >&2
+    kill -KILL "$p" 2>/dev/null || true
+    bad=1
+  done
+  return "$bad"
 }
 
 TRACK_AFTER=()
 TRACK_POST=()
-TRACK_UID="" TRACK_RID="" TRACK_SCOPE=0
-# After a tracked run: kill its whole systemd scope first, then the optional post step (root sweep).
+TRACK_UID="" TRACK_RID="" TRACK_SCOPE=0 TRACK_SEAT_USER=""
+# After a tracked run: kill its whole systemd scope first (fail closed), make sure no process of the seat is
+# left outside a live tracked scope, then the optional post step (root sweep).
 after_tracked_run() {
-  if [ "$TRACK_SCOPE" = 1 ]; then stop_scope "$TRACK_UID" "$TRACK_RID"; fi
+  if [ "$TRACK_SCOPE" = 1 ]; then
+    stop_scope "$TRACK_UID" "$TRACK_RID" || return "$SWEEP_FAILED"
+    if [ -n "$TRACK_SEAT_USER" ]; then seat_strays "$TRACK_SEAT_USER" "$TRACK_UID" || return "$SWEEP_FAILED"; fi
+  fi
   if [ ${#TRACK_POST[@]} -gt 0 ]; then "${TRACK_POST[@]}" || return $?; fi
   return 0
 }
-# Server runs require a systemd scope (fail closed); ALLOW_NO_SYSTEMD_SCOPE=1 in dfctl.conf is the explicit
-# opt-out for machines without systemd (then only the process group is killed).
+# Server runs require a systemd scope (fail closed). ALLOW_NO_SYSTEMD_SCOPE=1 in dfctl.conf is the explicit
+# opt-out for machines without systemd: then only the process group is killed and the sweep guarantee
+# (no seat process alive during the sweep) no longer holds.
 run_tracked() {
   local uid=$1 rid=$2 max=$3; shift 3
   prepare_run_dir
   TRACK_UID=$uid; TRACK_RID=$rid; TRACK_AFTER=(after_tracked_run)
   if have_systemd; then
     TRACK_SCOPE=1
-    build_scope_cmd "$uid" "$rid"
+    build_scope_cmd "$uid" "$rid" "$max"
     run_tracked_in "$RUN_DIR" "$uid" "$rid" "$max" "${SCOPE_CMD[@]}" "$@"
   elif [ "$CONF_ALLOW_NO_SCOPE" = 1 ]; then
     TRACK_SCOPE=0
@@ -510,21 +613,62 @@ run_tracked() {
   fi
 }
 
-# Root sweep + devflow hardening of one project, serialised per project. Returns SWEEP_FAILED on failure.
+# fs.protected_hardlinks and fs.protected_symlinks must both be 1 (seats must not hard-link files they do
+# not own into a project, nor make root follow their symlinks in sticky folders).
+kernel_protections_ok() {
+  local d=${1:-/proc/sys/fs}
+  [ "$(cat -- "$d/protected_hardlinks" 2>/dev/null)" = 1 ] && [ "$(cat -- "$d/protected_symlinks" 2>/dev/null)" = 1 ]
+}
+
+# Per-worktree lock held by run-claude from its pre-run sweep to its post-run sweep (kill grace included).
+# sweep-project <id> <worktree> takes it first, so it never runs while that worktree's run is still dying.
+wt_lock_file() { printf '%s/wt-%s.lock\n' "$1" "$(printf '%s' "$2" | sha256sum | cut -c1-40)"; }
+
+# cron/at must be denied to seat accounts (a seat could otherwise schedule processes outside any scope).
+deny_cron_at() {
+  local u=$1 etc=${2:-/etc} f
+  for f in "$etc/cron.allow" "$etc/at.allow"; do
+    if [ -e "$f" ] && grep -qxF -- "$u" "$f"; then printf 'dfctl: %s is listed in %s\n' "$u" "$f" >&2; return 1; fi
+  done
+  for f in "$etc/cron.deny" "$etc/at.deny"; do
+    [ ! -L "$f" ] || { printf 'dfctl: %s is a symlink\n' "$f" >&2; return 1; }
+    if [ ! -e "$f" ]; then : > "$f" && chmod 0644 "$f" || return 1; fi
+    grep -qxF -- "$u" "$f" || printf '%s\n' "$u" >> "$f" || return 1
+  done
+}
+
+# Root sweep + devflow hardening of one project, serialised per project, retried up to 3 times (git's
+# link()+unlink() finalisation by a live writer can show nlink=2 for a moment). Returns SWEEP_FAILED on
+# failure and records it in /var/lib/dfctl/sweep-failed/<projectId>; while that file exists every sweep of the
+# project fails (an admin inspects the project and removes the file).
+readonly FAILED_DIR=/var/lib/dfctl/sweep-failed
 sweep_project() {
   local p=$1 wt=$2 pid=$3
   local uid; uid=$(id -u -- "$SERVICE_USER") || return "$SWEEP_FAILED"
+  kernel_protections_ok || { printf 'dfctl: fs.protected_hardlinks and fs.protected_symlinks must be 1\n' >&2; return "$SWEEP_FAILED"; }
   prepare_run_dir
-  install -d -m 0700 -o root -g root "$PACK_DIR"
-  root_dir_ok "$PACK_DIR" || { printf 'dfctl: %s is not root-owned\n' "$PACK_DIR" >&2; return "$SWEEP_FAILED"; }
+  install -d -m 0700 -o root -g root "$PACK_DIR" "$FAILED_DIR"
+  root_dir_ok "$PACK_DIR" && root_dir_ok "$FAILED_DIR" || { printf 'dfctl: %s / %s not root-owned\n' "$PACK_DIR" "$FAILED_DIR" >&2; return "$SWEEP_FAILED"; }
+  if [ -e "$FAILED_DIR/$pid" ]; then
+    printf 'dfctl: an earlier sweep of project %s failed (%s); an admin must inspect it and remove %s\n' \
+      "$pid" "$(head -c 300 -- "$FAILED_DIR/$pid" 2>/dev/null)" "$FAILED_DIR/$pid" >&2
+    return "$SWEEP_FAILED"
+  fi
+  reap_orphans || { printf 'dfctl: an orphaned seat scope could not be stopped\n' >&2; return "$SWEEP_FAILED"; }
   local rc=0
   (
     flock -w 600 9 || { echo "dfctl: sweep lock timeout" >&2; exit "$SWEEP_FAILED"; }
-    if ! sweep_root "$p/.git" "$wt" "$uid" "${GROUP_PREFIX}$pid" "$PACK_DIR/$pid"; then
-      printf 'dfctl: sweep of project %s failed: %s\n' "$pid" "$SWEEP_ERR" >&2
-      exit "$SWEEP_FAILED"
-    fi
-    harden_project "$p" 0 - || { printf 'dfctl: hardening of project %s failed\n' "$pid" >&2; exit "$SWEEP_FAILED"; }
+    attempt=0
+    until sweep_root "$p/.git" "$wt" "$uid" "${GROUP_PREFIX}$pid" "$PACK_DIR/$pid"; do
+      attempt=$((attempt + 1))
+      if [ "$attempt" -ge 3 ]; then
+        printf 'dfctl: sweep of project %s failed: %s\n' "$pid" "$SWEEP_ERR" >&2
+        printf '%s\n' "$SWEEP_ERR" > "$FAILED_DIR/$pid"
+        exit "$SWEEP_FAILED"
+      fi
+      sleep 1
+    done
+    harden_project "$p" 0 - || { printf 'dfctl: hardening of project %s failed\n' "$pid" >&2; echo "hardening failed" > "$FAILED_DIR/$pid"; exit "$SWEEP_FAILED"; }
   ) 9> "$RUN_DIR/sweep-$pid.lock" || rc=$?
   return "$rc"
 }
@@ -555,6 +699,7 @@ cmd_provision_user() {
     if command -v git >/dev/null 2>&1; then git config --global --unset-all safe.directory "^[*]$" 2>/dev/null || true; fi
   '
   "${USER_CMD[@]}"
+  deny_cron_at "$u" || die "could not deny cron/at to $u"
   echo "provisioned $u"
 }
 
@@ -630,9 +775,14 @@ cmd_run_claude() {
   in_group "$u" "${GROUP_PREFIX}$pid" || die "user $u is not a member of project $pid"
   local rest=${real#"$project/.devflow/worktrees/"}
   local wt="$project/.devflow/worktrees/${rest%%/*}"
+  prepare_run_dir
+  exec 7> "$(wt_lock_file "$RUN_DIR" "$wt")"
+  flock -w 30 7 || die "another run or sweep holds worktree $wt"
+  reap_orphans "$uid" || exit "$SWEEP_FAILED"
   # Fail closed if the project's git dirs do not pass the sweep, before and after the run.
   sweep_project "$project" "$wt" "$pid" || exit "$SWEEP_FAILED"
   TRACK_POST=(sweep_project "$project" "$wt" "$pid")
+  TRACK_SEAT_USER=$u
   build_run_claude_cmd "$SEAT_UID" "$SEAT_GID" "$SEAT_HOME" "$real" "$project" "$CONF_CLAUDE" -- "$@"
   umask 002
   run_tracked "$uid" "$rid" "$RUN_MAX_SEC" "${USER_CMD[@]}"
@@ -642,10 +792,13 @@ cmd_claude_auth() {
   local uid=$1 action=$2
   load_conf
   seat_user "$uid"
+  reap_orphans "$uid" || exit "$SWEEP_FAILED"
+  TRACK_SEAT_USER=${USER_PREFIX}$uid
   case "$action" in
     status|logout)
+      # Tracked and scoped like every seat process, so nothing it starts outlives it.
       build_user_cmd "$SEAT_UID" "$SEAT_GID" "$SEAT_HOME" "$SEAT_HOME" -- "$CONF_CLAUDE" auth "$action"
-      exec timeout -s KILL "$SHORT_MAX_SEC" "${USER_CMD[@]}" ;;
+      run_tracked "$uid" "auth$(od -An -N10 -tx1 /dev/urandom | tr -d ' \n')" "$SHORT_MAX_SEC" "${USER_CMD[@]}" ;;
     login)
       # A wide pty so the login URL is printed on one line. CONF_CLAUDE passed is_safe_bin.
       build_user_cmd "$SEAT_UID" "$SEAT_GID" "$SEAT_HOME" "$SEAT_HOME" -- \
@@ -665,14 +818,26 @@ cmd_sweep_project() {
     local name=${wt#"$p/.devflow/worktrees/"}
     [ "$name" != "$wt" ] && [[ $name =~ ^[^/]+$ ]] || die "worktree must be <project>/.devflow/worktrees/<name>"
   fi
+  if [ -n "$wt" ]; then
+    prepare_run_dir
+    exec 7> "$(wt_lock_file "$RUN_DIR" "$wt")"
+    # Waits for a run on this worktree to finish its post-run sweep (stop + kill grace included).
+    flock -w 900 7 || { echo "dfctl: worktree $wt is still busy" >&2; exit "$SWEEP_FAILED"; }
+  fi
   sweep_project "$p" "$wt" "$pid" || exit "$SWEEP_FAILED"
   echo "swept project $pid"
+}
+
+cmd_reap() {
+  prepare_run_dir
+  reap_orphans || exit "$SWEEP_FAILED"
+  echo "reaped"
 }
 
 cmd_stop_claude() {
   prepare_run_dir
   stop_in "$RUN_DIR" "$1" "$2" 0
-  if have_systemd; then stop_scope "$1" "$2"; fi
+  if have_systemd; then stop_scope "$1" "$2" || exit "$SWEEP_FAILED"; fi
 }
 
 # ---------------------------------------------------------------- self-test
@@ -789,8 +954,8 @@ self_test() {
   local n_c=${#C[@]}
   ok "claude binary then args verbatim" test "${C[n_c-4]}|${C[n_c-3]}|${C[n_c-2]}|${C[n_c-1]}" = "/usr/local/bin/claude|-p|; rm -rf /|\$(id)"
   ok "EXTRA_ENV reset after building" test ${#EXTRA_ENV[@]} -eq 0
-  build_scope_cmd 7 abcdef12
-  ok "systemd scope per run" test "${SCOPE_CMD[*]}" = "systemd-run --scope --quiet --collect --unit=dfctl-7-abcdef12.scope --"
+  build_scope_cmd 7 abcdef12 100
+  ok "systemd scope per run, bounded by RuntimeMaxSec" test "${SCOPE_CMD[*]}" = "systemd-run --scope --quiet --collect --unit=dfctl-7-abcdef12.scope --property=RuntimeMaxSec=$((100 + 4 * STOP_GRACE)) --"
 
   echo "# tracked runs and stop marker"
   local tdir me rc pid="" st="" i t0 bg mode
@@ -897,8 +1062,28 @@ self_test() {
 
     mkdir -p "$hp/proj/.devflow/worktrees/R1"
     printf 'gitdir: %s/proj/.git/worktrees/R1\n' "$hp" > "$hp/proj/.devflow/worktrees/R1/.git"
+    printf '%s/proj/.devflow/worktrees/R1/.git\n' "$hp" > "$hp/proj/.git/worktrees/R1/gitdir"
     rm -f -- "$hp/manifest"
     ok "worktree .git file pointing at its git dir passes" quiet sweep_root "$hp/proj/.git" "$hp/proj/.devflow/worktrees/R1" "$me_u" "" "$hp/manifest"
+    printf '%s/proj/.devflow/worktrees/R9/.git\n' "$hp" > "$hp/proj/.git/worktrees/R1/gitdir"
+    no "git dir whose gitdir back-pointer names another worktree refused" quiet sweep_root "$hp/proj/.git" "$hp/proj/.devflow/worktrees/R1" "$me_u" "" "$hp/manifest"
+    printf '%s/proj/.devflow/worktrees/R1/.git\n' "$hp" > "$hp/proj/.git/worktrees/R1/gitdir"
+    mkdir -p "$hp/proj/.git/objects/ab"
+    printf 'x' > "$hp/proj/.git/objects/ab/tmp_obj_123"; ln "$hp/proj/.git/objects/ab/tmp_obj_123" "$hp/proj/.git/objects/ab/cdef"
+    no "final object with nlink=2 (git link()+unlink() window) fails one pass" quiet sweep_root "$hp/proj/.git" "" "$me_u" "" "$hp/manifest"
+    : > "$hp/proj/.git/objects/pack/tmp_pack_abc"; : > "$hp/proj/.git/index.lock"
+    STRAGGLER_DEAD=self_dead_yes
+    self_dead_yes() { return 0; }
+    self_dead_no() { return 1; }
+    clean_stragglers "$hp/proj/.git" "$((me_u + 1))"
+    ok "stragglers of a dead seat deleted (tmp_obj, tmp_pack, lock)" test ! -e "$hp/proj/.git/objects/ab/tmp_obj_123" -a ! -e "$hp/proj/.git/objects/pack/tmp_pack_abc" -a ! -e "$hp/proj/.git/index.lock"
+    ok "the finalised object stays (nlink back to 1)" test "$(stat -c %h "$hp/proj/.git/objects/ab/cdef")" = 1
+    : > "$hp/proj/.git/objects/pack/tmp_pack_live"
+    STRAGGLER_DEAD=self_dead_no
+    clean_stragglers "$hp/proj/.git" "$((me_u + 1))"
+    ok "stragglers of a live seat are kept" test -e "$hp/proj/.git/objects/pack/tmp_pack_live"
+    ok "a tmp_pack in objects/pack is not a sweep failure" quiet sweep_root "$hp/proj/.git" "" "$me_u" "" "$hp/manifest"
+    STRAGGLER_DEAD=seat_uid_dead
     printf 'gitdir: %s/other/.git/worktrees/R1\n' "$hp" > "$hp/proj/.devflow/worktrees/R1/.git"
     no "worktree .git file pointing elsewhere refused" quiet sweep_root "$hp/proj/.git" "$hp/proj/.devflow/worktrees/R1" "$me_u" "" "$hp/manifest"
     rm -f -- "$hp/proj/.devflow/worktrees/R1/.git"; ln -s "$hp/proj/.git" "$hp/proj/.devflow/worktrees/R1/.git"
@@ -923,6 +1108,53 @@ self_test() {
   no "sweep-project relative worktree" quiet validate_args sweep-project 3 srv/p
   no "sweep-project extra arg" quiet validate_args sweep-project 3 /a /b
   no "sweep-project no id" quiet validate_args sweep-project
+  ok "reap" quiet validate_args reap
+  no "reap with args" quiet validate_args reap 1
+
+  echo "# orphan scopes and strays"
+  ok "scope name parsed" test "$(parse_scope_name dfctl-7-abcdef12.scope)" = "7 abcdef12"
+  no "foreign scope name ignored" quiet parse_scope_name user-1000.scope
+  no "scope name with injection ignored" quiet parse_scope_name 'dfctl-7-abc;rm.scope'
+  ok "cgroup of a seat run maps to its run id" test "$(scope_rid_of_cgroup '0::/system.slice/dfctl-7-abcdef12.scope' 7)" = abcdef12
+  no "cgroup of another seat does not" quiet scope_rid_of_cgroup '0::/system.slice/dfctl-8-abcdef12.scope' 7
+  no "cgroup outside dfctl scopes does not" quiet scope_rid_of_cgroup '0::/user.slice/user-1000.slice/session-3.scope' 7
+  local od; od=$(mktemp -d)
+  ok "no pid file -> orphan" is_orphan_run "$od" 7 abcdef12 "$me"
+  printf '99999999 1\n' > "$od/7-deadbeef"
+  ok "dead pid -> orphan" is_orphan_run "$od" 7 deadbeef "$me"
+  printf '%s %s\n' "$$" "$(proc_starttime $$)" > "$od/7-notatimeout"
+  ok "live pid that is not dfctl's timeout -> orphan" is_orphan_run "$od" 7 notatimeout "$me"
+  ( run_tracked_in "$od" 7 livetrack 30 /bin/sh -c 'sleep 30' ) </dev/null >/dev/null 2>&1 &
+  local lbg=$!
+  for i in $(seq 1 50); do [ -s "$od/7-livetrack" ] && break; sleep 0.1; done
+  no "live tracked run -> not an orphan" is_orphan_run "$od" 7 livetrack "$me"
+  ( stop_in "$od" 7 livetrack "$me" ) >/dev/null 2>&1; wait "$lbg" 2>/dev/null || true
+  ok "after its stop -> orphan" is_orphan_run "$od" 7 livetrack "$me"
+
+  echo "# kernel protections, worktree lock, cron/at"
+  mkdir -p "$od/fs"; echo 1 > "$od/fs/protected_hardlinks"; echo 1 > "$od/fs/protected_symlinks"
+  ok "both protections on" kernel_protections_ok "$od/fs"
+  echo 0 > "$od/fs/protected_symlinks"
+  no "protected_symlinks=0 refused" kernel_protections_ok "$od/fs"
+  echo 1 > "$od/fs/protected_symlinks"; echo 0 > "$od/fs/protected_hardlinks"
+  no "protected_hardlinks=0 refused" kernel_protections_ok "$od/fs"
+  no "missing values refused" kernel_protections_ok "$od/nowhere"
+  ok "one lock file per worktree" test "$(wt_lock_file /run/dfctl /srv/p/.devflow/worktrees/A)" = "$(wt_lock_file /run/dfctl /srv/p/.devflow/worktrees/A)"
+  no "different worktrees, different locks" test "$(wt_lock_file /run/dfctl /srv/p/.devflow/worktrees/A)" = "$(wt_lock_file /run/dfctl /srv/p/.devflow/worktrees/B)"
+  local lk; lk=$(wt_lock_file "$od" /srv/p/.devflow/worktrees/A)
+  ( exec 7> "$lk"; flock 7; sleep 2 ) &
+  local hbg=$!
+  sleep 0.3
+  no "a held worktree lock blocks a second taker" quiet flock -w 0.5 "$lk" true
+  wait "$hbg" 2>/dev/null || true
+  ok "and is free after the run" quiet flock -w 2 "$lk" true
+  mkdir -p "$od/etc"
+  ok "cron/at denied" deny_cron_at dfu-7 "$od/etc"
+  ok "cron/at deny idempotent" deny_cron_at dfu-7 "$od/etc"
+  ok "listed once in cron.deny and at.deny" test "$(grep -cxF dfu-7 "$od/etc/cron.deny")$(grep -cxF dfu-7 "$od/etc/at.deny")" = 11
+  echo dfu-7 > "$od/etc/cron.allow"
+  no "refused when cron.allow lists the seat" quiet deny_cron_at dfu-7 "$od/etc"
+  rm -rf -- "$od"
 
   if [ $failed -eq 0 ]; then echo "# all $n checks passed"; return 0; fi
   echo "# $failed of $n checks FAILED"; return 1
@@ -944,6 +1176,7 @@ main() {
     claude-auth) cmd_claude_auth "$@" ;;
     stop-claude) cmd_stop_claude "$@" ;;
     sweep-project) cmd_sweep_project "$@" ;;
+    reap) cmd_reap ;;
   esac
 }
 

@@ -29,7 +29,16 @@ D=${q(dir)}
 case "$1" in
   run-claude) shift 6; m=ok; [ -f "$D/mode" ] && m=$(cat "$D/mode")
     if [ "$m" = sweepfail ]; then ${q(process.execPath)} ${q(FAKE_CLAUDE)} ok "$@"; echo "dfctl: sweep of project 1 failed: symlink" >&2; exit 86; fi
-    exec ${q(process.execPath)} ${q(FAKE_CLAUDE)} "$m" "$@" ;;
+    # Like the real dfctl: only stop-claude (not a signal from DevFlow) ends the run; after the stop it runs its
+    # post-run sweep and exits with its result (86 in mode abort86).
+    code=143; if [ "$m" = abort86 ]; then m=hang; code=86; fi
+    echo $$ > "$D/run-pid"
+    trap '' TERM INT
+    ${q(process.execPath)} ${q(FAKE_CLAUDE)} "$m" "$@" <&0 &
+    c=$!
+    trap 'kill -KILL $c 2>/dev/null; sleep 0.5; exit '$code USR1
+    wait $c; rc=$?
+    wait $c 2>/dev/null; exit $rc ;;
   sweep-project) [ -f "$D/sweep-fail" ] && { echo "dfctl: sweep of project $2 failed: hard-linked file" >&2; exit 86; }; exit 0 ;;
   claude-auth)
     case "$3" in
@@ -37,7 +46,7 @@ case "$1" in
       logout) exit 0 ;;
       login) exec ${q(process.execPath)} ${q(FAKE_LOGIN)} "$D" ;;
     esac ;;
-  stop-claude) exit 0 ;;
+  stop-claude) sleep 1; [ -f "$D/run-pid" ] && kill -USR1 "$(cat "$D/run-pid")" 2>/dev/null; echo done > "$D/stop-done"; exit 0 ;;
   *) [ -f "$D/fail" ] && { echo "dfctl: boom" >&2; exit 1; }; exit 0 ;;
 esac
 `);

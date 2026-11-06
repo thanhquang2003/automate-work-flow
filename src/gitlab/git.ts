@@ -104,6 +104,12 @@ export class Git {
     if (!st?.isDirectory()) throw new Error(`DevFlow worktree ${cwd}: project repository ${commonDir} missing`);
     const gst = await lstat(gitDir).catch(() => undefined);
     if (!gst?.isDirectory()) throw new Error(`DevFlow worktree ${cwd}: ${gitDir} is not a directory; refusing to run git there`);
+    // The git dir must belong to THIS worktree: its gitdir back-pointer names our .git file (a seat could
+    // otherwise point its worktree at another request's git dir in the same project).
+    const back = (await readFile(join(gitDir, 'gitdir'), 'utf8').catch(() => '')).trim();
+    if (!back || resolve(back) !== join(resolve(cwd), '.git')) {
+      throw new Error(`DevFlow worktree ${cwd}: ${join(gitDir, 'gitdir')} does not point back to this worktree; refusing to run git there`);
+    }
     // git still reads refs through <gitDir>/commondir, so it must lead back to the project repository.
     const cd = (await readFile(join(gitDir, 'commondir'), 'utf8').catch(() => '')).trim();
     const cdReal = cd ? await realpath(resolve(gitDir, cd)).catch(() => '') : '';

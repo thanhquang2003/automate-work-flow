@@ -34,7 +34,7 @@ export interface SeatRunner {
    * on a project after a seat run that did not end normally (aborted/timeout) and before git on a worktree.
    * Throws SeatSweepError when the sweep fails. No-op in local mode.
    */
-  sweepProject(projectId: number, worktree?: string): Promise<void>;
+  sweepProject(projectId: number, worktree: string): Promise<void>;
 }
 
 export function newRunId(): string { return randomBytes(12).toString('hex'); }
@@ -98,6 +98,8 @@ export interface SudoSeatRunnerOptions {
   loginTimeoutMs?: number;
   /** Limit for status/logout calls. */
   execTimeoutMs?: number;
+  /** How long to wait for dfctl to exit after a stop (default 30 min: kill grace + post-run sweep). */
+  settleMs?: number;
 }
 
 /** Server mode: every call goes through `sudo -n <dfctl> ...`. */
@@ -111,9 +113,14 @@ export class SudoSeatRunner implements SeatRunner {
 
   private dfctl(...args: string[]): string[] { return ['-n', this.cfg.dfctlPath, ...args]; }
 
-  /** Best-effort stop of a dfctl-tracked run (DevFlow cannot signal processes of other users). */
-  private stop(userId: number, runId: string): void {
-    execFile(this.sudo, this.dfctl('stop-claude', String(userId), runId), { timeout: 30_000, env: claudeEnv() }, () => { /* ignore */ });
+  /**
+   * Stops a dfctl-tracked run (DevFlow cannot signal processes of other users). Resolves when
+   * `dfctl stop-claude` has returned; never rejects.
+   */
+  private stop(userId: number, runId: string): Promise<void> {
+    return new Promise(resolve => {
+      execFile(this.sudo, this.dfctl('stop-claude', String(userId), runId), { timeout: 60_000, env: claudeEnv() }, () => resolve());
+    });
   }
 
   async run(userId: number | null, opts: RunOpts): Promise<RunResult> {
@@ -124,11 +131,20 @@ export class SudoSeatRunner implements SeatRunner {
     const runId = newRunId();
     // Prompt always via stdin; CLAUDE_BIN_ARGS (a test hook) never reaches the seat binary.
     const args = this.dfctl('run-claude', String(userId), opts.cwd, '--run-id', runId, '--', '-p', ...claudeRunArgs(opts));
+    let stopping: Promise<void> | undefined;
+    // sudo and the seat processes are not signalable from here: only stop-claude ends the run. dfctl then kills
+    // the scope and sweeps before exiting, so wait for its real exit status (up to settleMs).
     const res = await runClaudeCommand(this.cfg, opts, {
-      bin: this.sudo, args, cwd: '/', promptViaStdin: true, onKill: () => this.stop(userId, runId),
+      bin: this.sudo, args, cwd: '/', promptViaStdin: true, killLocal: false,
+      settleMs: this.o.settleMs ?? 30 * 60_000,
+      onKill: () => { stopping = this.stop(userId, runId); },
     });
+    if (stopping) await stopping;
     if (res.exitCode === DFCTL_SWEEP_FAILED) {
       throw new SeatSweepError(`dfctl: the project's git dirs failed the sweep after the run in ${opts.cwd}; DevFlow must not use this project until an admin checks it`);
+    }
+    if (res.settledWithoutExit) {
+      throw new SeatSweepError(`dfctl did not finish the stopped run in ${opts.cwd} (post-run sweep status unknown); call sweepProject before using this project`);
     }
     return res;
   }
@@ -141,7 +157,7 @@ export class SudoSeatRunner implements SeatRunner {
       args: this.dfctl('claude-auth', String(userId), 'login', '--run-id', runId),
       env: claudeEnv(),
       timeoutMs: this.o.loginTimeoutMs ?? LOGIN_TIMEOUT_MS,
-      onKill: () => this.stop(userId, runId),
+      onKill: () => { void this.stop(userId, runId); },
     });
   }
 
@@ -154,10 +170,11 @@ export class SudoSeatRunner implements SeatRunner {
     });
   }
 
-  async sweepProject(projectId: number, worktree?: string): Promise<void> {
+  /** Waits for any run on `worktree` to be fully finished (dfctl's per-worktree lock), then sweeps. */
+  async sweepProject(projectId: number, worktree: string): Promise<void> {
     if (!Number.isInteger(projectId) || projectId < 1) throw new Error(`Invalid project id: ${String(projectId)}`);
-    if (worktree !== undefined && !isAbsolute(worktree)) throw new Error('Worktree path must be absolute');
-    const r = await this.exec(this.dfctl('sweep-project', String(projectId), ...(worktree ? [worktree] : [])), 15 * 60_000);
+    if (typeof worktree !== 'string' || !isAbsolute(worktree)) throw new Error('Worktree path must be absolute');
+    const r = await this.exec(this.dfctl('sweep-project', String(projectId), worktree), 20 * 60_000);
     if (r.code !== 0) {
       throw new SeatSweepError(`dfctl sweep-project ${projectId} failed (exit ${r.code}): ${r.stderr.trim().slice(-300)}`);
     }

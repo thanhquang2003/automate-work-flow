@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PermissionError, ProjectError } from '../../src/projects/service.js';
 import { fullProject, git, mkEnv, mkGitRepo, mkUser } from './helpers.js';
@@ -20,6 +20,18 @@ describe('createProject', () => {
     expect(e.repo.getProjectMember(p.id, e.pm.id)!.roles).toEqual(['PM']);
     expect(e.ops.groups).toEqual([[p.id, path]]);
     expect(e.repo.web.listAudit({ projectId: p.id }).map(a => a.action)).toContain('project.create');
+  });
+  it('existing repo with hard-linked git objects is rejected before any DB row', async () => {
+    const e = mkEnv();
+    const path = join(e.root, 'linked');
+    mkGitRepo(path);
+    const objects = join(path, '.git', 'objects');
+    const sub = readdirSync(objects).find(d => /^[0-9a-f]{2}$/.test(d))!;
+    const obj = join(objects, sub, readdirSync(join(objects, sub))[0]!);
+    linkSync(obj, join(e.base, 'other-copy'));
+    await expect(e.svc.createProject({ mode: 'existing', key: 'HL', name: 'h', path, createdBy: e.pm.id })).rejects.toThrow(/hard-link/);
+    expect(e.repo.getProjectByKey('HL')).toBeUndefined();
+    expect(e.ops.groups).toEqual([]);
   });
   it('existing non-git non-empty folder rejected', async () => {
     const e = mkEnv();

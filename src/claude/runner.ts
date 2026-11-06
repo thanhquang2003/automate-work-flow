@@ -26,6 +26,8 @@ export interface RunResult {
   aborted?: boolean;
   /** Exit status of the spawned process (null when killed by a signal or not spawned). */
   exitCode?: number | null;
+  /** After a forced stop the process did not close within the settle time: its final status is unknown. */
+  settledWithoutExit?: boolean;
 }
 
 export type SeatError = 'expired' | 'disconnected';
@@ -156,6 +158,10 @@ export interface ClaudeCommand {
   shell?: boolean;
   /** Called on abort/timeout in addition to killing the spawned process tree (e.g. ask dfctl to stop a run). */
   onKill?: () => void;
+  /** Kill the spawned process tree on abort/timeout (default true). False when only onKill can stop it. */
+  killLocal?: boolean;
+  /** After a forced stop, how long to wait for the process to close before resolving anyway. */
+  settleMs?: number;
 }
 
 /** After a forced stop, give the child this long to close before resolving anyway. */
@@ -203,6 +209,7 @@ export function runClaudeCommand(cfg: Pick<Config, 'rateLimitPauseMin'>, opts: R
     let aborted = false;
     let settled = false;
     let settleTimer: NodeJS.Timeout | undefined;
+    let unsettled = false;
 
     const handleLine = (line: string) => {
       if (!line.trim()) return;
@@ -237,8 +244,8 @@ export function runClaudeCommand(cfg: Pick<Config, 'rateLimitPauseMin'>, opts: R
       if (forced) return;
       forced = reason;
       try { cmd.onKill?.(); } catch { /* best effort */ }
-      killTree(child);
-      settleTimer = setTimeout(() => finish(null), SETTLE_AFTER_KILL_MS);
+      if (cmd.killLocal !== false) killTree(child);
+      settleTimer = setTimeout(() => { unsettled = true; finish(null); }, cmd.settleMs ?? SETTLE_AFTER_KILL_MS);
       settleTimer.unref();
     };
     const timer = opts.timeoutMs ? setTimeout(() => fail(`timeout after ${opts.timeoutMs}ms`), opts.timeoutMs) : undefined;
@@ -254,7 +261,7 @@ export function runClaudeCommand(cfg: Pick<Config, 'rateLimitPauseMin'>, opts: R
       if (settleTimer) clearTimeout(settleTimer);
       opts.signal?.removeEventListener('abort', onAbort);
       if (buf.trim()) handleLine(buf);
-      if (aborted) return resolve({ ok: false, aborted: true, sessionId, resultText, error: 'aborted', exitCode: code });
+      if (aborted) return resolve({ ok: false, aborted: true, sessionId, resultText, error: 'aborted', exitCode: code, ...(unsettled ? { settledWithoutExit: true } : {}) });
       const failedRun = !sawResult || !!isError;
       const failText = `${isError ? resultText : ''}\n${plain}\n${stderr}`;
       const limited = forced || !failedRun ? undefined
@@ -268,7 +275,7 @@ export function runClaudeCommand(cfg: Pick<Config, 'rateLimitPauseMin'>, opts: R
       else if (seatError) error = seatError === 'expired' ? 'Claude login expired' : 'Claude seat not logged in';
       else if (!sawResult) error = `claude exited (code ${code}) without a result${stderr ? ': ' + stderr.trim().slice(-500) : ''}`;
       else if (isError) error = resultText || 'claude reported an error';
-      resolve({ ok, sessionId, resultText, exitCode: code, ...(limited ? { rateLimitedUntil: limited } : {}), ...(seatError ? { seatError } : {}), ...(error ? { error } : {}) });
+      resolve({ ok, sessionId, resultText, exitCode: code, ...(unsettled ? { settledWithoutExit: true } : {}), ...(limited ? { rateLimitedUntil: limited } : {}), ...(seatError ? { seatError } : {}), ...(error ? { error } : {}) });
     }
     child.on('error', e => finish(null, e));
     child.on('close', code => finish(code));
