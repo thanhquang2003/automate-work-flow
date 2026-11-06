@@ -1,0 +1,37 @@
+<div class="head"><div><h1><%= it.project.key %>: <%= it.heading %></h1>
+<p class="muted"><a href="/oversight/projects/<%= it.project.id %>">Về dự án</a></p></div></div>
+<%~ include('./partials/oversight-nav', it) %>
+<% if (it.mode === 'docs') { %>
+<section class="card"><h3>Tài liệu của từng yêu cầu</h3>
+<% if (it.docs.length === 0) { %><p class="muted">Chưa có yêu cầu nào.</p><% } else { %>
+<ul><% for (const d of it.docs) { %><li><%= d.code %>: <a href="/oversight/projects/<%= it.project.id %>/files?ref=<%= encodeURIComponent(d.ref) %>&path=<%= encodeURIComponent(d.path) %>">thư mục tài liệu (nhánh <%= d.ref %>)</a></li><% } %></ul>
+<% } %>
+<p class="muted">Tệp Office (docx, xlsx) chỉ hiển thị kích thước, không hiển thị nội dung.</p></section>
+<% } else if (it.mode === 'logs') { %>
+<section class="card"><h3>Log của yêu cầu</h3>
+<% if (it.logs.length === 0) { %><p class="muted">Chưa có yêu cầu nào.</p><% } %>
+<% for (const g of it.logs) { %><h4><%= g.code %></h4>
+<% if (g.files.length === 0) { %><p class="muted">Chưa có log.</p><% } else { %><ul><% for (const f of g.files) { %><li><a href="/oversight/projects/<%= it.project.id %>/logs?code=<%= encodeURIComponent(g.code) %>&file=<%= encodeURIComponent(f.name) %>"><%= f.name %></a> (<%= it.fmtSize(f.size) %>)</li><% } %></ul><% } %>
+<% } %></section>
+<% } else if (it.mode === 'log') { %>
+<section class="card"><h3><%= it.code %> / <%= it.file %></h3>
+<p class="muted">Các dòng có thông tin xác thực đã được ẩn. <%= it.truncated ? 'Chỉ hiển thị 1 MB cuối của tệp.' : '' %></p>
+<pre class="log"><%= it.text %></pre></section>
+<% } else { %>
+<section class="card">
+<p class="muted">Nhánh: <b><%= it.ref %></b> · Đường dẫn: <b>/<%= it.path %></b></p>
+<% if (it.path) { %><p><a href="/oversight/projects/<%= it.project.id %>/files?ref=<%= encodeURIComponent(it.ref) %>&path=<%= encodeURIComponent(it.parent) %>">&larr; Lên thư mục trên</a></p><% } %>
+<% const r = it.result; %>
+<% if (r.kind === 'dir') { %>
+<% if (r.entries.length === 0) { %><p class="muted">Thư mục trống.</p><% } else { %>
+<div class="table-wrap"><table class="list"><thead><tr><th>Tên</th><th>Loại</th><th>Kích thước</th></tr></thead><tbody>
+<% for (const e of r.entries) { %><tr><td><% if (e.kind === 'dir' || e.kind === 'file' || e.kind === 'symlink') { %><a href="/oversight/projects/<%= it.project.id %>/files?ref=<%= encodeURIComponent(it.ref) %>&path=<%= encodeURIComponent(e.path) %>"><%= e.name %></a><% } else { %><%= e.name %><% } %></td>
+<td><%= e.kind === 'dir' ? 'Thư mục' : e.kind === 'file' ? 'Tệp' : e.kind === 'symlink' ? 'Liên kết (không theo)' : 'Submodule (không mở)' %></td><td><%= e.size == null ? '' : it.fmtSize(e.size) %></td></tr><% } %>
+</tbody></table></div><% } %>
+<% } else if (r.kind === 'file') { %><p class="muted"><%= it.fmtSize(r.size) %></p><pre class="log"><%= r.text %></pre>
+<% } else if (r.kind === 'binary') { %><p class="muted">Tệp nhị phân (<%= it.fmtSize(r.size) %>), không hiển thị nội dung.</p>
+<% } else if (r.kind === 'toolarge') { %><p class="muted">Tệp quá lớn (<%= it.fmtSize(r.size) %>, giới hạn 1 MB), không hiển thị nội dung.</p>
+<% } else if (r.kind === 'symlink') { %><p class="muted">Liên kết tượng trưng trỏ tới: <code><%= r.target %></code> (không được theo).</p>
+<% } else { %><p class="muted">Submodule hoặc repository lồng nhau, không mở.</p><% } %>
+</section>
+<% } %>

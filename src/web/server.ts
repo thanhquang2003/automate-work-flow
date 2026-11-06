@@ -13,6 +13,7 @@ import { currentUser, isLocalHostHeader, sameOrigin } from './auth.js';
 import type { OidcClient } from './oidc.js';
 import { adminRoutes } from './routes/admin.js';
 import { adminUserRoutes } from './routes/admin-users.js';
+import { oversightRoutes } from './routes/oversight.js';
 import { projectRoutes } from './routes/projects.js';
 import { seatRoutes } from './routes/seat.js';
 import { authRoutes } from './routes/auth.js';
@@ -85,6 +86,7 @@ export async function buildServer(cfg: Config, deps: WebDeps): Promise<FastifyIn
   projectRoutes(app, cfg, d);
   seatRoutes(app, cfg, d);
   adminUserRoutes(app, cfg, d);
+  oversightRoutes(app, cfg, d);
   surveyRoutes(app, cfg, deps);
   return app;
 }

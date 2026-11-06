@@ -1,0 +1,19 @@
+<h1>Giám sát: người dùng</h1>
+<%~ include('./partials/oversight-nav', it) %>
+<p class="muted">Chỉ đọc. Không hiển thị thông tin đăng nhập của Claude, chỉ cho biết đã kết nối hay chưa.</p>
+<div class="table-wrap"><table class="list">
+<thead><tr><th>Người dùng</th><th>Vai trò hệ thống</th><th>Phòng</th><th>Được làm PM</th><th>Claude</th><th>Đang chạy</th><th>Chờ duyệt</th><th>Task đang giao</th></tr></thead>
+<tbody>
+<% for (const w of it.people) { const u = w.user; %>
+<tr>
+  <td><%= u.name %><br><span class="muted"><%= u.email %></span><%= u.disabled ? ' (đã khóa)' : '' %></td>
+  <td><%= it.SYS_ROLE_LABELS[u.sysRole] || u.sysRole %></td>
+  <td><%= u.department %></td>
+  <td><%= u.canBePm ? 'Có' : 'Không' %></td>
+  <td><%= it.seat[u.id] === true ? 'Đã kết nối' : it.seat[u.id] === false ? 'Chưa kết nối' : 'Không áp dụng' %></td>
+  <td><%= w.running %></td>
+  <td><%= w.waitingApproval %></td>
+  <td><% if (w.tasks.length === 0) { %><span class="muted">-</span><% } else { %><% for (const t of w.tasks) { %><div><%= t.projectKey %>/<%= t.requestCode %>/<%= t.taskId %>: <%= t.title %> (<%= it.TASK_STATUS_LABELS[t.status] || t.status %>)</div><% } %><% } %></td>
+</tr>
+<% } %>
+</tbody></table></div>

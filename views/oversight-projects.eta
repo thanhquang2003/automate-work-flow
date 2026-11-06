@@ -1,0 +1,12 @@
+<h1>Giám sát: dự án</h1>
+<%~ include('./partials/oversight-nav', it) %>
+<% if (it.projects.length === 0) { %><div class="card"><p class="muted">Chưa có dự án nào trong phạm vi của bạn.</p></div><% } else { %>
+<div class="table-wrap"><table class="list">
+<thead><tr><th>Mã</th><th>Tên</th><th>Phòng</th><th>PM</th><th>Thành viên theo vai trò</th><th>Yêu cầu (đang mở/tổng)</th></tr></thead><tbody>
+<% for (const p of it.projects) { %>
+<tr><td><a href="/oversight/projects/<%= p.id %>"><%= p.key %></a></td><td><%= p.name %></td><td><%= p.department %></td><td><%= p.pm.join(', ') %></td>
+<td><% for (const m of p.members) { if (m.names.length) { %><div><b><%= it.PROJECT_ROLE_LABELS[m.role] %>:</b> <%= m.names.join(', ') %></div><% } } %></td>
+<td><%= p.openRequests %>/<%= p.requests %></td></tr>
+<% } %>
+</tbody></table></div>
+<% } %>

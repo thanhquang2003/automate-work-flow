@@ -20,6 +20,7 @@
     <a href="/seat">Claude của tôi</a>
     <a href="/templates">Mẫu tài liệu</a>
     <% if (it.user.sysRole === 'head' || it.user.sysRole === 'deputy') { %><a href="/dept/pm">PM của phòng</a><% } %>
+    <% if (['admin', 'cto', 'head', 'deputy'].includes(it.user.sysRole)) { %><a href="/oversight/projects">Giám sát</a><% } %>
     <% if (it.user.sysRole === 'admin' || it.user.role === 'admin') { %><a href="/settings">Cài đặt</a><a href="/admin/users">Người dùng</a><% } %>
     <% } else { %>
     <a href="/">Yêu cầu</a>

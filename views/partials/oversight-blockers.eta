@@ -1,0 +1,5 @@
+<% if (it.blockers.length === 0) { %><p class="muted">Không có điểm nghẽn.</p><% } else { %>
+<div class="table-wrap"><table class="list"><thead><tr><th>Dự án</th><th>Yêu cầu</th><th>Giai đoạn</th><th>Vấn đề</th><th>Chi tiết</th></tr></thead><tbody>
+<% for (const b of it.blockers) { %><tr><td><a href="/oversight/projects/<%= b.projectId %>"><%= b.projectKey %></a></td><td><%= b.requestCode %></td><td><%= it.STAGE_LABELS[b.stage] || b.stage %></td><td><%= b.label %></td><td><%= b.detail %></td></tr><% } %>
+</tbody></table></div>
+<% } %>

@@ -1,0 +1,5 @@
+<nav class="row" style="gap:12px;margin-bottom:12px">
+  <a href="/oversight/projects">Dự án</a>
+  <a href="/oversight/users">Người dùng và công việc</a>
+  <a href="/oversight/blockers">Điểm nghẽn</a>
+</nav>

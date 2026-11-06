@@ -1,0 +1,15 @@
+<div class="head"><div><h1><%= it.project.key %> - <%= it.project.name %></h1>
+<p class="muted"><%= it.department %></p></div>
+<div class="row" style="gap:8px">
+<% if (it.canContent) { %><a class="btn" href="/oversight/projects/<%= it.project.id %>/files">Mã nguồn</a>
+<a class="btn" href="/oversight/projects/<%= it.project.id %>/docs">Tài liệu</a>
+<a class="btn" href="/oversight/projects/<%= it.project.id %>/logs">Log</a><% } %></div></div>
+<%~ include('./partials/oversight-nav', it) %>
+<section class="card"><h3>Tiến độ yêu cầu</h3>
+<% if (it.progress.length === 0) { %><p class="muted">Chưa có yêu cầu nào.</p><% } else { %>
+<div class="table-wrap"><table class="list"><thead><tr><th>Mã</th><th>Tiêu đề</th><th>Giai đoạn</th><th>Trạng thái</th><th>Task xong</th></tr></thead><tbody>
+<% for (const r of it.progress) { %><tr><td><%= r.req.code || r.req.id %></td><td><%= r.req.title %></td><td><%= it.STAGE_LABELS[r.req.stage] %></td><td><span class="badge st-<%= r.req.status %>"><%= it.STATUS_LABELS[r.req.status] %></span></td><td><%= r.tasksDone %>/<%= r.tasksTotal %></td></tr><% } %>
+</tbody></table></div>
+<% } %></section>
+<section class="card"><h3>Điểm nghẽn</h3>
+<%~ include('./partials/oversight-blockers', it) %></section>

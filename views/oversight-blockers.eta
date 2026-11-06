@@ -1,0 +1,4 @@
+<h1>Giám sát: điểm nghẽn</h1>
+<%~ include('./partials/oversight-nav', it) %>
+<p class="muted">Các yêu cầu đang chờ ai đó xử lý: chờ kết nối Claude, bị từ chối đang chờ sửa, chờ khách hàng, thay đổi chờ PM, lỗi, bug sửa quá số lần.</p>
+<section class="card"><%~ include('./partials/oversight-blockers', it) %></section>
