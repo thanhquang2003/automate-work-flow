@@ -198,4 +198,18 @@ describe('v3 parallel tasks', () => {
     expect(git(t.p.path, 'show', 'devflow/ERP-001:T-01.txt')).toBe('T-01');
     expect(t.repo.getRequest(r.id)).toMatchObject({ stage: 'DEVELOP', status: 'failed' });
   });
+
+  it('a leftover dispatcher re-entry never drags a request that moved on back to the DEVELOP gate', async () => {
+    const t = await v3Env();
+    const r = await t.request('ERP-001');
+    t.pipeline.start(r.id);
+    await t.worker.drain();
+    // The request is past DEVELOP (waiting at the DONE gate) while a dispatch job queued by a task is still due.
+    t.repo.updateRequest(r.id, { stage: 'DONE', status: 'awaiting_approval' });
+    const job = t.repo.enqueueJob(r.id, 'run_stage', { stage: 'DEVELOP', dispatch: true }, 0, null);
+    await t.worker.drain();
+    expect(t.repo.getRequest(r.id)).toMatchObject({ stage: 'DONE', status: 'awaiting_approval' });
+    expect(t.repo.getJob(job.id)).toMatchObject({ status: 'failed', lastError: 'superseded' });
+    expect(t.repo.listStageRuns(r.id).filter(x => x.stage === 'DEVELOP' && x.status !== 'done')).toEqual([]);
+  });
 });

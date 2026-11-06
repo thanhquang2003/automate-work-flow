@@ -811,6 +811,9 @@ export class Pipeline {
     const stale = (): boolean => payload.gen !== undefined && payload.gen < (this.gens.get(reqId) ?? 0);
     if (req0.status === 'cancelled') { this.repo.failJob(job.id, 'cancelled'); return; }
     if (stale()) { this.repo.failJob(job.id, 'superseded'); return; }
+    // A DEVELOP dispatcher re-entry queued by a finished task can still be waiting when the request has already
+    // moved on (gate approved, TEST, DONE): running it would drag the request back to a DEVELOP gate.
+    if (payload.dispatch && (req0.stage !== 'DEVELOP' || req0.status === 'awaiting_approval' || req0.status === 'done')) { this.repo.failJob(job.id, 'superseded'); return; }
     const blocked = req0.projectId != null ? this.blockedProjects.get(req0.projectId) : undefined;
     if (blocked) {
       // A rerun / resume while the project is stopped: never leave the request `running` without a job.
