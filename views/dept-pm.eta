@@ -1,0 +1,18 @@
+<h1>PM của phòng <%= it.department %></h1>
+<h3>Người dùng trong phòng</h3>
+<div class="table-wrap"><table class="list">
+<thead><tr><th>Người dùng</th><th>Vai trò</th><th>Được làm PM</th></tr></thead><tbody>
+<% for (const u of it.own) { %>
+<tr><td><%= u.name %><br><span class="muted"><%= u.email %></span></td><td><%= it.SYS_ROLE_LABELS[u.sysRole] %></td>
+<td><form method="post" action="/dept/pm/<%= u.id %>/can-pm"><input type="hidden" name="value" value="<%= u.canBePm ? '0' : '1' %>"><button class="btn" type="submit"><%= u.canBePm ? 'Có (bỏ)' : 'Không (cho phép)' %></button></form></td></tr>
+<% } %>
+</tbody></table></div>
+<h3>Người dùng chưa có phòng</h3>
+<% if (it.unassigned.length === 0) { %><p class="muted">Không có.</p><% } else { %>
+<ul>
+<% for (const u of it.unassigned) { %>
+<li><%= u.name %> <span class="muted">(<%= u.email %>)</span>
+<form method="post" action="/dept/pm/<%= u.id %>/assign" class="inline"><button class="btn" type="submit">Đưa vào phòng của tôi</button></form></li>
+<% } %>
+</ul>
+<% } %>

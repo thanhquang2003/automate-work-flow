@@ -1,0 +1,28 @@
+<h1>Tạo yêu cầu - <%= it.project.key %></h1>
+<form method="post" action="/projects/<%= it.project.id %>/requests" enctype="multipart/form-data" class="card stack">
+  <label>Mã yêu cầu * (gợi ý: <%= it.suggestion %>) <input name="code" required value="<%= it.form.code || it.suggestion %>"></label>
+  <label>Tiêu đề * <input name="title" required value="<%= it.form.title || '' %>"></label>
+  <label>Mô tả yêu cầu * <textarea name="description" rows="8" required><%= it.form.description || '' %></textarea></label>
+  <label>Yêu cầu hiệu năng <textarea name="perf_req" rows="3"><%= it.form.perf_req || '' %></textarea></label>
+  <label>Yêu cầu phi chức năng <textarea name="nonfunc_req" rows="3"><%= it.form.nonfunc_req || '' %></textarea></label>
+  <label>Tệp đính kèm <input type="file" name="files" multiple></label>
+  <fieldset><legend>Loại phần mềm</legend>
+    <% const labels = { web: 'Web', mobile: 'Mobile', api: 'API', background: 'Tiến trình nền' }; %>
+    <% for (const t of it.SOFTWARE_TYPES) { %><label class="check"><input type="checkbox" name="software_types" value="<%= t %>" <%= (it.form.software_types || []).includes(t) ? 'checked' : '' %>> <%= labels[t] %></label><% } %>
+  </fieldset>
+  <fieldset><legend>Chế độ chạy</legend>
+    <label class="check"><input type="radio" name="run_mode" value="review" <%= (it.form.run_mode || 'review') === 'review' ? 'checked' : '' %>> Duyệt từng bước</label>
+    <label class="check"><input type="radio" name="run_mode" value="auto" <%= it.form.run_mode === 'auto' ? 'checked' : '' %>> Tự động</label>
+  </fieldset>
+  <fieldset><legend>Phụ trách (tick người tham gia; chọn một người chạy đầu tiên cho mỗi vai trò)</legend>
+    <% for (const b of it.blocks) { %>
+    <div><strong><%= it.PROJECT_ROLE_LABELS[b.role] %></strong>
+    <% b.people.forEach((p, i) => { %>
+      <label class="check"><input type="checkbox" name="a_<%= b.role %>" value="<%= p.id %>" checked> <%= p.name %></label>
+      <label class="check"><input type="radio" name="runner_<%= b.role %>" value="<%= p.id %>" <%= i === 0 ? 'checked' : '' %>> chạy đầu</label>
+    <% }) %>
+    </div>
+    <% } %>
+  </fieldset>
+  <div><button class="btn primary" type="submit">Tạo và bắt đầu</button> <a class="btn" href="/projects/<%= it.project.id %>">Hủy</a></div>
+</form>

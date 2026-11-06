@@ -14,7 +14,7 @@ function warnOnce(key: string, msg: string): void {
 
 export const SETTING_KEYS = {
   gitlabUrl: 'gitlab.url', gitlabToken: 'gitlab.token', gitlabDefaultGroup: 'gitlab.defaultGroup',
-  maxConcurrentJobs: 'maxConcurrentJobs',
+  maxConcurrentJobs: 'maxConcurrentJobs', seatConcurrency: 'seatConcurrency', projectRoots: 'projectRoots',
 } as const;
 
 /** Config with settings stored in the DB layered over the env-derived `cfg` (empty DB values are ignored). Does not mutate `cfg`. */
@@ -26,8 +26,12 @@ export function effectiveConfig(cfg: Config, repo: Repo): Config {
     try { token = decrypt(enc, getSecretKey(cfg)); } catch { warnOnce('gitlab.token', 'Không giải mã được token GitLab đã lưu trong cài đặt (khóa thay đổi?); dùng token từ biến môi trường.'); }
   }
   const maxJobs = Number.parseInt(s(SETTING_KEYS.maxConcurrentJobs), 10);
+  const seatConc = Number.parseInt(s(SETTING_KEYS.seatConcurrency), 10);
+  const roots = s(SETTING_KEYS.projectRoots).split(',').map(x => x.trim()).filter(Boolean);
   return {
     ...cfg,
+    seatConcurrency: Number.isFinite(seatConc) && seatConc >= 1 ? seatConc : cfg.seatConcurrency,
+    projectRoots: roots.length ? roots : cfg.projectRoots,
     maxConcurrentJobs: Number.isFinite(maxJobs) && maxJobs >= 1 ? maxJobs : cfg.maxConcurrentJobs,
     gitlab: {
       url: s(SETTING_KEYS.gitlabUrl) || cfg.gitlab.url,

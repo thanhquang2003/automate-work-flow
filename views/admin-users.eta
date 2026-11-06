@@ -1,0 +1,18 @@
+<h1>Người dùng</h1>
+<div class="table-wrap"><table class="list">
+<thead><tr><th>Người dùng</th><th>Vai trò hệ thống</th><th>Phòng</th><th>Được làm PM</th><th>Trạng thái</th></tr></thead>
+<tbody>
+<% for (const u of it.users) { %>
+<tr>
+  <td><%= u.name %><br><span class="muted"><%= u.email %></span></td>
+  <td><form method="post" action="/admin/users/<%= u.id %>/sys-role" class="row">
+    <select name="sys_role"><% for (const r of it.SYS_ROLES) { %><option value="<%= r %>" <%= u.sysRole === r ? 'selected' : '' %>><%= it.SYS_ROLE_LABELS[r] %></option><% } %></select>
+    <button class="btn" type="submit">Lưu</button></form></td>
+  <td><form method="post" action="/admin/users/<%= u.id %>/department" class="row">
+    <select name="department_id"><option value="">(chưa có phòng)</option><% for (const d of it.departments) { %><option value="<%= d.id %>" <%= u.departmentId === d.id ? 'selected' : '' %>><%= d.name %></option><% } %></select>
+    <button class="btn" type="submit">Lưu</button></form></td>
+  <td><form method="post" action="/admin/users/<%= u.id %>/can-pm"><input type="hidden" name="value" value="<%= u.canBePm ? '0' : '1' %>"><button class="btn" type="submit"><%= u.canBePm ? 'Có (bỏ)' : 'Không (cho phép)' %></button></form></td>
+  <td><form method="post" action="/admin/users/<%= u.id %>/disable"><input type="hidden" name="value" value="<%= u.disabled ? '0' : '1' %>"><button class="btn <%= u.disabled ? '' : 'danger' %>" type="submit"><%= u.disabled ? 'Đã khóa (mở)' : 'Khóa' %></button></form></td>
+</tr>
+<% } %>
+</tbody></table></div>

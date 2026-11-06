@@ -14,10 +14,39 @@
     <% if (it.attachments.length === 0) { %><p class="muted">Không có.</p><% } else { %>
     <ul><% for (const a of it.attachments) { %><li><%= a.filename %> <span class="muted">(<%= it.fmtSize(a.size) %>)</span></li><% } %></ul>
     <% } %>
+    <% if (it.assigneeBlocks) { %>
+    <h3>Phụ trách</h3>
+    <% for (const b of it.assigneeBlocks) { %>
+    <div class="card">
+      <strong><%= it.PROJECT_ROLE_LABELS[b.role] %></strong>
+      <ol>
+      <% b.list.forEach((p, i) => { %>
+        <li><%= p.name %><% if (i === 0) { %> <span class="badge">chạy</span><% } %>
+        <% if (it.canPm) { %>
+        <form method="post" action="/requests/<%= it.r.id %>/assignees" class="inline">
+          <input type="hidden" name="role" value="<%= b.role %>"><input type="hidden" name="user" value="<%= p.id %>">
+          <input type="hidden" name="expect_runner" value="<%= b.list[0] ? b.list[0].id : '' %>">
+          <% if (i > 0) { %><button class="btn" name="op" value="first" type="submit">Cho chạy</button><button class="btn" name="op" value="up" type="submit">Lên</button><% } %>
+          <% if (i < b.list.length - 1) { %><button class="btn" name="op" value="down" type="submit">Xuống</button><% } %>
+          <% if (b.list.length > 1) { %><button class="btn danger" name="op" value="remove" type="submit">Bỏ</button><% } %>
+        </form>
+        <% } %></li>
+      <% }) %>
+      </ol>
+      <% if (it.canPm && b.candidates.length) { %>
+      <form method="post" action="/requests/<%= it.r.id %>/assignees" class="row">
+        <input type="hidden" name="role" value="<%= b.role %>"><input type="hidden" name="op" value="add">
+        <select name="user"><% for (const c of b.candidates) { %><option value="<%= c.id %>"><%= c.name %></option><% } %></select>
+        <button class="btn" type="submit">Thêm</button>
+      </form>
+      <% } %>
+    </div>
+    <% } %>
+    <% } %>
     <h3>Lịch sử giai đoạn</h3>
     <% if (it.stageRuns.length === 0) { %><p class="muted">Chưa có.</p><% } else { %>
     <ul class="runs"><% for (const s of it.stageRuns) { %>
-      <li><%= it.STAGE_LABELS[s.stage] %> #<%= s.attempt %> - <%= s.status %> <span class="muted"><%= it.fmtTime(s.startedAt) %></span><% if (s.error) { %><br><span class="err"><%= s.error %></span><% } %></li>
+      <li><%= it.STAGE_LABELS[s.stage] %> #<%= s.attempt %> - <%= it.STAGE_RUN_LABELS[s.status] || s.status %> <span class="muted"><%= it.fmtTime(s.startedAt) %></span><% if (s.error) { %><br><span class="err"><%= s.error %></span><% } %></li>
     <% } %></ul>
     <% } %>
   </div>

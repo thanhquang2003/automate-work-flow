@@ -9,6 +9,9 @@
   <% if (it.tokenSet) { %><label class="check"><input type="checkbox" name="clear_token" value="1"> Xóa token đã lưu</label><% } %>
   <label>Nhóm GitLab mặc định <input name="gitlab_default_group" value="<%= it.values.gitlabDefaultGroup %>"></label>
   <label>Số job chạy đồng thời tối đa <input name="max_concurrent_jobs" type="number" min="1" max="32" value="<%= it.values.maxConcurrentJobs %>"></label>
+  <label>Số phiên Claude đồng thời mỗi người <input name="seat_concurrency" type="number" min="1" max="8" value="<%= it.values.seatConcurrency %>"></label>
+  <label>Thư mục gốc của dự án (PROJECT_ROOTS, ngăn cách bằng dấu phẩy) <input name="project_roots" value="<%= it.values.projectRoots %>" placeholder="/srv/projects"></label>
+  <p class="muted">Danh sách này cũng phải có trong <code>/etc/devflow/dfctl.conf</code> trên máy chủ, nếu không dfctl sẽ từ chối tạo nhóm Linux cho dự án.</p>
   <p class="muted">Lệnh Claude Code (<code>CLAUDE_BIN</code>) chỉ đặt qua biến môi trường, không đổi được trong trang này.</p>
   <div><button class="btn primary" type="submit">Lưu cài đặt</button></div>
 </form>

@@ -1,0 +1,7 @@
+<div class="head"><h1>Dự án</h1><% if (it.canCreate) { %><a class="btn primary" href="/projects/new">+ Tạo dự án</a><% } %></div>
+<% if (it.rows.length === 0) { %><div class="card"><p class="muted">Bạn chưa thuộc dự án nào.</p></div><% } else { %>
+<div class="table-wrap"><table class="list">
+<thead><tr><th>Mã</th><th>Tên</th><th>Yêu cầu</th><th>GitLab</th></tr></thead><tbody>
+<% for (const p of it.rows) { %><tr><td><a href="/projects/<%= p.id %>"><%= p.key %></a></td><td><%= p.name %></td><td><%= p.requests %></td><td><%= p.gitlabProject || '' %></td></tr><% } %>
+</tbody></table></div>
+<% } %>

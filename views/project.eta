@@ -1,0 +1,18 @@
+<div class="head"><div><h1><%= it.project.key %> - <%= it.project.name %></h1>
+<p class="muted"><%= it.department %> · <%= it.project.path %><% if (it.project.gitlabProject) { %> · <%= it.project.gitlabProject %><% } %></p></div>
+<% if (it.isPm) { %><a class="btn primary" href="/projects/<%= it.project.id %>/requests/new">+ Tạo yêu cầu</a><% } %></div>
+<section class="card"><h3>Yêu cầu</h3>
+<% if (it.requests.length === 0) { %><p class="muted">Chưa có yêu cầu nào.</p><% } else { %>
+<div class="table-wrap"><table class="list"><thead><tr><th>Mã</th><th>Tiêu đề</th><th>Giai đoạn</th><th>Trạng thái</th></tr></thead><tbody>
+<% for (const r of it.requests) { %><tr><td><a href="/requests/<%= r.id %>"><%= r.code %></a></td><td><%= r.title %></td><td><%= it.STAGE_LABELS[r.stage] %></td><td><span class="badge st-<%= r.status %>"><%= it.STATUS_LABELS[r.status] %></span></td></tr><% } %>
+</tbody></table></div>
+<% } %></section>
+<section class="card"><h3>Thành viên và vai trò</h3>
+<p class="muted">Chỉ người cùng phòng với dự án được liệt kê. Mỗi vai trò có thể có nhiều người.</p>
+<form method="post" action="/projects/<%= it.project.id %>/members" class="stack">
+<div class="table-wrap"><table class="list"><thead><tr><th>Người dùng</th><% for (const r of it.ROLES) { %><th><%= it.PROJECT_ROLE_LABELS[r] %></th><% } %></tr></thead><tbody>
+<% for (const u of it.rows) { %><tr><td><%= u.name %><br><span class="muted"><%= u.email %></span></td>
+<% for (const r of it.ROLES) { %><td><input type="checkbox" name="r_<%= u.id %>" value="<%= r %>" <%= u.roles.includes(r) ? 'checked' : '' %> <%= it.isPm ? '' : 'disabled' %>></td><% } %></tr><% } %>
+</tbody></table></div>
+<% if (it.isPm) { %><div><button class="btn primary" type="submit">Lưu thành viên</button></div><% } %>
+</form></section>

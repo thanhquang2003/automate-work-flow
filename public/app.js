@@ -47,3 +47,14 @@
     reload();
   });
 })();
+
+// "Claude của tôi": reload once the login attempt leaves the waiting state.
+(function () {
+  var box = document.getElementById('seat-attempt');
+  if (!box || box.dataset.state !== 'waiting' || !window.EventSource) return;
+  var es = new EventSource('/seat/events');
+  es.addEventListener('seat', function (ev) {
+    var d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+    if (d.state !== 'waiting') { es.close(); location.reload(); }
+  });
+})();

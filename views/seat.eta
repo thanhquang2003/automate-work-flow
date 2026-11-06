@@ -1,0 +1,33 @@
+<h1>Claude của tôi</h1>
+<% if (!it.available) { %>
+<div class="card"><p class="muted">Chế độ này dùng Claude của máy chạy DevFlow, không có phiên Claude riêng cho từng người.</p></div>
+<% } else { %>
+<div class="card">
+  <p>Trạng thái: <strong><%= it.SEAT_STATE_LABELS[it.status.state] || it.status.state %></strong>
+  <% if (it.status.email) { %> · <%= it.status.email %><% } %><% if (it.status.org) { %> · <%= it.status.org %><% } %></p>
+  <div class="row">
+    <form method="post" action="/seat/connect"><button class="btn primary" type="submit">Kết nối Claude</button></form>
+    <form method="post" action="/seat/check"><button class="btn" type="submit">Kiểm tra</button></form>
+    <form method="post" action="/seat/logout" data-confirm="Đăng xuất Claude?"><button class="btn danger" type="submit">Đăng xuất</button></form>
+  </div>
+</div>
+<% if (it.attempt) { %>
+<div class="card stack" id="seat-attempt" data-state="<%= it.attempt.state %>">
+  <% if (it.attempt.state === 'waiting') { %>
+    <% if (it.attempt.url) { %>
+    <p>1. Mở liên kết sau, đăng nhập bằng tài khoản Claude của bạn rồi sao chép mã được hiển thị:</p>
+    <p><a href="<%= it.attempt.url %>" target="_blank" rel="noopener noreferrer">Mở trang đăng nhập Claude</a></p>
+    <form method="post" action="/seat/code" class="stack">
+      <label>2. Dán mã vào đây <input name="code" type="password" autocomplete="off" required></label>
+      <div class="row"><button class="btn primary" type="submit">Gửi mã</button></div>
+    </form>
+    <% } else { %><p class="muted">Đang chờ liên kết đăng nhập...</p><% } %>
+    <form method="post" action="/seat/cancel"><button class="btn" type="submit">Hủy</button></form>
+  <% } else if (it.attempt.state === 'success') { %>
+    <p>Đăng nhập thành công. Các việc đang chờ Claude của bạn sẽ chạy tiếp.</p>
+  <% } else { %>
+    <p class="err"><%= it.attempt.reason %></p>
+  <% } %>
+</div>
+<% } %>
+<% } %>

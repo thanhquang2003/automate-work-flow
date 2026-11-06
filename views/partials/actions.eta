@@ -11,24 +11,33 @@
     <% } %>
     <% if (d.impactHtml) { %><details><summary>Báo cáo tác động</summary><div class="md"><%~ d.impactHtml %></div></details><% } %>
     <p><a href="<%= base %>/changes/<%= d.cr.id %>/impact">Xem chi tiết tác động</a></p>
+    <% if (it.canDecide) { %>
     <form method="post" action="<%= base %>/changes/<%= d.cr.id %>/decide" class="stack">
+    <% if (it.tokenRequired || it.isProject) { %><input type="hidden" name="expect" value="<%= it.gateToken %>"><% } %>
       <textarea name="note" rows="2" placeholder="Lý do (bắt buộc khi từ chối)"></textarea>
       <div class="row">
         <button class="btn primary" type="submit" name="decision" value="accept">Chấp nhận</button>
         <button class="btn danger" type="submit" name="decision" value="reject">Từ chối</button>
       </div>
     </form>
+    <% } else { %><p class="muted">Chỉ PM được quyết định yêu cầu thay đổi.</p><% } %>
   </div>
   <% } %>
+<% } else if (r.status === 'awaiting_approval' && !it.canApprove) { %>
+  <p>Giai đoạn <strong><%= it.STAGE_LABELS[r.stage] %></strong> đã xong, đang chờ người có quyền duyệt.</p>
 <% } else if (r.status === 'awaiting_approval') { %>
   <p>Giai đoạn <strong><%= it.STAGE_LABELS[r.stage] %></strong> đã xong, đang chờ duyệt.</p>
   <div class="row">
-    <form method="post" action="<%= base %>/approve"><button class="btn primary" type="submit">Duyệt (Approve)</button></form>
+    <form method="post" action="<%= base %>/approve"><% if (it.tokenRequired || it.isProject) { %><input type="hidden" name="expect" value="<%= it.gateToken %>"><% } %><% if (it.planningParts) { %><select name="part"><option value="">Cả hai phần</option><option value="tasks">Chỉ task</option><option value="testcases">Chỉ test case</option></select><% } %><button class="btn primary" type="submit">Duyệt (Approve)</button></form>
     <form method="post" action="<%= base %>/reject" class="stack grow">
+      <% if (it.tokenRequired || it.isProject) { %><input type="hidden" name="expect" value="<%= it.gateToken %>"><% } %>
+      <% if (it.planningParts) { %><select name="part"><option value="">Cả hai phần</option><option value="tasks">Chỉ task</option><option value="testcases">Chỉ test case</option></select><% } %>
       <textarea name="feedback" rows="2" placeholder="Phản hồi để làm lại giai đoạn này" required></textarea>
       <div><button class="btn danger" type="submit">Từ chối (Reject)</button></div>
     </form>
   </div>
+<% } else if (r.status === 'awaiting_seat') { %>
+  <p>Đang chờ Claude của người phụ trách kết nối lại. Việc sẽ tự chạy tiếp sau khi họ đăng nhập (trang <a href="/seat">Claude của tôi</a>).</p>
 <% } else if (r.status === 'running') { %>
   <div class="row">
     <form method="post" action="<%= base %>/pause"><button class="btn" type="submit">Tạm dừng</button></form>

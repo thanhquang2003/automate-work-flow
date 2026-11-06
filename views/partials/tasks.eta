@@ -1,10 +1,19 @@
 <% if (it.tasks.length === 0) { %><p class="muted">Chưa có task nào.</p><% } else { %>
 <div class="table-wrap"><table class="list">
-  <thead><tr><th>Mã</th><th>Task</th><th>Chức năng</th><th>Phụ thuộc</th><th>Trạng thái</th><th>Vòng review</th><th>Nhánh</th><th>MR</th></tr></thead>
+  <thead><tr><th>Mã</th><th>Task</th><th>Chức năng</th><th>Phụ thuộc</th><th>Người làm</th><th>Trạng thái</th><th>Vòng review</th><th>Nhánh</th><th>MR</th></tr></thead>
   <tbody>
   <% for (const t of it.tasks) { %>
   <tr><td><%= t.id %></td><td><%= t.title %></td><td><%= t.featureId || '' %></td><td><%= t.dependsOn.join(', ') %></td>
-  <td><span class="badge"><%= t.status %></span></td><td><%= t.reviewRounds %></td><td><%= t.branch || '' %></td><td><%= t.mrIid ? '!' + t.mrIid : '' %></td></tr>
+  <td>
+  <% if (it.canEditTasks) { %>
+    <form method="post" action="/requests/<%= it.r.id %>/tasks/<%= t.id %>/assign" class="row">
+      <select name="user"><option value="">(Dev phụ trách)</option>
+      <% for (const d of it.devs) { %><option value="<%= d.id %>" <%= t.assigneeId === d.id ? 'selected' : '' %>><%= d.name %></option><% } %></select>
+      <button class="btn" type="submit">Giao</button>
+    </form>
+  <% } else if (t.assigneeId && it.userNames) { %><%= it.userNames[t.assigneeId] || '#' + t.assigneeId %><% } else { %><span class="muted">-</span><% } %>
+  </td>
+  <td><span class="badge"><%= it.TASK_STATUS_LABELS[t.status] || t.status %></span></td><td><%= t.reviewRounds %></td><td><%= t.branch || '' %></td><td><%= t.mrIid ? '!' + t.mrIid : '' %></td></tr>
   <% } %>
   </tbody>
 </table></div>

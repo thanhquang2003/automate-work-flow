@@ -101,6 +101,11 @@ export class RateLimitError extends Error {
   }
 }
 
+/** The page that sent an approve/reject/decide/runner click showed an older state than the request has now. */
+export class StaleActionError extends Error {
+  constructor(message = 'Trang đã cũ: trạng thái yêu cầu đã thay đổi. Hãy tải lại trang rồi thao tác lại.') { super(message); this.name = 'StaleActionError'; }
+}
+
 export class PipelineBusyError extends Error {
   constructor(reqId: string) {
     super(`Request ${reqId} has a stage running`);
@@ -248,6 +253,22 @@ export class Pipeline {
 
   now(): number { return (this.deps.now ?? Date.now)(); }
 
+  /** Late-bound membership writer (ProjectService) so removeMember also changes the OS group. */
+  attachMembers(members: NonNullable<PipelineDeps['members']>): void { this.deps.members = members; }
+
+  /**
+   * Identifies the gate a request waits at: stage plus the number of its latest run. A page embeds it in its
+   * approve/reject/decide forms; once the request moved on (rejected and re-run, CR, another approver acted) the
+   * token no longer matches and the click is refused.
+   */
+  gateToken(req: Pick<RequestRow, 'id' | 'stage'>): string {
+    return `${req.stage}:${this.repo.latestStageRun(req.id, req.stage)?.id ?? 0}`;
+  }
+
+  private checkToken(req: RequestRow, expect: string | undefined): void {
+    if (expect !== undefined && expect !== this.gateToken(req)) throw new StaleActionError();
+  }
+
   /**
    * Seats and engine-side permission checks apply. Tied to the seat runner, not to DEVFLOW_MODE: index.ts gives
    * server mode the sudo runner (createSeatRunner); local mode (and tests that only need server-mode web
@@ -269,8 +290,10 @@ export class Pipeline {
    * any gate, else an assignee of the gate's role on this request (one approval suffices). PLANNING, CHANGE and
    * DONE are PM only; INTAKE/TEST/BUGFIX have no gate. DONE (v3 review mode) finishes the request.
    */
-  approve(reqId: string, by?: number | null, part?: string): void {
+  approve(reqId: string, by?: number | null, part?: string, expect?: string): void {
     const req = this.expectStatus(reqId, 'awaiting_approval');
+    this.checkToken(req, expect);
+    if (part !== undefined && !(req.stage === 'PLANNING' && isPlanningPart(part))) throw new Error(`Phần không hợp lệ: ${part}`);
     if (req.stage === 'CHANGE') throw new Error('Giai đoạn CHANGE được duyệt theo từng yêu cầu thay đổi (decideChange), không dùng Duyệt chung');
     this.requireGate(req, by, part);
     this.repo.tx(() => {
@@ -291,8 +314,9 @@ export class Pipeline {
    * Returns the step: the stage reruns with the feedback. One rejection by any allowed approver suffices.
    * PLANNING: `part` ('tasks' | 'testcases') reruns only that part (PM chooses; none = both).
    */
-  reject(reqId: string, feedback: string, by?: number | null, part?: string): void {
+  reject(reqId: string, feedback: string, by?: number | null, part?: string, expect?: string): void {
     const req = this.expectStatus(reqId, 'awaiting_approval');
+    this.checkToken(req, expect);
     if (req.stage === 'CHANGE') throw new Error('Giai đoạn CHANGE được duyệt theo từng yêu cầu thay đổi (decideChange), không dùng Từ chối chung');
     if (req.stage === 'DONE') throw new Error('Không thể từ chối bước chốt DONE: hãy gửi yêu cầu thay đổi (CR) hoặc chạy lại giai đoạn cần làm lại');
     if (part !== undefined && !(req.stage === 'PLANNING' && isPlanningPart(part))) throw new Error(`Phần không hợp lệ: ${part}`);
@@ -379,8 +403,10 @@ export class Pipeline {
    * seat is stopped (not a failure, no retry counted) and the same stage re-runs on the new seat; queued and
    * seat-waiting jobs switch seats. Resolves once a stopped run has ended.
    */
-  async setRunner(reqId: string, role: ProjectRole, userId: number, by?: number | null): Promise<void> {
+  async setRunner(reqId: string, role: ProjectRole, userId: number, by?: number | null, expectRunner?: number | null): Promise<void> {
     const req = this.mustGet(reqId);
+    // Stale click: the page was drawn when somebody else (or nobody) was the runner.
+    if (expectRunner !== undefined && (this.repo.listRequestAssignees(reqId, role)[0]?.userId ?? null) !== expectRunner) throw new StaleActionError();
     if (!PROJECT_ROLES.includes(role)) throw new Error(`Vai trò không hợp lệ: ${String(role)}`);
     if (this.multiUser) {
       this.require(req, by, 'task.assign', 'đổi người phụ trách');
@@ -552,8 +578,9 @@ export class Pipeline {
   }
 
   /** Decision on one analysed CR. When the last CR of the batch is decided, the batch is applied (or the request restored). */
-  decideChange(reqId: string, crId: string, decision: 'accept' | 'reject', note?: string, decidedBy: number | null = null): ChangeRequestRow {
+  decideChange(reqId: string, crId: string, decision: 'accept' | 'reject', note?: string, decidedBy: number | null = null, expect?: string): ChangeRequestRow {
     const req = this.mustGet(reqId);
+    this.checkToken(req, expect);
     if (req.stage !== 'CHANGE' || req.status !== 'awaiting_approval') {
       throw new Error(`Yêu cầu ${reqId} không ở bước chờ quyết định thay đổi (${req.stage}/${req.status})`);
     }

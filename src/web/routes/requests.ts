@@ -10,6 +10,11 @@ import { STAGES } from '../../domain/types.js';
 import { loadImpact } from '../../engine/changes.js';
 import { changeDir, readFlowState, readProjectInfo } from '../../engine/stages/common.js';
 import { Workspace } from '../../engine/workspace.js';
+import { PermissionError } from '../../projects/service.js';
+import { PROJECT_ROLES, type ProjectRole } from '../../domain/types.js';
+import { GATE_APPROVER } from '../../security/permissions.js';
+import { actorOf, allowedOnRequest, auditWeb, forbidPage, type Need } from '../authz.js';
+import { buildInbox } from '../inbox.js';
 import { markdownToHtml } from '../markdown-html.js';
 import { questionsTabData } from './questions.js';
 import { streamEvents } from '../sse.js';
@@ -85,30 +90,45 @@ export function groupByVersion(files: FileEntry[]): { version: number; files: Fi
   return [...m].sort((a, b) => b[0] - a[0]).map(([version, fs]) => ({ version, files: fs }));
 }
 
-export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline }: WebDeps): void {
+export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline, projects }: WebDeps): void {
   const layout = (req: FastifyRequest, title: string, extra: Partial<LayoutData> = {}): LayoutData => ({ user: req.user, mode: cfg.mode, title, ...extra });
   const html = (reply: FastifyReply, s: string, code = 200) => reply.code(code).type('text/html; charset=utf-8').send(s);
   const notFound = (req: FastifyRequest, reply: FastifyReply) =>
     html(reply, render('error', layout(req, 'Không tìm thấy'), { code: 404, message: 'Không tìm thấy yêu cầu.' }), 404);
   const getReq = (id: string): RequestRow | undefined => repo.getRequest(id);
+  const ok = (req: FastifyRequest, r: RequestRow, need: Need): boolean => allowedOnRequest(cfg, repo, req.user, r, need);
+  const server = cfg.mode === 'server';
+  /** Server mode with Google sign-in: requests belong to projects; the v2 "create without project" form is closed. */
+  const projectOnly = server && cfg.google.clientId !== '';
 
   // ---- dashboard ----
-  app.get('/', async (req, reply) => {
+  const dashboard = async (req: FastifyRequest, reply: FastifyReply) => {
     const q = req.query as { status?: string; q?: string };
     const users = new Map(repo.web.listUsers().map(u => [u.id, u.username]));
     const needle = (q.q ?? '').trim().toLowerCase();
     const rows = repo.listRequests()
+      .filter(r => ok(req, r, 'read'))
       .filter(r => !q.status || r.status === q.status)
       .filter(r => !needle || r.id.toLowerCase().includes(needle) || r.title.toLowerCase().includes(needle))
       .sort((a, b) => b.createdAt - a.createdAt)
       .map(r => ({ ...r, openCrs: repo.listChangeRequests(r.id).filter(c => OPEN_CR.has(c.status)).length, creator: r.createdBy === null ? (cfg.mode === 'local' ? 'local' : '-') : (users.get(r.createdBy) ?? '-') }));
     return html(reply, render('dashboard', layout(req, 'Yêu cầu'), { rows, filterStatus: q.status ?? '', filterQ: q.q ?? '' }));
+  };
+  // Server mode: home is "Việc của tôi"; the full list is /requests. Local mode keeps the v2 dashboard at /.
+  app.get('/', async (req, reply) => {
+    if (projectOnly && req.user?.id != null) {
+      const u = repo.web.getUser(req.user.id);
+      return html(reply, render('inbox', layout(req, 'Việc của tôi'), { inbox: buildInbox(repo, req.user.id), canCreate: !!u?.canBePm && u.departmentId !== null }));
+    }
+    return dashboard(req, reply);
   });
+  app.get('/requests', dashboard);
 
   // ---- create ----
-  app.get('/requests/new', async (req, reply) => html(reply, render('request-new', layout(req, 'Tạo yêu cầu mới'), { form: {}, SOFTWARE_TYPES })));
+  app.get('/requests/new', async (req, reply) => projectOnly ? reply.redirect('/projects') : html(reply, render('request-new', layout(req, 'Tạo yêu cầu mới'), { form: {}, SOFTWARE_TYPES })));
 
   app.post('/requests', async (req, reply) => {
+    if (projectOnly) return forbidPage(cfg, req, reply, 'Hãy tạo yêu cầu từ trang của dự án.');
     if (!req.isMultipart()) return html(reply, render('error', layout(req, 'Lỗi'), { code: 400, message: 'Biểu mẫu phải gửi dạng multipart.' }), 400);
     const fields: Record<string, string[]> = {};
     const tmpDir = join(resolve(cfg.dataDir), 'tmp', randomBytes(8).toString('hex'));
@@ -169,6 +189,7 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
     const { id } = req.params as { id: string };
     const r = getReq(id);
     if (!r) return notFound(req, reply);
+    if (!ok(req, r, 'read')) return forbidPage(cfg, req, reply, 'Bạn không phải thành viên của dự án này.');
     const q = req.query as { tab?: string; err?: string; ok?: string };
     const tab: Tab = (TABS as readonly string[]).includes(q.tab ?? '') ? (q.tab as Tab) : 'overview';
     const ws = Workspace.forRequest(cfg, repo, r);
@@ -221,42 +242,128 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
     } else if (tab === 'scope') {
       data.features = repo.listFeatures(id);
     }
+    // Rights drive which buttons exist; the POST routes check again.
+    const gateStage = { type: 'gate.approve' as const, stage: r.stage };
+    data.gateToken = pipeline.gateToken(r);
+    data.canApprove = ok(req, r, gateStage) && (!server || r.projectId == null || Object.hasOwn(GATE_APPROVER, r.stage));
+    data.canPm = ok(req, r, 'pm');
+    data.canDecide = ok(req, r, 'cr.decide');
+    data.isProject = r.projectId != null;
+    data.planningParts = r.stage === 'PLANNING';
+    data.tokenRequired = server && r.projectId != null;
+    if (r.projectId != null) {
+      const project = repo.getProject(r.projectId)!;
+      const actor = actorOf(repo, req.user, r.projectId);
+      const name = (id: number) => { const u = repo.web.getUser(id); return u ? (u.displayName || u.email || u.username) : `#${id}`; };
+      const members = repo.listProjectMembers(project.id);
+      data.project = project;
+      data.assigneeBlocks = PROJECT_ROLES.map(role => {
+        const list = repo.listRequestAssignees(r.id, role).map(a => ({ id: a.userId, name: name(a.userId) }));
+        const inList = new Set(list.map(x => x.id));
+        return { role, list, candidates: members.filter(m => m.roles.includes(role) && !inList.has(m.userId)).map(m => ({ id: m.userId, name: name(m.userId) })) };
+      });
+      data.devs = members.filter(m => m.roles.includes('DEV')).map(m => ({ id: m.userId, name: name(m.userId) }));
+      data.userNames = Object.fromEntries(members.map(m => [m.userId, name(m.userId)]));
+      data.canEditTasks = data.canPm === true || (!!actor && repo.getRunner(r.id, 'DEV') === actor.userId);
+      data.jobs = repo.listJobs(r.id).filter(j => j.status === 'queued' || j.status === 'running' || j.status === 'paused');
+    } else {
+      data.canEditTasks = false;
+    }
     const flash = q.err ?? q.ok;
     return html(reply, render('request-detail', layout(req, `${r.id} - ${r.title}`, { flash, flashKind: q.err ? 'error' : 'ok' }), data));
   });
 
   // ---- actions ----
-  const act = (name: string, fn: (r: RequestRow, body: Record<string, string | undefined>, userId: number | null) => void) => {
+  const fail = (req: FastifyRequest, reply: FastifyReply, e: unknown, id: string) => {
+    if (e instanceof PermissionError) return forbidPage(cfg, req, reply, e.message);
+    if (e instanceof Error && e.name === 'StaleActionError') return html(reply, render('error', layout(req, 'Trang đã cũ'), { code: 409, message: e.message }), 409);
+    const msg = e instanceof Error && e.name === 'PipelineBusyError'
+      ? 'Bước hiện tại đang chạy, vui lòng thử lại sau khi hoàn tất.'
+      : e instanceof Error ? e.message : String(e);
+    return reply.redirect(`/requests/${id}?err=${encodeURIComponent(msg.slice(0, 300))}`);
+  };
+  type Body = Record<string, string | undefined>;
+  /** The page must send the gate token in server mode: a missing token is as stale as a wrong one. */
+  const tokenOf = (r: RequestRow, b: Body): string | undefined => {
+    if (b.expect) return b.expect;
+    if (server && r.projectId != null) return 'missing';
+    return undefined;
+  };
+  const act = (name: string, need: (r: RequestRow) => Need, fn: (r: RequestRow, body: Body, userId: number | null) => void | Promise<void>, audit = true) => {
     app.post(`/requests/:id/${name}`, async (req, reply) => {
       const { id } = req.params as { id: string };
       const r = getReq(id);
       if (!r) return notFound(req, reply);
+      if (!ok(req, r, need(r))) return forbidPage(cfg, req, reply);
       try {
-        fn(r, (req.body ?? {}) as Record<string, string | undefined>, req.user?.id ?? null);
+        await fn(r, (req.body ?? {}) as Body, req.user?.id ?? null);
       } catch (e) {
-        const msg = e instanceof Error && e.name === 'PipelineBusyError'
-          ? 'Bước hiện tại đang chạy, vui lòng thử lại sau khi hoàn tất.'
-          : e instanceof Error ? e.message : String(e);
-        return reply.redirect(`/requests/${id}?err=${encodeURIComponent(msg.slice(0, 300))}`);
+        return fail(req, reply, e, id);
       }
+      if (audit) auditWeb(repo, req, `request.${name}`, { projectId: r.projectId, requestId: r.id });
       return reply.redirect(`/requests/${id}`);
     });
   };
-  act('approve', (r, b, uid) => pipeline.approve(r.id, uid, b.part || undefined));
-  act('reject', (r, b, uid) => {
+  act('approve', r => ({ type: 'gate.approve', stage: r.stage }), (r, b, uid) => pipeline.approve(r.id, uid, b.part || undefined, tokenOf(r, b)), false);
+  act('reject', r => ({ type: 'gate.approve', stage: r.stage }), (r, b, uid) => {
     const fb = (b.feedback ?? '').trim();
     if (!fb) throw new Error('Vui lòng nhập nội dung phản hồi khi từ chối.');
-    pipeline.reject(r.id, fb, uid, b.part || undefined);
+    pipeline.reject(r.id, fb, uid, b.part || undefined, tokenOf(r, b));
+  }, false);
+  act('pause', () => 'pm', r => pipeline.pause(r.id));
+  act('resume', () => 'pm', r => pipeline.resume(r.id));
+  act('cancel', () => 'pm', r => pipeline.cancel(r.id));
+  act('rerun', () => 'pm', r => pipeline.rerunStage(r.id, r.stage));
+
+  // ---- who is in charge (v3): ordered people per role; the first one runs the role's Claude calls ----
+  const roleOf = (v: string | undefined): ProjectRole => {
+    if (!(PROJECT_ROLES as readonly string[]).includes(v ?? '')) throw new Error('Vai trò không hợp lệ.');
+    return v as ProjectRole;
+  };
+  act('assignees', () => 'pm', async (r, b, uid) => {
+    if (r.projectId == null || !projects || uid === null) throw new Error('Yêu cầu này không thuộc dự án.');
+    const role = roleOf(b.role);
+    const target = Number(b.user);
+    const cur = repo.listRequestAssignees(r.id, role).map(a => a.userId);
+    if (!Number.isInteger(target) || target <= 0) throw new Error('Người dùng không hợp lệ.');
+    let next = cur;
+    if (b.op === 'first') {
+      // The runner changes: the pipeline moves a running job of that role onto the new seat.
+      const expected = b.expect_runner === '' || b.expect_runner === undefined ? undefined : Number(b.expect_runner);
+      await pipeline.setRunner(r.id, role, target, uid, expected === undefined ? (cur[0] ?? null) : expected);
+      return;
+    }
+    const i = cur.indexOf(target);
+    if (b.op === 'add') next = i >= 0 ? cur : [...cur, target];
+    else if (b.op === 'remove') next = cur.filter(x => x !== target);
+    else if (b.op === 'up' && i > 0) next = cur.map((x, k) => (k === i - 1 ? target : k === i ? cur[i - 1]! : x));
+    else if (b.op === 'down' && i >= 0 && i < cur.length - 1) next = cur.map((x, k) => (k === i + 1 ? target : k === i ? cur[i + 1]! : x));
+    else if (!['add', 'remove', 'up', 'down'].includes(b.op ?? '')) throw new Error('Thao tác không hợp lệ.');
+    // setAssignees persists and tells the engine, which moves a running job when the first person changed.
+    projects.setAssignees(r.id, role, next, uid);
+  }, false);
+
+  app.post('/requests/:id/tasks/:task/assign', async (req, reply) => {
+    const { id, task } = req.params as { id: string; task: string };
+    const r = getReq(id);
+    if (!r) return notFound(req, reply);
+    const actor = actorOf(repo, req.user, r.projectId);
+    // PM or the first DEV of the request; the pipeline checks the same rule again.
+    if (server && !(ok(req, r, 'pm') || (actor && repo.getRunner(r.id, 'DEV') === actor.userId))) return forbidPage(cfg, req, reply);
+    const b = (req.body ?? {}) as Body;
+    const who = b.user ? Number(b.user) : null;
+    try {
+      await pipeline.assignTask(r.id, task, who !== null && Number.isInteger(who) ? who : null, req.user?.id ?? null);
+    } catch (e) { return fail(req, reply, e, id); }
+    return reply.redirect(`/requests/${id}?tab=tasks`);
   });
-  act('pause', r => pipeline.pause(r.id));
-  act('resume', r => pipeline.resume(r.id));
-  act('cancel', r => pipeline.cancel(r.id));
-  act('rerun', r => pipeline.rerunStage(r.id, r.stage));
 
   // ---- SSE ----
   app.get('/requests/:id/events', async (req, reply) => {
     const { id } = req.params as { id: string };
-    if (!getReq(id)) return notFound(req, reply);
+    const r0 = getReq(id);
+    if (!r0) return notFound(req, reply);
+    if (!ok(req, r0, 'read')) return forbidPage(cfg, req, reply);
     streamEvents(repo, req, reply, id);
   });
 
@@ -266,6 +373,7 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
     // Fastify already percent-decoded the wildcard; decoding again would break names containing '%'.
     const rel = (req.params as Record<string, string>)['*'] ?? '';
     if (!getReq(id)) return notFound(req, reply);
+    if (!ok(req, getReq(id)!, 'read')) return forbidPage(cfg, req, reply);
     const ws = Workspace.forRequest(cfg, repo, getReq(id)!);
     let file = safeJoin(ws.artifactsDir, rel);
     if (file && !(existsSync(file) && statSync(file).isFile()) && rel.startsWith('evidence/')) file = safeJoin(ws.evidenceDir, rel.slice('evidence/'.length));
@@ -281,6 +389,7 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
   app.get('/requests/:id/bundle.zip', async (req, reply) => {
     const { id } = req.params as { id: string };
     if (!getReq(id)) return notFound(req, reply);
+    if (!ok(req, getReq(id)!, 'read')) return forbidPage(cfg, req, reply);
     const ws = Workspace.forRequest(cfg, repo, getReq(id)!);
     const zip = new ZipArchive({ zlib: { level: 6 } });
     zip.on('error', () => zip.abort());

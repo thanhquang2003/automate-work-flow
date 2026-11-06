@@ -7,9 +7,14 @@ import type { SeatRunner } from '../claude/seat-runner.js';
 import type { Config } from '../config.js';
 import type { Repo } from '../db/repo.js';
 import type { Pipeline } from '../engine/pipeline.js';
+import { wireProjects } from '../projects/wire.js';
+import type { ProjectService } from '../projects/service.js';
 import { currentUser, isLocalHostHeader, sameOrigin } from './auth.js';
 import type { OidcClient } from './oidc.js';
 import { adminRoutes } from './routes/admin.js';
+import { adminUserRoutes } from './routes/admin-users.js';
+import { projectRoutes } from './routes/projects.js';
+import { seatRoutes } from './routes/seat.js';
 import { authRoutes } from './routes/auth.js';
 import { changeRoutes } from './routes/changes.js';
 import { questionRoutes } from './routes/questions.js';
@@ -22,6 +27,8 @@ export interface WebDeps {
   repo: Repo; pipeline: Pipeline; oidc?: OidcClient; systemOps?: SystemOpsLike;
   /** v3 (Task 4): seat runner for the "Claude của tôi" page (login/status/logout); used by Task 6. */
   seatRunner?: SeatRunner;
+  /** v3 (Task 6): project service joined to the pipeline (index.ts). Built here with no-op system ops when absent. */
+  projects?: ProjectService;
 }
 
 const PUBLIC_PREFIXES = ['/static/', '/s/'];
@@ -64,11 +71,17 @@ export async function buildServer(cfg: Config, deps: WebDeps): Promise<FastifyIn
     reply.code(code).type('text/html; charset=utf-8').send(render('error', { user: req.user, mode: cfg.mode, title: 'Lỗi' }, { code, message }));
   });
 
-  authRoutes(app, cfg, deps);
-  requestRoutes(app, cfg, deps);
-  changeRoutes(app, cfg, deps);
-  questionRoutes(app, cfg, deps);
-  adminRoutes(app, cfg, deps);
+  // One ProjectService joined to the pipeline both ways (index.ts passes its own with the real system ops).
+  const projects = deps.projects ?? wireProjects({ cfg, repo: deps.repo, pipeline: deps.pipeline });
+  const d: WebDeps = { ...deps, projects };
+  authRoutes(app, cfg, d);
+  requestRoutes(app, cfg, d);
+  changeRoutes(app, cfg, d);
+  questionRoutes(app, cfg, d);
+  adminRoutes(app, cfg, d);
+  projectRoutes(app, cfg, d);
+  seatRoutes(app, cfg, d);
+  adminUserRoutes(app, cfg, d);
   surveyRoutes(app, cfg, deps);
   return app;
 }

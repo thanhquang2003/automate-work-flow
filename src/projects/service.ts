@@ -45,6 +45,8 @@ export interface ProjectServiceDeps {
   systemOps?: ProjectSystemOps;
   /** GitLab client for clone / new-with-GitLab modes. */
   gitlab?: GitLabClient;
+  /** Per-user client (own token, settings in the DB); wins over `gitlab`. */
+  gitlabFor?: (userId: number) => GitLabClient | undefined;
   /** Token for git clone/push; defaults to `gitlab.token`. */
   gitlabToken?: string;
   /** Engine hooks (the Pipeline); can also be attached later with attachEngine. */
@@ -150,7 +152,8 @@ export class ProjectService {
       if (path.startsWith(`${o.path}/`) || o.path.startsWith(`${path}/`)) throw new ProjectError(`Thư mục lồng nhau với dự án ${o.key}: mỗi dự án phải có thư mục riêng.`);
     }
 
-    const git = new Git(path, { mode: this.deps.cfg.mode, token: this.deps.gitlabToken ?? this.deps.gitlab?.token });
+    const gl = this.deps.gitlabFor?.(by.id) ?? this.deps.gitlab;
+    const git = new Git(path, { mode: this.deps.cfg.mode, token: this.deps.gitlabToken ?? gl?.token });
     let defaultBranch: string;
     let gitlabProject = input.gitlabProject?.trim() || null;
 
@@ -177,12 +180,12 @@ export class ProjectService {
       }
     } else if (input.mode === 'clone') {
       if (!gitlabProject) throw new ProjectError('Chưa chọn GitLab project để clone.');
-      if (!this.deps.gitlab) throw new ProjectError('Chưa cấu hình GitLab nên không thể clone.');
+      if (!gl) throw new ProjectError('Chưa cấu hình GitLab nên không thể clone.');
       if (existsSync(path) && !(statSync(path).isDirectory() && isDirEmpty(path))) throw new ProjectError('Thư mục đích đã tồn tại và không rỗng.');
-      const p = await this.deps.gitlab.getProject(gitlabProject);
+      const p = await gl.getProject(gitlabProject);
       if (!p.default_branch) throw new ProjectError(`GitLab project "${gitlabProject}" là repo rỗng. Hãy dùng chế độ "mới".`);
       mkdirSync(join(path, '..'), { recursive: true });
-      await new Git(join(path, '..'), { mode: this.deps.cfg.mode, token: this.deps.gitlabToken ?? this.deps.gitlab.token }).clone(p.http_url_to_repo, this.deps.gitlabToken ?? this.deps.gitlab.token, path);
+      await new Git(join(path, '..'), { mode: this.deps.cfg.mode, token: this.deps.gitlabToken ?? gl.token }).clone(p.http_url_to_repo, this.deps.gitlabToken ?? gl.token, path);
       defaultBranch = p.default_branch;
       gitlabProject = p.path_with_namespace;
     } else {
@@ -190,8 +193,7 @@ export class ProjectService {
       mkdirSync(path, { recursive: true });
       defaultBranch = INIT_BRANCH;
       await this.initialCommit(git, path, name, defaultBranch, true);
-      if (gitlabProject && this.deps.gitlab) {
-        const gl = this.deps.gitlab;
+      if (gitlabProject && gl) {
         let p;
         try { p = await gl.getProject(gitlabProject); } catch {
           const group = gitlabProject.includes('/') ? gitlabProject.slice(0, gitlabProject.lastIndexOf('/')) : '';
@@ -230,6 +232,8 @@ export class ProjectService {
     const project = this.repo.getProject(projectId);
     if (!project) throw new ProjectError('Không tìm thấy dự án.');
     const by = this.user(byId);
+    // Permission first: a non-member must learn nothing about which user ids exist.
+    if (!this.actor(by, project.id).projectRoles.includes('PM')) throw new PermissionError('Chỉ PM của dự án được sửa thành viên.');
 
     const seen = new Set<number>();
     const clean: MemberInput[] = [];
@@ -247,8 +251,7 @@ export class ProjectService {
       clean.push({ userId: m.userId, roles: [...new Set(m.roles)] });
     }
 
-    // Permission first (so outsiders learn nothing), then the department rule with its own message.
-    if (!this.actor(by, project.id).projectRoles.includes('PM')) throw new PermissionError('Chỉ PM của dự án được sửa thành viên.');
+    // Department rule with its own message.
     if (depts.some(d => d === null)) throw new PermissionError('Người dùng chưa thuộc phòng nào không thể tham gia dự án.');
     if (depts.some(d => d !== project.departmentId)) throw new PermissionError('Chỉ người cùng phòng với dự án mới được làm thành viên.');
     this.require(by, 'project.members.edit', { project: { departmentId: project.departmentId }, memberDepartmentIds: depts }, project, 'sửa thành viên dự án');

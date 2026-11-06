@@ -1,0 +1,51 @@
+<div class="head"><h1>Việc của tôi</h1><a class="btn" href="/requests">Tất cả yêu cầu</a></div>
+<% const b = it.inbox; %>
+<section class="card">
+  <h3>Chờ tôi duyệt</h3>
+  <% if (b.gates.length === 0) { %><p class="muted">Không có bước nào đang chờ bạn duyệt.</p><% } else { %>
+  <ul>
+  <% for (const g of b.gates) { %>
+    <li><a href="/requests/<%= g.req.id %>"><strong><%= g.req.code || g.req.id %></strong> - <%= g.req.title %></a> <span class="muted">(<%= g.project.key %>) · giai đoạn <%= it.STAGE_LABELS[g.req.stage] %></span></li>
+  <% } %>
+  </ul>
+  <% } %>
+</section>
+<section class="card">
+  <h3>Yêu cầu thay đổi chờ PM quyết định</h3>
+  <% if (b.crs.length === 0) { %><p class="muted">Không có.</p><% } else { %>
+  <ul>
+  <% for (const c of b.crs) { %>
+    <li><a href="/requests/<%= c.req.id %>"><strong><%= c.req.code || c.req.id %></strong> - <%= c.req.title %></a> <span class="muted">(<%= c.project.key %>) · <%= c.crIds.join(', ') %></span></li>
+  <% } %>
+  </ul>
+  <% } %>
+</section>
+<section class="card">
+  <h3>Task được giao cho tôi</h3>
+  <% if (b.tasks.length === 0) { %><p class="muted">Không có task nào.</p><% } else { %>
+  <ul>
+  <% for (const t of b.tasks) { %>
+    <li><a href="/requests/<%= t.req.id %>?tab=tasks"><%= t.task.id %> - <%= t.task.title %></a> <span class="muted">(<%= t.req.code || t.req.id %>) · <%= it.TASK_STATUS_LABELS[t.task.status] || t.task.status %></span></li>
+  <% } %>
+  </ul>
+  <% } %>
+</section>
+<section class="card">
+  <h3>Đang chờ Claude của tôi</h3>
+  <% if (b.seats.length === 0) { %><p class="muted">Không có.</p><% } else { %>
+  <p class="err">Các việc sau tạm dừng vì Claude của bạn chưa đăng nhập. <a href="/seat">Kết nối Claude</a></p>
+  <ul>
+  <% for (const s of b.seats) { %>
+    <li><a href="/requests/<%= s.req.id %>"><strong><%= s.req.code || s.req.id %></strong> - <%= s.req.title %></a> <span class="muted">(<%= s.project.key %>)</span></li>
+  <% } %>
+  </ul>
+  <% } %>
+</section>
+<section class="card">
+  <div class="head"><h3>Dự án của tôi</h3><% if (it.canCreate) { %><a class="btn primary" href="/projects/new">+ Tạo dự án</a><% } %></div>
+  <% if (b.projects.length === 0) { %><p class="muted">Bạn chưa thuộc dự án nào.</p><% } else { %>
+  <ul>
+  <% for (const p of b.projects) { %><li><a href="/projects/<%= p.id %>"><strong><%= p.key %></strong> - <%= p.name %></a></li><% } %>
+  </ul>
+  <% } %>
+</section>

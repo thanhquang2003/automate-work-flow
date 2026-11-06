@@ -6,6 +6,7 @@ import { createSurveyLink, surveyUrl } from '../../engine/survey.js';
 import { questionsFileName } from '../../engine/stages/clarify.js';
 import { openQuestions } from '../../engine/stages/common.js';
 import { exportQuestions, importAnswers } from '../../office/questions-xlsx.js';
+import { allowedOnRequest, auditWeb, forbidPage } from '../authz.js';
 import type { WebDeps } from '../server.js';
 import { render, type LayoutData } from '../view.js';
 
@@ -38,6 +39,7 @@ export function questionRoutes(app: FastifyInstance, cfg: Config, { repo, pipeli
     const { id } = req.params as { id: string };
     const r = repo.getRequest(id);
     if (!r) return notFound(req, reply);
+    if (!allowedOnRequest(cfg, repo, req.user, r, 'read')) return forbidPage(cfg, req, reply);
     const round = r.clarifyRound + 1;
     const open = openQuestions(repo, id);
     const list = open.length ? open : repo.listQuestions(id);
@@ -48,7 +50,9 @@ export function questionRoutes(app: FastifyInstance, cfg: Config, { repo, pipeli
 
   app.post('/requests/:id/answers/import', async (req, reply) => {
     const { id } = req.params as { id: string };
-    if (!repo.getRequest(id)) return notFound(req, reply);
+    const r0 = repo.getRequest(id);
+    if (!r0) return notFound(req, reply);
+    if (!allowedOnRequest(cfg, repo, req.user, r0, 'member')) return forbidPage(cfg, req, reply);
     if (!req.isMultipart()) return back(reply, id, 'err', 'Biểu mẫu phải gửi dạng multipart.');
     const part = await req.file();
     if (!part || !part.filename) return back(reply, id, 'err', 'Vui lòng chọn file Excel (.xlsx).');
@@ -71,16 +75,20 @@ export function questionRoutes(app: FastifyInstance, cfg: Config, { repo, pipeli
     let msg = `Đã nhập ${saved} câu trả lời từ Excel.`;
     if (unknown) msg += ` ${unknown} dòng không khớp câu hỏi nào.`;
     if (parsed.duplicateIds.length) msg += ` Trùng mã: ${parsed.duplicateIds.join(', ')} (lấy dòng cuối).`;
+    auditWeb(repo, req, 'answers.import', { projectId: r0.projectId, requestId: id, detail: { saved } });
     return back(reply, id, 'ok', msg);
   });
 
   app.post('/requests/:id/answers', async (req, reply) => {
     const { id } = req.params as { id: string };
-    if (!repo.getRequest(id)) return notFound(req, reply);
+    const r0 = repo.getRequest(id);
+    if (!r0) return notFound(req, reply);
+    if (!allowedOnRequest(cfg, repo, req.user, r0, 'member')) return forbidPage(cfg, req, reply);
     const b = (req.body ?? {}) as Record<string, string | undefined>;
     const qid = (b.qid ?? '').trim();
     if (!repo.listQuestions(id).some(q => q.id === qid)) return back(reply, id, 'err', 'Câu hỏi không tồn tại.');
     repo.saveAnswer(id, qid, (b.answer ?? '').trim().slice(0, MAX_ANSWER), 'staff');
+    auditWeb(repo, req, 'answer.save', { projectId: r0.projectId, requestId: id, detail: { qid } });
     return back(reply, id, 'ok', `Đã lưu câu trả lời ${qid}.`);
   });
 
@@ -88,8 +96,10 @@ export function questionRoutes(app: FastifyInstance, cfg: Config, { repo, pipeli
     const { id } = req.params as { id: string };
     const r = repo.getRequest(id);
     if (!r) return notFound(req, reply);
+    if (!allowedOnRequest(cfg, repo, req.user, r, 'member')) return forbidPage(cfg, req, reply);
     if (cfg.mode !== 'server') return back(reply, id, 'err', 'Link khảo sát chỉ khả dụng ở chế độ server.');
     createSurveyLink(repo, cfg, id, r.clarifyRound + 1);
+    auditWeb(repo, req, 'survey.link', { projectId: r.projectId, requestId: id });
     return back(reply, id, 'ok', 'Đã tạo link khảo sát mới.');
   });
 
@@ -97,7 +107,9 @@ export function questionRoutes(app: FastifyInstance, cfg: Config, { repo, pipeli
     const { id } = req.params as { id: string };
     const r = repo.getRequest(id);
     if (!r) return notFound(req, reply);
+    if (!allowedOnRequest(cfg, repo, req.user, r, 'member')) return forbidPage(cfg, req, reply);
     if (r.status !== 'awaiting_customer') return back(reply, id, 'err', 'Yêu cầu không ở trạng thái chờ khách hàng.');
+    auditWeb(repo, req, 'request.continue', { projectId: r.projectId, requestId: id });
     try { pipeline.resumeAfterCustomer(id); } catch (e) { return back(reply, id, 'err', e instanceof Error ? e.message : String(e)); }
     return reply.redirect(`/requests/${id}`);
   });

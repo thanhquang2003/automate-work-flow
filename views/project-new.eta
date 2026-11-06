@@ -1,0 +1,13 @@
+<h1>Tạo dự án</h1>
+<form method="post" action="/projects" class="card stack">
+  <label>Mã dự án (2-12 ký tự chữ HOA/số) * <input name="key" required value="<%= it.form.key || '' %>"></label>
+  <label>Tên dự án * <input name="name" required value="<%= it.form.name || '' %>"></label>
+  <fieldset><legend>Cách tạo</legend>
+    <label class="check"><input type="radio" name="mode" value="new" <%= (it.form.mode || 'new') === 'new' ? 'checked' : '' %>> Mới (thư mục rỗng)</label>
+    <label class="check"><input type="radio" name="mode" value="existing" <%= it.form.mode === 'existing' ? 'checked' : '' %>> Thư mục/repo có sẵn</label>
+    <label class="check"><input type="radio" name="mode" value="clone" <%= it.form.mode === 'clone' ? 'checked' : '' %>> Clone từ GitLab</label>
+  </fieldset>
+  <label>Thư mục dự án (nằm trong: <%= it.roots.join(', ') || 'chưa cấu hình PROJECT_ROOTS' %>) * <input name="path" required value="<%= it.form.path || '' %>"></label>
+  <label>GitLab project (nhom/ten-du-an) <input name="gitlab_project" value="<%= it.form.gitlab_project || '' %>"></label>
+  <div><button class="btn primary" type="submit">Tạo dự án</button> <a class="btn" href="/projects">Hủy</a></div>
+</form>
