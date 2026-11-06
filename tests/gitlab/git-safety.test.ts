@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { GIT_SERVER_ARGS, GIT_SUBMODULE_ARGS, Git, gitArgv } from '../../src/gitlab/git.js';
+import { readFileSync } from 'node:fs';
 
 const g = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const posix = process.platform !== 'win32';
@@ -25,7 +26,7 @@ describe('git safety flags', () => {
       '-c', 'diff.ignoreSubmodules=all', '-c', 'submodule.recurse=false', '-c', 'fetch.recurseSubmodules=false',
       '-c', 'push.recurseSubmodules=no', '-c', 'status.submoduleSummary=false',
     ]);
-    expect(GIT_SERVER_ARGS).toEqual(['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false']);
+    expect(GIT_SERVER_ARGS).toEqual(['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'gc.auto=0']);
     expect(gitArgv(['status', '--porcelain'], 'server')).toEqual([...GIT_SUBMODULE_ARGS, ...GIT_SERVER_ARGS, 'status', '--porcelain']);
     expect(gitArgv(['status', '--porcelain'], 'local')).toEqual([...GIT_SUBMODULE_ARGS, 'status', '--porcelain']);
   });
@@ -90,7 +91,8 @@ describe('git safety flags', () => {
       expect(existsSync(marker)).toBe(true);
       rmSync(marker);
 
-      const git = new Git(proj, { mode });
+      const warnings: string[] = [];
+      const git = new Git(proj, { mode, onWarn: m => warnings.push(m) });
       const step = async (label: string, f: () => Promise<unknown>) => {
         await f();
         expect(existsSync(marker), `${mode}: filter ran during ${label}`).toBe(false);
@@ -106,6 +108,7 @@ describe('git safety flags', () => {
       writeFileSync(join(proj, 'd.txt'), 'd\n');
       await step('commitPaths over the whole tree', () => git.commitPaths(['.'], 'add d'));
       expect(g(proj, 'ls-files', '-s', 'sub').startsWith('160000')).toBe(true); // gitlink untouched, still recorded
+      expect(warnings.some(w => w.includes('gitlink') && w.includes('sub'))).toBe(true);
       writeFileSync(join(proj, 'a.txt'), 'changed\n');
       await step('stashAll (status, stash)', async () => { expect(await git.stashAll('wip')).toBe(true); });
     }
@@ -165,5 +168,49 @@ describe.runIf(posix)('worktree pinning', () => {
     expect(await git.currentBranch()).toBe('devflow/R1');
     writeFileSync(join(wt, 'c.txt'), 'c\n');
     expect(await git.commitAll('add c')).toBe(true);
+  });
+});
+
+describe.runIf(posix)('credentials and global config', () => {
+  // A wrapper `git` first in PATH records, per call, the subcommand and the env DevFlow passes.
+  function wrapGit(base: string): { log: string; restore: () => void } {
+    const bin = join(base, 'bin');
+    mkdirSync(bin);
+    const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    const log = join(base, 'git-calls.log');
+    writeFileSync(join(bin, 'git'), `#!/bin/sh
+sub=""; for a in "$@"; do case "$a" in -c) skip=1; continue ;; esac; if [ -n "$skip" ]; then skip=""; continue; fi; sub="$a"; break; done
+hdr=no; i=0; while [ $i -lt "\${GIT_CONFIG_COUNT:-0}" ]; do eval "k=\\$GIT_CONFIG_KEY_$i"; [ "$k" = http.extraHeader ] && hdr=yes; i=$((i+1)); done
+echo "$sub hdr=$hdr global=\${GIT_CONFIG_GLOBAL:-unset} nosystem=\${GIT_CONFIG_NOSYSTEM:-unset}" >> '${log}'
+exec '${real}' "$@"
+`);
+    chmodSync(join(bin, 'git'), 0o755);
+    const old = process.env.PATH;
+    process.env.PATH = `${bin}:${old}`;
+    return { log, restore: () => { process.env.PATH = old; } };
+  }
+
+  it('the GitLab token goes only to network commands; server mode blanks system/global config', async () => {
+    const { base, proj } = repo();
+    const remote = join(base, 'remote.git');
+    g(base, 'init', '-q', '--bare', '-b', 'main', remote);
+    g(proj, 'remote', 'add', 'origin', remote);
+    const w = wrapGit(base);
+    try {
+      const git = new Git(proj, { mode: 'server', token: 'tok-secret' });
+      await git.currentBranch();
+      await git.changedTracked();
+      await git.push('main');
+      await git.fetch();
+      const local = new Git(proj, { mode: 'local', token: 'tok-secret' });
+      await local.currentBranch();
+    } finally { w.restore(); }
+    const lines = readFileSync(w.log, 'utf8').trim().split('\n');
+    for (const l of lines.filter(l => /^(rev-parse|diff|ls-files|config)\b/.test(l))) expect(l).toContain('hdr=no');
+    for (const l of lines.filter(l => /^(push|fetch)\b/.test(l))) expect(l).toContain('hdr=yes');
+    expect(lines.some(l => l.startsWith('push'))).toBe(true);
+    const server = lines.slice(0, -1);
+    for (const l of server) expect(l).toContain('global=/dev/null nosystem=1');
+    expect(lines.at(-1)).toContain('global=unset nosystem=unset');
   });
 });

@@ -216,6 +216,11 @@ if [ -n "$SEAT" ]; then
       done
       [ $seen -eq 1 ] && pass "$label: claude started detached Bash-tool children" \
         || fail "$label: the probe never started its 'sleep 300/301' children (no Bash tool run?)"
+      # The prompt keeps claude busy in a foreground `sleep 110`, so claude itself is alive at the stop and the
+      # stop has to take down claude, its tool shell and the detached children together.
+      sleep 3
+      if pgrep -u "$SU" -f "$CLAUDE_BIN|claude" >/dev/null; then pass "$label: claude is still running when stop-claude is sent"
+      else fail "$label: claude already exited before the stop (the probe does not exercise the scope kill)"; fi
     else
       sleep 5
     fi
@@ -247,7 +252,7 @@ if [ -n "$SEAT" ]; then
     # case a process-group kill can miss. Same flags DevFlow uses.
     rid="spike$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
     check_stop "run-claude with Bash tool children" "$rid" \
-      "Use your Bash tool to run exactly this command and nothing else, then reply DONE: (setsid sleep 300 >/dev/null 2>&1 &) ; nohup sleep 301 >/dev/null 2>&1 &" \
+      "Use your Bash tool to run exactly this command: (setsid sleep 300 >/dev/null 2>&1 &) ; nohup sleep 301 >/dev/null 2>&1 & -- then, in a second Bash tool call, run exactly: sleep 110 -- and only after that reply DONE." \
       "$DFCTL" run-claude "$SEAT" "$WT" --run-id "$rid" -- -p --output-format stream-json --verbose --permission-mode bypassPermissions
 
     echo; echo "== 9. seat git inside the worktree, and .git protections"

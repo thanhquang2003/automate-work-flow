@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { detectSeatError, runClaude } from '../../src/claude/runner.js';
-import { LocalSeatRunner, SudoSeatRunner, createSeatRunner, parseAuthStatus } from '../../src/claude/seat-runner.js';
+import { LocalSeatRunner, SeatSweepError, SudoSeatRunner, createSeatRunner, parseAuthStatus } from '../../src/claude/seat-runner.js';
 import { loadConfig, type Config } from '../../src/config.js';
 import { mkSeatFakes } from './seat-fakes.js';
 
@@ -146,6 +146,24 @@ describe.skipIf(!hasBash)('SudoSeatRunner', () => {
     expect((await runner.status(4)).state).toBe('expired');
   });
 
+  it('a run whose post-run sweep fails (dfctl exit 86) is a hard error', async () => {
+    const { f, runner, cwd } = setup();
+    f.set('mode', 'sweepfail');
+    await expect(runner.run(3, { cwd, prompt: 'p' })).rejects.toBeInstanceOf(SeatSweepError);
+  });
+
+  it('sweepProject calls dfctl sweep-project and throws on failure', async () => {
+    const { f, runner } = setup();
+    await runner.sweepProject(4, '/srv/p/.devflow/worktrees/R1');
+    await runner.sweepProject(4);
+    expect(f.calls().slice(-2)).toEqual([['sweep-project', '4', '/srv/p/.devflow/worktrees/R1'], ['sweep-project', '4']]);
+    f.set('sweep-fail', '1');
+    await expect(runner.sweepProject(4)).rejects.toThrow(/hard-linked/);
+    await expect(runner.sweepProject(4)).rejects.toBeInstanceOf(SeatSweepError);
+    await expect(runner.sweepProject(0)).rejects.toThrow(/project id/);
+    await expect(runner.sweepProject(4, 'rel')).rejects.toThrow(/absolute/);
+  });
+
   it('logout calls dfctl claude-auth logout', async () => {
     const { f, runner } = setup();
     await runner.logout(5);
@@ -174,6 +192,7 @@ describe('LocalSeatRunner', () => {
     expect(r.ok).toBe(true);
     expect(JSON.parse(r.resultText).prompt).toBe('hi');
     expect((await new LocalSeatRunner(cfg).status(1)).state).toBe('unknown');
+    await new LocalSeatRunner(cfg).sweepProject(); // no-op
   });
 
   it('v2 runClaude reports aborted on abort', async () => {

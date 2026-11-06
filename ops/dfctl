@@ -16,6 +16,8 @@
 #   stop-claude <userId> <runId>                     stop a run started with that run id (TERM, then KILL);
 #                                                    leaves a stop marker so a run that has not started yet
 #                                                    never starts (DevFlow cannot signal other users itself)
+#   sweep-project <projectId> [<worktree>]          root sweep of the project's git dirs (also run before and
+#                                                    after every run-claude); exit 86 when it fails
 #   --self-test                                      pure checks plus temp-dir runs as the calling user; never
 #                                                    touches system state
 #
@@ -34,6 +36,9 @@ export LC_ALL=C
 readonly CONF_FILE=/etc/devflow/dfctl.conf
 readonly REG_DIR=/var/lib/dfctl/projects
 readonly RUN_DIR=/run/dfctl
+readonly PACK_DIR=/var/lib/dfctl/packs
+# Exit code of run-claude / sweep-project when the project's git dirs failed the root-side sweep.
+readonly SWEEP_FAILED=86
 readonly USERS_HOME=/var/lib/devflow/users
 readonly SERVICE_USER=devflow
 readonly USER_PREFIX=dfu-
@@ -44,7 +49,7 @@ readonly SHORT_MAX_SEC=60
 readonly USER_PATH=/usr/local/bin:/usr/bin:/bin
 
 # Exit 2 = rejected arguments, 1 = runtime failure.
-usage_die() { printf 'dfctl: %s\n' "$*" >&2; printf 'usage: dfctl provision-user|ensure-project-group|set-members|run-claude|claude-auth|stop-claude ... | --self-test\n' >&2; exit 2; }
+usage_die() { printf 'dfctl: %s\n' "$*" >&2; printf 'usage: dfctl provision-user|ensure-project-group|set-members|run-claude|claude-auth|stop-claude|sweep-project ... | --self-test\n' >&2; exit 2; }
 die() { printf 'dfctl: %s\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------- pure validators (no side effects)
@@ -120,6 +125,10 @@ validate_args() {
           is_run_id "$4" || { bad "invalid run id"; return 2; } ;;
         *) bad "claude-auth action must be login, status or logout"; return 2 ;;
       esac ;;
+    sweep-project)
+      [ $# -eq 1 ] || [ $# -eq 2 ] || { bad "sweep-project takes <projectId> [<worktree>]"; return 2; }
+      is_id "$1" || { bad "invalid project id"; return 2; }
+      if [ $# -eq 2 ]; then is_canonical "$2" && [ "$2" != / ] || { bad "worktree must be absolute and canonical"; return 2; }; fi ;;
     stop-claude)
       [ $# -eq 2 ] || { bad "stop-claude takes <userId> <runId>"; return 2; }
       is_id "$1" || { bad "invalid user id"; return 2; }
@@ -158,23 +167,28 @@ build_run_claude_cmd() {
   EXTRA_ENV=()
 }
 
-# Run as the folder owner (devflow), never as root. Args: <dir> <owner> <full 0|1> <group or ->.
+# Devflow phase of the project sweep (run as the folder owner, devflow, never as root; the root phase
+# sweep_root runs first). Args: <dir> <owner> <full 0|1> <group or ->.
 # Makes the project folder group-shared for seats, but keeps everything git executes or reads as
-# configuration (.git itself, .git/config, .git/hooks, .git/info, submodule equivalents) owner-only, so a seat
-# cannot make DevFlow's git run code. Sticky bits stop seats from renaming DevFlow's .git, .devflow and
-# worktree folders out of the way.
+# configuration or history it trusts owner-only: .git itself and its root files, config, hooks, info,
+# objects/info (alternates), existing packs, submodule git dirs. Sticky bits stop seats from renaming
+# DevFlow's .git, .devflow, worktree folders, objects/pack and objects/info out of the way; seats may still
+# ADD loose objects and new packs. Every walk is `find -P` (never follows a symlink, including one given on
+# the command line) and skips symlinks.
 readonly HARDEN_SCRIPT='
 set -u
 umask 022
 dir=$1 owner=$2 full=$3 grp=$4
 fail() { printf "project hardening: %s\n" "$*" >&2; exit 1; }
+nochmod() { mode=$1; shift; find -P "$@" ! -type l -exec chmod "$mode" {} + || fail "chmod $mode $*"; }
+owned() { [ -z "$(find -P "$@" ! -user "$owner" -print -quit)" ]; }
 cd -- "$dir" || fail "cannot enter $dir"
-[ "$(stat -c %U .)" = "$owner" ] || fail "project folder not owned by $owner"
-if [ "$grp" != - ]; then chgrp -- "$grp" . || fail "chgrp $grp"; fi
+[ -d . ] && [ "$(stat -c %U .)" = "$owner" ] || fail "project folder not owned by $owner"
+if [ "$grp" != - ]; then chgrp -h -- "$grp" . || fail "chgrp $grp"; fi
 if [ "$full" = 1 ]; then
-  chgrp -R -h -P -f -- "$grp" . || true
-  chmod -R -f g+rwX,o-rwx . || true
-  find . -xdev -type d ! -perm -2000 -exec chmod -f g+s {} + 2>/dev/null || true
+  find -P . -xdev ! -type l -exec chgrp -f -- "$grp" {} + 2>/dev/null || true
+  find -P . -xdev ! -type l -exec chmod -f g+rwX,o-rwx {} + 2>/dev/null || true
+  find -P . -xdev -type d ! -perm -2000 -exec chmod -f g+s {} + 2>/dev/null || true
 fi
 chmod 3770 . || fail "chmod project folder"
 for d in .devflow .devflow/worktrees; do
@@ -184,28 +198,25 @@ for d in .devflow .devflow/worktrees; do
 done
 if [ -e .git ] || [ -L .git ]; then
   [ -d .git ] && [ ! -L .git ] && [ "$(stat -c %U .git)" = "$owner" ] || fail ".git is not a directory owned by $owner"
+  [ -z "$(find -P .git -type l -print -quit)" ] || fail "symlinks under .git (the root sweep must run first)"
   chmod 2750 .git || fail "chmod .git"
+  # index, HEAD, packed-refs, ORIG_HEAD, FETCH_HEAD... are created 0664; only DevFlow writes them.
+  nochmod g-w,o-rwx .git -mindepth 1 -maxdepth 1 -type f
   for p in .git/config .git/hooks .git/info; do
-    [ -e "$p" ] || [ -L "$p" ] || continue
-    [ ! -L "$p" ] || fail "$p is a symlink"
-    [ -z "$(find "$p" ! -user "$owner" -print -quit)" ] || fail "$p contains entries not owned by $owner"
-    chmod -R g-w,o-rwx -- "$p" || fail "chmod $p"
+    [ -e "$p" ] || continue
+    owned "$p" || fail "$p contains entries not owned by $owner"
+    nochmod g-w,o-rwx "$p"
   done
-  # No symlinks anywhere under .git (packs or alternates pointing at another project, swapped files).
-  find .git -type l -exec rm -f -- {} + 2>/dev/null || true
-  [ -z "$(find .git -type l -print -quit)" ] || fail "symlinks under .git could not be removed"
   if [ -e .git/objects ]; then
     [ -d .git/objects ] && [ "$(stat -c %U .git/objects)" = "$owner" ] || fail ".git/objects is not a directory owned by $owner"
-    # Seats add loose objects in group-writable objects/xx folders; they cannot rename or replace pack/ or
-    # info/ (sticky), and objects/info (alternates) is owner-only.
     chmod 3770 .git/objects || fail "chmod .git/objects"
-    if [ -e .git/objects/info ]; then
-      [ -d .git/objects/info ] || fail ".git/objects/info is not a directory"
-      [ -z "$(find .git/objects/info ! -user "$owner" -print -quit)" ] || fail ".git/objects/info contains entries not owned by $owner"
-    else
-      mkdir .git/objects/info || fail "mkdir .git/objects/info"
-    fi
-    chmod -R g-w,o-rwx .git/objects/info || fail "chmod .git/objects/info"
+    [ -e .git/objects/info ] || mkdir .git/objects/info || fail "mkdir .git/objects/info"
+    [ -d .git/objects/info ] && owned .git/objects/info || fail ".git/objects/info not owned by $owner"
+    nochmod g-w,o-rwx .git/objects/info
+    [ -e .git/objects/pack ] || mkdir .git/objects/pack || fail "mkdir .git/objects/pack"
+    [ -d .git/objects/pack ] && owned .git/objects/pack || fail ".git/objects/pack has entries not owned by $owner (root sweep takes over new packs)"
+    chmod 3770 .git/objects/pack || fail "chmod .git/objects/pack"
+    nochmod g-w,o-rwx .git/objects/pack -mindepth 1 -maxdepth 1 -type f
   fi
   if [ -e .git/worktrees ]; then
     [ -d .git/worktrees ] || fail ".git/worktrees is not a directory"
@@ -216,17 +227,80 @@ if [ -e .git ] || [ -L .git ]; then
       [ -e "$w/modules" ] || mkdir -m 2750 "$w/modules" || fail "mkdir $w/modules"
     done
   fi
-  # Submodule git dirs (.git/modules, .git/worktrees/<n>/modules) at every level: owned by the owner and not
-  # group-writable, so seats can neither edit their config/hooks/info nor rename anything in them.
+  # Submodule git dirs (.git/modules, .git/worktrees/<n>/modules) at every level: owner-only.
   for m in .git/modules .git/worktrees/*/modules; do
     [ -e "$m" ] || continue
     [ -d "$m" ] || fail "$m is not a directory"
-    [ -z "$(find "$m" ! -user "$owner" -print -quit)" ] || fail "$m contains entries not owned by $owner"
-    chmod -R g-w,o-rwx -- "$m" || fail "chmod $m"
+    owned "$m" || fail "$m contains entries not owned by $owner"
+    nochmod g-w,o-rwx "$m"
   done
+  # No automatic repacking: a seat must not be able to make git rewrite packs (gc --auto).
+  if [ -f .git/config ] && [ "$(git config --file .git/config --get gc.auto 2>/dev/null)" != 0 ]; then
+    git config --file .git/config gc.auto 0 || fail "set gc.auto"
+    nochmod g-w,o-rwx .git/config
+  fi
 fi
 exit 0
 '
+
+# Root phase of the project sweep, run while no process of the seat that just ran is alive. Never follows a
+# symlink: deletions are `find -P ... -delete` (unlinkat relative to the parent), ownership changes `chown -h`.
+# Args: <project .git> <worktree or ""> <owner uid> <group or ""> <pack manifest file>.
+# Returns 1 with SWEEP_ERR set when something is left that DevFlow must not trust.
+SWEEP_ERR=""
+sweep_root() {
+  local g=$1 wt=$2 uid=$3 grp=$4 manifest=$5 z f n
+  serr() { SWEEP_ERR=$*; return 1; }
+  [ -d "$g" ] && [ ! -L "$g" ] || { serr "$g missing or a symlink"; return 1; }
+  find -P "$g" -type l -delete 2>/dev/null || true
+  z=$(find -P "$g" -type l -print -quit)
+  [ -z "$z" ] || { serr "symlink could not be removed: $z"; return 1; }
+  z=$(find -P "$g" -type f -links +1 -print -quit)
+  [ -z "$z" ] || { serr "hard-linked file under .git: $z"; return 1; }
+  [ "$(stat -c %u -- "$g")" = "$uid" ] || { serr "$g not owned by the service user"; return 1; }
+  z=$(find -P "$g" -mindepth 1 -maxdepth 1 -type f ! -uid "$uid" -print -quit)
+  [ -z "$z" ] || { serr "foreign-owned file: $z"; return 1; }
+  for z in "$g/config" "$g/hooks" "$g/info" "$g/objects/info" "$g/modules" "$g"/worktrees/*/modules "$g"/worktrees/*/commondir "$g"/worktrees/*/gitdir; do
+    [ -e "$z" ] || continue
+    f=$(find -P "$z" ! -uid "$uid" -print -quit)
+    [ -z "$f" ] || { serr "foreign-owned entry: $f"; return 1; }
+  done
+  for z in "$g/objects" "$g/objects/pack" "$g/worktrees"; do
+    [ -e "$z" ] || continue
+    [ -d "$z" ] && [ "$(stat -c %u -- "$z")" = "$uid" ] || { serr "$z not a directory owned by the service user"; return 1; }
+  done
+  if [ -d "$g/objects/pack" ]; then
+    z=$(find -P "$g/objects/pack" -mindepth 1 -maxdepth 1 ! -type f -print -quit)
+    [ -z "$z" ] || { serr "not a regular file in objects/pack: $z"; return 1; }
+    # New packs a seat added are taken over, so they cannot be replaced later (pack/ is sticky).
+    while IFS= read -r -d '' f; do
+      n=${f##*/}
+      [[ $n =~ ^pack-[0-9a-f]{40,64}\.(pack|idx|rev|bitmap|mtimes|promisor|keep)$ ]] || { serr "unexpected file in objects/pack: $n"; return 1; }
+      chown -h -- "$uid${grp:+:$grp}" "$f" || { serr "cannot take over $n"; return 1; }
+    done < <(find -P "$g/objects/pack" -mindepth 1 -maxdepth 1 -type f ! -uid "$uid" -print0)
+    # A pack file with a known name but another inode or size was replaced.
+    local cur name ino size old
+    cur=$(find -P "$g/objects/pack" -mindepth 1 -maxdepth 1 -type f -name 'pack-*' -printf '%f %i %s\n' | LC_ALL=C sort)
+    if [ -f "$manifest" ]; then
+      while read -r name ino size; do
+        [ -n "$name" ] || continue
+        old=$(awk -v n="$name" '$1 == n { print $2 " " $3; exit }' "$manifest")
+        if [ -n "$old" ] && [ "$old" != "$ino $size" ]; then serr "pack file replaced: $name"; return 1; fi
+      done <<< "$cur"
+    fi
+    printf '%s\n' "$cur" > "$manifest.tmp" && mv -f -- "$manifest.tmp" "$manifest" || { serr "cannot write $manifest"; return 1; }
+  fi
+  if [ -n "$wt" ]; then
+    f="$wt/.git"
+    [ ! -L "$f" ] && [ -f "$f" ] || { serr "$f is not a regular file"; return 1; }
+    [ "$(stat -c %u -- "$f")" = "$uid" ] && [ "$(stat -c %h -- "$f")" = 1 ] || { serr "$f was replaced"; return 1; }
+    z=$(head -n 1 -- "$f")
+    n=${z#"gitdir: $g/worktrees/"}
+    [ "$n" != "$z" ] && [[ $n =~ ^[A-Za-z0-9._-]+$ ]] && [ "$n" != . ] && [ "$n" != .. ] || { serr "$f does not point into $g/worktrees"; return 1; }
+    [ -d "$g/worktrees/$n" ] && [ ! -L "$g/worktrees/$n" ] || { serr "worktree git dir $n missing"; return 1; }
+  fi
+  return 0
+}
 
 # ---------------------------------------------------------------- system helpers (root only)
 
@@ -250,6 +324,7 @@ root_file_ok() {
 
 CONF_ROOTS=()
 CONF_CLAUDE=""
+CONF_ALLOW_NO_SCOPE=0
 load_conf() {
   root_file_ok "$CONF_FILE" || die "$CONF_FILE missing or not root-owned/0644"
   local line key val raw_roots="" r
@@ -259,6 +334,7 @@ load_conf() {
     case $key in
       PROJECT_ROOTS) raw_roots=$val ;;
       CLAUDE_BIN) CONF_CLAUDE=$val ;;
+      ALLOW_NO_SYSTEMD_SCOPE) [ "$val" = 1 ] && CONF_ALLOW_NO_SCOPE=1 ;;
       *) die "unknown key in $CONF_FILE: $key" ;;
     esac
   done < "$CONF_FILE"
@@ -356,7 +432,14 @@ run_tracked_in() {
   local rc=0
   wait "$child" || rc=$?
   # Leftovers of the run (detached children in its systemd scope) are stopped too.
-  if [ -n "$TRACK_AFTER" ]; then $TRACK_AFTER || true; fi
+  # Nothing of this run may stay alive: the group (setsid'd leftovers are in the scope, below) ...
+  kill_group "$child" >/dev/null 2>&1 || true
+  # ... then the after-run steps (scope kill, root sweep). A failed sweep wins over the run's own status.
+  if [ ${#TRACK_AFTER[@]} -gt 0 ]; then
+    local arc=0
+    "${TRACK_AFTER[@]}" || arc=$?
+    [ "$arc" -eq 0 ] || rc=$arc
+  fi
   exit "$rc"
 }
 
@@ -400,17 +483,50 @@ stop_scope() {
   systemctl kill --signal=KILL -- "$unit" >/dev/null 2>&1 || true
 }
 
-TRACK_AFTER=""
+TRACK_AFTER=()
+TRACK_POST=()
+TRACK_UID="" TRACK_RID="" TRACK_SCOPE=0
+# After a tracked run: kill its whole systemd scope first, then the optional post step (root sweep).
+after_tracked_run() {
+  if [ "$TRACK_SCOPE" = 1 ]; then stop_scope "$TRACK_UID" "$TRACK_RID"; fi
+  if [ ${#TRACK_POST[@]} -gt 0 ]; then "${TRACK_POST[@]}" || return $?; fi
+  return 0
+}
+# Server runs require a systemd scope (fail closed); ALLOW_NO_SYSTEMD_SCOPE=1 in dfctl.conf is the explicit
+# opt-out for machines without systemd (then only the process group is killed).
 run_tracked() {
   local uid=$1 rid=$2 max=$3; shift 3
   prepare_run_dir
+  TRACK_UID=$uid; TRACK_RID=$rid; TRACK_AFTER=(after_tracked_run)
   if have_systemd; then
+    TRACK_SCOPE=1
     build_scope_cmd "$uid" "$rid"
-    TRACK_AFTER="stop_scope $uid $rid"
     run_tracked_in "$RUN_DIR" "$uid" "$rid" "$max" "${SCOPE_CMD[@]}" "$@"
-  else
+  elif [ "$CONF_ALLOW_NO_SCOPE" = 1 ]; then
+    TRACK_SCOPE=0
     run_tracked_in "$RUN_DIR" "$uid" "$rid" "$max" "$@"
+  else
+    die "systemd scopes are unavailable (systemd-run/systemctl or /run/systemd/system missing); refusing to start a seat run"
   fi
+}
+
+# Root sweep + devflow hardening of one project, serialised per project. Returns SWEEP_FAILED on failure.
+sweep_project() {
+  local p=$1 wt=$2 pid=$3
+  local uid; uid=$(id -u -- "$SERVICE_USER") || return "$SWEEP_FAILED"
+  prepare_run_dir
+  install -d -m 0700 -o root -g root "$PACK_DIR"
+  root_dir_ok "$PACK_DIR" || { printf 'dfctl: %s is not root-owned\n' "$PACK_DIR" >&2; return "$SWEEP_FAILED"; }
+  local rc=0
+  (
+    flock -w 600 9 || { echo "dfctl: sweep lock timeout" >&2; exit "$SWEEP_FAILED"; }
+    if ! sweep_root "$p/.git" "$wt" "$uid" "${GROUP_PREFIX}$pid" "$PACK_DIR/$pid"; then
+      printf 'dfctl: sweep of project %s failed: %s\n' "$pid" "$SWEEP_ERR" >&2
+      exit "$SWEEP_FAILED"
+    fi
+    harden_project "$p" 0 - || { printf 'dfctl: hardening of project %s failed\n' "$pid" >&2; exit "$SWEEP_FAILED"; }
+  ) 9> "$RUN_DIR/sweep-$pid.lock" || rc=$?
+  return "$rc"
 }
 
 # ---------------------------------------------------------------- subcommands
@@ -470,6 +586,7 @@ cmd_ensure_project_group() {
   gpasswd -a "$SERVICE_USER" "$g" >/dev/null
   # Full tree walk only at registration; every call re-applies the .git protections.
   harden_project "$real" "$first" "$g" || die "could not prepare project folder $real"
+  sweep_project "$real" "" "$pid" || exit "$SWEEP_FAILED"
   if [ $first -eq 1 ]; then
     local tmp="$REG_DIR/.$pid.$$"
     printf '%s\n' "$real" > "$tmp"
@@ -511,8 +628,11 @@ cmd_run_claude() {
   done
   [ -n "$pid" ] || die "cwd is not inside a project worktree"
   in_group "$u" "${GROUP_PREFIX}$pid" || die "user $u is not a member of project $pid"
-  # Fail closed if the project's .git protections cannot be (re)applied.
-  harden_project "$project" 0 - || die "project $pid failed its .git safety check; ask an admin"
+  local rest=${real#"$project/.devflow/worktrees/"}
+  local wt="$project/.devflow/worktrees/${rest%%/*}"
+  # Fail closed if the project's git dirs do not pass the sweep, before and after the run.
+  sweep_project "$project" "$wt" "$pid" || exit "$SWEEP_FAILED"
+  TRACK_POST=(sweep_project "$project" "$wt" "$pid")
   build_run_claude_cmd "$SEAT_UID" "$SEAT_GID" "$SEAT_HOME" "$real" "$project" "$CONF_CLAUDE" -- "$@"
   umask 002
   run_tracked "$uid" "$rid" "$RUN_MAX_SEC" "${USER_CMD[@]}"
@@ -532,6 +652,21 @@ cmd_claude_auth() {
         script -qfec "stty cols 500 rows 50 2>/dev/null; exec $CONF_CLAUDE auth login" /dev/null
       run_tracked "$uid" "$4" "$LOGIN_MAX_SEC" "${USER_CMD[@]}" ;;
   esac
+}
+
+cmd_sweep_project() {
+  local pid=$1 wt=${2-}
+  load_conf
+  local p; p=$(registry_path "$pid")
+  [ -n "$p" ] || die "project $pid not registered"
+  in_roots "$p" || die "project $pid is outside PROJECT_ROOTS"
+  if [ -n "$wt" ]; then
+    [ "$(realpath -e -- "$wt" 2>/dev/null)" = "$wt" ] || die "worktree must exist and contain no symlinks"
+    local name=${wt#"$p/.devflow/worktrees/"}
+    [ "$name" != "$wt" ] && [[ $name =~ ^[^/]+$ ]] || die "worktree must be <project>/.devflow/worktrees/<name>"
+  fi
+  sweep_project "$p" "$wt" "$pid" || exit "$SWEEP_FAILED"
+  echo "swept project $pid"
 }
 
 cmd_stop_claude() {
@@ -696,55 +831,98 @@ self_test() {
 
   echo "# .git hardening"
   if command -v git >/dev/null 2>&1; then
-    local hp; hp=$(mktemp -d)
+    local hp me_u me_n me_g; hp=$(mktemp -d); me_u=$(id -u); me_n=$(id -un); me_g=$(id -gn)
     git -c core.hooksPath=/dev/null -c init.defaultBranch=main init -q "$hp/proj"
     mkdir -p "$hp/proj/.devflow/worktrees" "$hp/proj/.git/worktrees/R1" "$hp/proj/.git/info"
-    : > "$hp/proj/.git/info/exclude"
+    : > "$hp/proj/.git/info/exclude"; : > "$hp/proj/.git/index"
     chmod -R g+w "$hp/proj"
     perm() { stat -c %a -- "$1"; }
     gw() { (( (8#$(perm "$1") & 8#020) != 0 )); }
     sticky() { (( (8#$(perm "$1") & 8#1000) != 0 )); }
-    ok "hardening succeeds" quiet bash -c "$HARDEN_SCRIPT" harden "$hp/proj" "$(id -un)" 1 "$(id -gn)"
+    # The two phases as dfctl runs them: root sweep, then the devflow-side hardening.
+    sweep_both() { sweep_root "$hp/proj/.git" "${3-}" "$me_u" "" "$hp/manifest" && bash -c "$HARDEN_SCRIPT" harden "$hp/proj" "$me_n" "$1" "$2"; }
+    ok "first full sweep succeeds" quiet sweep_both 1 "$me_g"
     no ".git not group-writable" gw "$hp/proj/.git"
     no ".git/config not group-writable" gw "$hp/proj/.git/config"
+    no ".git/HEAD (root file) not group-writable" gw "$hp/proj/.git/HEAD"
+    no ".git/index (root file) not group-writable" gw "$hp/proj/.git/index"
     no ".git/hooks not group-writable" gw "$hp/proj/.git/hooks"
     no ".git/info not group-writable" gw "$hp/proj/.git/info"
     no ".git/info/exclude not group-writable" gw "$hp/proj/.git/info/exclude"
-    ok ".git/objects stays group-writable" gw "$hp/proj/.git/objects"
+    ok ".git/objects group-writable and sticky" eval 'gw "$hp/proj/.git/objects" && sticky "$hp/proj/.git/objects"'
+    ok ".git/objects/pack group-writable and sticky (add, not replace)" eval 'gw "$hp/proj/.git/objects/pack" && sticky "$hp/proj/.git/objects/pack"'
     ok ".git/refs stays group-writable" gw "$hp/proj/.git/refs"
     ok ".git/worktrees group-writable and sticky" eval 'gw "$hp/proj/.git/worktrees" && sticky "$hp/proj/.git/worktrees"'
     ok "project folder sticky" sticky "$hp/proj"
     ok ".devflow/worktrees sticky" sticky "$hp/proj/.devflow/worktrees"
+    ok "gc.auto=0 in the protected config" test "$(git config --file "$hp/proj/.git/config" --get gc.auto)" = 0
     mkdir -p "$hp/proj/.git/modules/sub/hooks" "$hp/proj/.git/modules/sub/info" "$hp/proj/.git/modules/sub/modules/inner" \
-      "$hp/proj/.git/worktrees/R2" "$hp/proj/.git/worktrees/R3/modules/sub" "$hp/proj/.git/objects/pack"
+      "$hp/proj/.git/worktrees/R2" "$hp/proj/.git/worktrees/R3/modules/sub"
     : > "$hp/proj/.git/modules/sub/config"; : > "$hp/proj/.git/modules/sub/modules/inner/config"
     : > "$hp/proj/.git/worktrees/R3/modules/sub/config"; : > "$hp/proj/.git/objects/info/alternates"
-    ln -s /etc/hostname "$hp/proj/.git/objects/pack/pack-evil.pack"
+    printf 'pack\n' > "$hp/proj/.git/objects/pack/pack-1111111111111111111111111111111111111111.pack"
+    printf 'idx\n' > "$hp/proj/.git/objects/pack/pack-1111111111111111111111111111111111111111.idx"
+    ln -s /etc/hostname "$hp/proj/.git/objects/pack/pack-2222222222222222222222222222222222222222.pack"
     ln -s "$hp/elsewhere" "$hp/proj/.git/worktrees/R3/commondir"
+    ln -s /etc/hostname "$hp/proj/.git/worktrees/R1/index"
     chmod -R g+w "$hp/proj/.git"
-    ok "pass with submodules, alternates and planted symlinks" quiet bash -c "$HARDEN_SCRIPT" harden "$hp/proj" "$(id -un)" 1 "$(id -gn)"
+    ok "sweep with submodules, packs, alternates and planted symlinks" quiet sweep_both 1 "$me_g"
     for p in modules modules/sub modules/sub/config modules/sub/hooks modules/sub/info modules/sub/modules/inner \
       modules/sub/modules/inner/config worktrees/R3/modules worktrees/R3/modules/sub worktrees/R3/modules/sub/config \
-      worktrees/R2/modules objects/info objects/info/alternates; do
+      worktrees/R2/modules objects/info objects/info/alternates \
+      objects/pack/pack-1111111111111111111111111111111111111111.pack objects/pack/pack-1111111111111111111111111111111111111111.idx; do
       no ".git/$p not group-writable" gw "$hp/proj/.git/$p"
     done
-    ok ".git/objects sticky" sticky "$hp/proj/.git/objects"
-    ok ".git/objects/pack stays group-writable" gw "$hp/proj/.git/objects/pack"
-    ok "symlinked pack removed" test ! -L "$hp/proj/.git/objects/pack/pack-evil.pack"
-    ok "symlinked commondir removed" test ! -L "$hp/proj/.git/worktrees/R3/commondir"
+    ok "symlink inside .git removed (pack)" test ! -L "$hp/proj/.git/objects/pack/pack-2222222222222222222222222222222222222222.pack"
+    ok "symlink inside .git removed (worktree index)" test ! -L "$hp/proj/.git/worktrees/R1/index"
+    ok "symlink inside .git removed (commondir)" test ! -L "$hp/proj/.git/worktrees/R3/commondir"
     ok "modules pre-created owner-only in a worktree git dir" test -d "$hp/proj/.git/worktrees/R2/modules"
+    local m1; m1=$(cat "$hp/manifest" 2>/dev/null)
+    ok "sweep is idempotent" quiet sweep_both 0 -
+    ok "sweep is idempotent (pack manifest unchanged)" test "$(cat "$hp/manifest" 2>/dev/null)" = "$m1"
     chmod g+w "$hp/proj/.git/config"
-    ok "a later (non-full) pass strips g+w again" quiet bash -c "$HARDEN_SCRIPT" harden "$hp/proj" "$(id -un)" 0 -
+    ok "a later (non-full) pass strips g+w again" quiet sweep_both 0 -
     no "config fixed by the later pass" gw "$hp/proj/.git/config"
+
+    local pk="$hp/proj/.git/objects/pack/pack-1111111111111111111111111111111111111111"
+    ln "$pk.pack" "$hp/hardlink.pack"
+    no "hard-linked pack refused" quiet sweep_root "$hp/proj/.git" "" "$me_u" "" "$hp/manifest"
+    rm -f -- "$hp/hardlink.pack"
+    ok "sweep passes again once the hard link is gone" quiet sweep_root "$hp/proj/.git" "" "$me_u" "" "$hp/manifest"
+    cp -p "$pk.idx" "$hp/idx.copy"; printf 'evil idx\n' >> "$hp/idx.copy"
+    chmod u+w "$hp/proj/.git/objects/pack"; mv -f "$hp/idx.copy" "$pk.idx"
+    no "replaced idx detected" quiet sweep_root "$hp/proj/.git" "" "$me_u" "" "$hp/manifest"
+    printf '%s\n' "$m1" > "$hp/manifest.after"
+    no "foreign-owned entries refused" quiet sweep_root "$hp/proj/.git" "" "$((me_u + 1))" "" "$hp/manifest.after"
+
+    mkdir -p "$hp/proj/.devflow/worktrees/R1"
+    printf 'gitdir: %s/proj/.git/worktrees/R1\n' "$hp" > "$hp/proj/.devflow/worktrees/R1/.git"
+    rm -f -- "$hp/manifest"
+    ok "worktree .git file pointing at its git dir passes" quiet sweep_root "$hp/proj/.git" "$hp/proj/.devflow/worktrees/R1" "$me_u" "" "$hp/manifest"
+    printf 'gitdir: %s/other/.git/worktrees/R1\n' "$hp" > "$hp/proj/.devflow/worktrees/R1/.git"
+    no "worktree .git file pointing elsewhere refused" quiet sweep_root "$hp/proj/.git" "$hp/proj/.devflow/worktrees/R1" "$me_u" "" "$hp/manifest"
+    rm -f -- "$hp/proj/.devflow/worktrees/R1/.git"; ln -s "$hp/proj/.git" "$hp/proj/.devflow/worktrees/R1/.git"
+    no "symlinked worktree .git refused" quiet sweep_root "$hp/proj/.git" "$hp/proj/.devflow/worktrees/R1" "$me_u" "" "$hp/manifest"
+
     mv "$hp/proj/.git/config" "$hp/config.real"
     ln -s "$hp/config.real" "$hp/proj/.git/config"
-    no "symlinked .git/config is refused" quiet bash -c "$HARDEN_SCRIPT" harden "$hp/proj" "$(id -un)" 0 -
+    no "devflow phase alone refuses a symlink under .git" quiet bash -c "$HARDEN_SCRIPT" harden "$hp/proj" "$me_n" 0 -
+    ok "root sweep deletes it (no follow)" quiet sweep_root "$hp/proj/.git" "" "$me_u" "" "$hp/m2"
+    ok "the symlink target is untouched" test -f "$hp/config.real"
     no "project not owned by the given owner is refused" quiet bash -c "$HARDEN_SCRIPT" harden "$hp/proj" nobody-such-user 0 -
     chmod -R u+w "$hp"
     rm -rf -- "$hp"
   else
     echo "ok - skipped (git not installed)"
   fi
+
+  echo "# sweep-project arguments"
+  ok "sweep-project id" quiet validate_args sweep-project 3
+  ok "sweep-project id worktree" quiet validate_args sweep-project 3 /srv/p/.devflow/worktrees/R1
+  no "sweep-project bad id" quiet validate_args sweep-project x
+  no "sweep-project relative worktree" quiet validate_args sweep-project 3 srv/p
+  no "sweep-project extra arg" quiet validate_args sweep-project 3 /a /b
+  no "sweep-project no id" quiet validate_args sweep-project
 
   if [ $failed -eq 0 ]; then echo "# all $n checks passed"; return 0; fi
   echo "# $failed of $n checks FAILED"; return 1
@@ -765,6 +943,7 @@ main() {
     run-claude) cmd_run_claude "$@" ;;
     claude-auth) cmd_claude_auth "$@" ;;
     stop-claude) cmd_stop_claude "$@" ;;
+    sweep-project) cmd_sweep_project "$@" ;;
   esac
 }
 

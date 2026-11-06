@@ -24,6 +24,8 @@ export interface RunResult {
   seatError?: SeatError;
   /** The run was stopped through `opts.signal`. Not a failure: callers check this before `ok`. */
   aborted?: boolean;
+  /** Exit status of the spawned process (null when killed by a signal or not spawned). */
+  exitCode?: number | null;
 }
 
 export type SeatError = 'expired' | 'disconnected';
@@ -252,7 +254,7 @@ export function runClaudeCommand(cfg: Pick<Config, 'rateLimitPauseMin'>, opts: R
       if (settleTimer) clearTimeout(settleTimer);
       opts.signal?.removeEventListener('abort', onAbort);
       if (buf.trim()) handleLine(buf);
-      if (aborted) return resolve({ ok: false, aborted: true, sessionId, resultText, error: 'aborted' });
+      if (aborted) return resolve({ ok: false, aborted: true, sessionId, resultText, error: 'aborted', exitCode: code });
       const failedRun = !sawResult || !!isError;
       const failText = `${isError ? resultText : ''}\n${plain}\n${stderr}`;
       const limited = forced || !failedRun ? undefined
@@ -266,7 +268,7 @@ export function runClaudeCommand(cfg: Pick<Config, 'rateLimitPauseMin'>, opts: R
       else if (seatError) error = seatError === 'expired' ? 'Claude login expired' : 'Claude seat not logged in';
       else if (!sawResult) error = `claude exited (code ${code}) without a result${stderr ? ': ' + stderr.trim().slice(-500) : ''}`;
       else if (isError) error = resultText || 'claude reported an error';
-      resolve({ ok, sessionId, resultText, ...(limited ? { rateLimitedUntil: limited } : {}), ...(seatError ? { seatError } : {}), ...(error ? { error } : {}) });
+      resolve({ ok, sessionId, resultText, exitCode: code, ...(limited ? { rateLimitedUntil: limited } : {}), ...(seatError ? { seatError } : {}), ...(error ? { error } : {}) });
     }
     child.on('error', e => finish(null, e));
     child.on('close', code => finish(code));

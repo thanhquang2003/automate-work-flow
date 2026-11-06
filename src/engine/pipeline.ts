@@ -616,7 +616,7 @@ export class Pipeline {
     const protectedBranch = readProjectInfo(ws)?.defaultBranch;
     // Git uses the same credential as the API client (the creator's own token when set), else the shared one.
     const token = gitlabToken(gitlab) || this.cfg.gitlab.token || undefined;
-    const git = this.deps.makeGit ? this.deps.makeGit(req, ws) : new Git(ws.repoDir, { mode: this.cfg.mode, token, protectedBranch });
+    const git = this.deps.makeGit ? this.deps.makeGit(req, ws) : new Git(ws.repoDir, { mode: this.cfg.mode, token, protectedBranch, onWarn: m => log(m, 'warn') });
     const timeoutMs = this.cfg.stageTimeoutMin > 0 ? this.cfg.stageTimeoutMin * 60_000 : undefined;
     return {
       cfg: this.cfg, repo: this.repo, req, ws, feedback: feedback || undefined, resume, signal, log, gitlab, git,

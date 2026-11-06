@@ -27,7 +27,10 @@ exec "$@"
 D=${q(dir)}
 (IFS=$'${SEP}'; printf '%s\\n' "$*") >> "$D/calls"
 case "$1" in
-  run-claude) shift 6; m=ok; [ -f "$D/mode" ] && m=$(cat "$D/mode"); exec ${q(process.execPath)} ${q(FAKE_CLAUDE)} "$m" "$@" ;;
+  run-claude) shift 6; m=ok; [ -f "$D/mode" ] && m=$(cat "$D/mode")
+    if [ "$m" = sweepfail ]; then ${q(process.execPath)} ${q(FAKE_CLAUDE)} ok "$@"; echo "dfctl: sweep of project 1 failed: symlink" >&2; exit 86; fi
+    exec ${q(process.execPath)} ${q(FAKE_CLAUDE)} "$m" "$@" ;;
+  sweep-project) [ -f "$D/sweep-fail" ] && { echo "dfctl: sweep of project $2 failed: hard-linked file" >&2; exit 86; }; exit 0 ;;
   claude-auth)
     case "$3" in
       status) cat "$D/status-out" 2>/dev/null; rc=0; [ -f "$D/status-rc" ] && rc=$(cat "$D/status-rc"); exit "$rc" ;;

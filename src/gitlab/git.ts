@@ -6,6 +6,8 @@ import { basename, dirname, join, resolve } from 'node:path';
 export interface GitOpts {
   /** DEVFLOW_MODE of the caller (Config.mode). Default 'server', the safe side. */
   mode?: GitMode;
+  /** Receives warnings (e.g. a skipped gitlink update); default console.warn. */
+  onWarn?: (msg: string) => void;
   protectedBranch?: string;
   token?: string;
   authorName?: string;
@@ -24,7 +26,13 @@ export const GIT_SUBMODULE_ARGS: readonly string[] = [
  * Server mode only (seat trust boundary): repository hooks and fsmonitor never execute. Local mode keeps the
  * user's own hooks (git-lfs pre-push etc.), as in v2.
  */
-export const GIT_SERVER_ARGS: readonly string[] = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
+export const GIT_SERVER_ARGS: readonly string[] = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'gc.auto=0'];
+
+/**
+ * Server mode only: system and global git config are not read (filter/diff/merge drivers such as git-lfs
+ * defined there would otherwise run on seat-written content and could see credentials).
+ */
+export const GIT_SERVER_ENV: Readonly<Record<string, string>> = { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
 
 export type GitMode = 'local' | 'server';
 
@@ -129,7 +137,7 @@ export class Git {
     const res = await new Promise<{ code: number; stdout: string }>((resolve, reject) => {
       execFile('git', gitArgv(args, this.mode), {
         cwd, windowsHide: true, maxBuffer: 64 * 1024 * 1024,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...pin?.env, ...o.env },
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...(this.mode === 'server' ? GIT_SERVER_ENV : {}), ...pin?.env, ...o.env },
       }, (err, stdout, stderr) => {
         if (!err) return resolve({ code: 0, stdout: String(stdout) });
         if (o.allowFail) return resolve({ code: typeof (err as any).code === 'number' ? (err as any).code : 1, stdout: String(stdout) });
@@ -143,8 +151,14 @@ export class Git {
     return res;
   }
 
-  private async run(args: string[], token?: string): Promise<string> {
-    return (await this.exec(args, { env: this.authEnv(token) })).stdout;
+  /** Local git command: never gets the GitLab credential. */
+  private async run(args: string[]): Promise<string> {
+    return (await this.exec(args)).stdout;
+  }
+
+  /** Network command (fetch, pull, push): the only ones that get the credential header. */
+  private async net(args: string[]): Promise<string> {
+    return (await this.exec(args, { env: this.authEnv() })).stdout;
   }
 
   async clone(url: string, token: string, dir: string): Promise<void> {
@@ -166,9 +180,11 @@ export class Git {
   }
 
   /**
-   * Pathspecs excluding every gitlink (submodule / nested repository) in the index. `git add -A` and
+   * Pathspecs excluding every gitlink (submodule / nested repository) already in the index. `git add -A` and
    * `git stash -u` ignore diff.ignoreSubmodules and run `git status` inside such a repository, which would
-   * apply that repository's own (seat-controlled) filters as DevFlow. DevFlow therefore never stages gitlinks.
+   * apply that repository's own (seat-controlled) filters as DevFlow. So pointer updates of tracked gitlinks
+   * are never staged (a warning names them). An UNTRACKED nested repository is still added by `add -A` as a
+   * new gitlink (git records its HEAD without running anything inside it).
    */
   private async gitlinkExcludes(): Promise<string[]> {
     const out = await this.run(['ls-files', '--stage', '-z']);
@@ -177,6 +193,10 @@ export class Git {
       if (!entry.startsWith('160000 ')) continue;
       const tab = entry.indexOf('\t');
       if (tab > 0) res.push(`:(top,exclude,literal)${entry.slice(tab + 1)}`);
+    }
+    if (res.length) {
+      const paths = res.map(r => r.slice(':(top,exclude,literal)'.length)).join(', ');
+      (this.opts.onWarn ?? console.warn)(`DevFlow không stage gitlink (submodule/repo lồng nhau): ${paths}; thay đổi con trỏ của chúng (nếu có) bị bỏ qua.`);
     }
     return res;
   }
@@ -289,12 +309,12 @@ export class Git {
     if (this.opts.protectedBranch && norm === this.opts.protectedBranch.replace(/^refs\/heads\//, '')) {
       throw new Error(`Refusing to push to protected branch "${branch}"`);
     }
-    await this.run(['push', '-u', 'origin', '--', branch]);
+    await this.net(['push', '-u', 'origin', '--', branch]);
   }
 
   async pull(branch: string): Promise<void> {
     this.checkRef(branch);
-    await this.run([...(await this.identityArgs()), 'pull', '--no-rebase', 'origin', branch]);
+    await this.net([...(await this.identityArgs()), 'pull', '--no-rebase', 'origin', branch]);
   }
 
   async currentBranch(): Promise<string> {
@@ -337,7 +357,7 @@ export class Git {
   }
 
   async fetch(): Promise<void> {
-    await this.run(['fetch', '--quiet', 'origin']);
+    await this.net(['fetch', '--quiet', 'origin']);
   }
 
   async addRemote(name: string, url: string): Promise<void> {
