@@ -7,6 +7,7 @@ import type { Config } from '../config.js';
 import type { Repo } from '../db/repo.js';
 import type { Pipeline } from '../engine/pipeline.js';
 import { currentUser, isLocalHostHeader, sameOrigin } from './auth.js';
+import type { OidcClient } from './oidc.js';
 import { adminRoutes } from './routes/admin.js';
 import { authRoutes } from './routes/auth.js';
 import { changeRoutes } from './routes/changes.js';
@@ -15,10 +16,11 @@ import { requestRoutes } from './routes/requests.js';
 import { surveyRoutes } from './routes/survey.js';
 import { ROOT, render } from './view.js';
 
-export interface WebDeps { repo: Repo; pipeline: Pipeline }
+export interface SystemOpsLike { provisionUser(userId: number): Promise<void> | void }
+export interface WebDeps { repo: Repo; pipeline: Pipeline; oidc?: OidcClient; systemOps?: SystemOpsLike }
 
 const PUBLIC_PREFIXES = ['/static/', '/s/'];
-const PUBLIC_PATHS = ['/login', '/setup'];
+const PUBLIC_PATHS = ['/login', '/login/local', '/setup', '/auth/google', '/auth/google/callback'];
 const MAX_UPLOAD = 50 * 1024 * 1024;
 
 export async function buildServer(cfg: Config, deps: WebDeps): Promise<FastifyInstance> {
@@ -42,7 +44,7 @@ export async function buildServer(cfg: Config, deps: WebDeps): Promise<FastifyIn
     }
     if (!server) { req.user = currentUser(cfg, deps.repo, req); return; }
     if (PUBLIC_PREFIXES.some(p => path.startsWith(p))) return;
-    if (deps.repo.web.listUsers().length === 0) { if (path !== '/setup') return reply.redirect('/setup'); return; }
+    if (!cfg.google.clientId && deps.repo.web.listUsers().length === 0) { if (path !== '/setup') return reply.redirect('/setup'); return; }
     req.user = currentUser(cfg, deps.repo, req);
     if (!req.user && !isPublic) return reply.redirect('/login');
   });

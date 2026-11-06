@@ -2,13 +2,16 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Config } from '../config.js';
 import type { Repo } from '../db/repo.js';
-import type { UserRow } from '../domain/types.js';
+import type { SysRole, UserRow } from '../domain/types.js';
 
 export const COOKIE = 'devflow_sid';
 export const SESSION_MS = 7 * 24 * 3600 * 1000;
 
-export interface SessionUser { id: number | null; username: string; role: 'admin' | 'member' }
-export const LOCAL_USER: SessionUser = { id: null, username: 'local', role: 'admin' };
+export interface SessionUser {
+  id: number | null; username: string; role: 'admin' | 'member';
+  sysRole?: SysRole; departmentId?: number | null; canBePm?: boolean;
+}
+export const LOCAL_USER: SessionUser = { id: null, username: 'local', role: 'admin', sysRole: 'admin', departmentId: null, canBePm: true };
 
 declare module 'fastify' {
   interface FastifyRequest { user?: SessionUser }
@@ -44,7 +47,8 @@ export function currentUser(cfg: Config, repo: Repo, req: FastifyRequest): Sessi
   const uid = verifySession(cfg.secretKey, req.cookies?.[COOKIE]);
   if (uid === undefined) return undefined;
   const u = repo.web.getUser(uid);
-  return u ? { id: u.id, username: u.username, role: u.role } : undefined;
+  if (!u || u.disabled) return undefined;
+  return { id: u.id, username: u.email ?? u.username, role: u.role, sysRole: u.sysRole, departmentId: u.departmentId, canBePm: u.canBePm };
 }
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
@@ -72,4 +76,22 @@ export function sameOrigin(req: FastifyRequest, required: boolean, publicBaseUrl
     if (h === req.headers.host) return true;
     return publicBaseUrl !== '' && h === new URL(publicBaseUrl).host;
   } catch { return false; }
+}
+
+/** Short-lived signed blob (HMAC) used for the OIDC state cookie. */
+export function signBlob(secret: string, data: object, ttlMs: number, now = Date.now()): string {
+  const body = Buffer.from(JSON.stringify({ ...data, exp: now + ttlMs })).toString('base64url');
+  return `${body}.${mac(secret, body)}`;
+}
+export function verifyBlob<T extends object>(secret: string, value: string | undefined, now = Date.now()): T | undefined {
+  if (!value) return undefined;
+  const [body, sig] = value.split('.');
+  if (!body || !sig || !/^[0-9a-f]{64}$/.test(sig)) return undefined;
+  const a = Buffer.from(mac(secret, body), 'hex');
+  const b = Buffer.from(sig, 'hex');
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return undefined;
+  try {
+    const o = JSON.parse(Buffer.from(body, 'base64url').toString()) as T & { exp?: number };
+    return typeof o.exp === 'number' && o.exp >= now ? o : undefined;
+  } catch { return undefined; }
 }

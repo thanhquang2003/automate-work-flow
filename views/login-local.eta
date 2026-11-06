@@ -1,0 +1,8 @@
+<div class="card narrow">
+  <h1>Đăng nhập quản trị khẩn cấp</h1>
+  <form method="post" action="/login/local" class="stack">
+    <label>Tên đăng nhập <input name="username" required autofocus autocomplete="username"></label>
+    <label>Mật khẩu <input name="password" type="password" required autocomplete="current-password"></label>
+    <button class="btn primary" type="submit">Đăng nhập</button>
+  </form>
+</div>

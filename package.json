@@ -10,7 +10,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "vitest run"
+    "test": "vitest run",
+    "admin:set-password": "tsx scripts/admin-set-password.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.5",
@@ -23,6 +24,7 @@
     "fastify": "^5.12.8",
     "htmx.org": "^2.0.11",
     "jszip": "^3.10.2",
+    "openid-client": "6.8.9",
     "zod": "^4.6.7"
   },
   "overrides": {
