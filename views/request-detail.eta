@@ -2,7 +2,7 @@
 <div class="head">
   <div>
     <h1><%= r.id %> - <%= r.title %></h1>
-    <p class="muted"><%= it.RUN_MODE_LABELS[r.runMode] %> · tạo <%= it.fmtTime(r.createdAt) %> · <span class="badge st-<%= r.status %>"><%= it.STATUS_LABELS[r.status] %></span><% if (r.stage === 'CHANGE') { %> <span class="badge st-change">Thay đổi</span><% } %></p>
+    <p class="muted"><%= it.RUN_MODE_LABELS[r.runMode] %> · tạo <%= it.fmtTime(r.createdAt) %> · <span class="badge st-<%= r.status %>"><%= it.STATUS_LABELS[r.status] || r.status %></span><% if (r.stage === 'CHANGE') { %> <span class="badge st-change">Thay đổi</span><% } %></p>
     <p class="muted">Phiên bản yêu cầu v<%= r.baselineVersion %> · Vòng lặp <%= r.iteration %></p>
   </div>
   <a class="btn" href="/requests/<%= r.id %>/bundle.zip">Tải gói kết quả (.zip)</a>

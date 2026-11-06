@@ -25,9 +25,9 @@
     <td><a href="/requests/<%= r.id %>"><%= r.title %></a></td>
     <td>v<%= r.baselineVersion %></td>
     <td><%= r.openCrs %></td>
-    <td><%= it.STAGE_LABELS[r.stage] %></td>
+    <td><%= it.STAGE_LABELS[r.stage] || r.stage %></td>
     <td><%= it.RUN_MODE_LABELS[r.runMode] %></td>
-    <td><span class="badge st-<%= r.status %>"><%= it.STATUS_LABELS[r.status] %></span></td>
+    <td><span class="badge st-<%= r.status %>"><%= it.STATUS_LABELS[r.status] || r.status %></span></td>
     <td><%= r.creator %></td>
     <td><%= it.fmtTime(r.createdAt) %></td>
   </tr>

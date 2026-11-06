@@ -5,7 +5,7 @@
   <% if (b.gates.length === 0) { %><p class="muted">Không có bước nào đang chờ bạn duyệt.</p><% } else { %>
   <ul>
   <% for (const g of b.gates) { %>
-    <li><a href="/requests/<%= g.req.id %>"><strong><%= g.req.code || g.req.id %></strong> - <%= g.req.title %></a> <span class="muted">(<%= g.project.key %>) · giai đoạn <%= it.STAGE_LABELS[g.req.stage] %></span></li>
+    <li><a href="/requests/<%= g.req.id %>"><strong><%= g.req.code || g.req.id %></strong> - <%= g.req.title %></a> <span class="muted">(<%= g.project.key %>) · giai đoạn <%= it.STAGE_LABELS[g.req.stage] || g.req.stage %></span></li>
   <% } %>
   </ul>
   <% } %>

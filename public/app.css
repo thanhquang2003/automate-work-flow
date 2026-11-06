@@ -30,14 +30,14 @@ table.list th,table.list td{padding:8px 10px;border-bottom:1px solid var(--line)
 table.list th{font-size:13px;color:var(--muted)}
 .badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:12px;background:#e8ebf2;color:#333}
 .st-running{background:#dbe7ff;color:#1c43a8}.st-awaiting_approval,.st-awaiting_customer{background:#fff3cd;color:#8a6100}
-.st-paused{background:#e8ebf2}.st-failed,.st-needs_human{background:#fde8e8;color:#8a1f1f}.st-done{background:#e3f6ea;color:#14633a}.st-cancelled{background:#eee;color:#777}
+.st-paused{background:#e8ebf2}.st-awaiting_seat{background:#fff3cd;color:#8a6100}.st-failed,.st-needs_human{background:#fde8e8;color:#8a1f1f}.st-done{background:#e3f6ea;color:#14633a}.st-cancelled{background:#eee;color:#777}
 .ts-P{background:#e3f6ea;color:#14633a}.ts-F{background:#fde8e8;color:#8a1f1f}.ts-PE{background:#fff3cd;color:#8a6100}
 .progress{display:flex;list-style:none;padding:0;margin:16px 0;gap:4px;overflow-x:auto}
 .progress li{flex:1;min-width:84px;text-align:center;font-size:12px;padding:6px 4px;border-radius:4px;background:#e8ebf2;color:var(--muted);border-bottom:4px solid #cfd4e0}
 .progress li.done{background:#e3f6ea;color:#14633a;border-color:var(--ok)}
 .progress li.current{background:#dbe7ff;color:#1c43a8;border-color:var(--pri);font-weight:600}
 .progress li.current.st-failed,.progress li.current.st-needs_human{background:#fde8e8;color:#8a1f1f;border-color:var(--err)}
-.progress li.current.st-awaiting_approval,.progress li.current.st-awaiting_customer{background:#fff3cd;color:#8a6100;border-color:var(--warn)}
+.progress li.current.st-awaiting_approval,.progress li.current.st-awaiting_customer,.progress li.current.st-awaiting_seat{background:#fff3cd;color:#8a6100;border-color:var(--warn)}
 .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:0;overflow-x:auto}
 .tabs a{padding:8px 14px;border:1px solid transparent;border-bottom:0;border-radius:6px 6px 0 0;color:var(--muted);white-space:nowrap}
 .tabs a.active{background:var(--card);border-color:var(--line);color:var(--fg);font-weight:600;margin-bottom:-1px}

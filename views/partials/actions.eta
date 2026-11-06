@@ -38,6 +38,10 @@
   </div>
 <% } else if (r.status === 'awaiting_seat') { %>
   <p>Đang chờ Claude của người phụ trách kết nối lại. Việc sẽ tự chạy tiếp sau khi họ đăng nhập (trang <a href="/seat">Claude của tôi</a>).</p>
+  <div class="row">
+    <form method="post" action="<%= base %>/pause"><button class="btn" type="submit">Tạm dừng</button></form>
+    <form method="post" action="<%= base %>/cancel" data-confirm="Hủy yêu cầu này?"><button class="btn danger" type="submit">Hủy</button></form>
+  </div>
 <% } else if (r.status === 'running') { %>
   <div class="row">
     <form method="post" action="<%= base %>/pause"><button class="btn" type="submit">Tạm dừng</button></form>

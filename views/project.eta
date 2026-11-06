@@ -4,7 +4,7 @@
 <section class="card"><h3>Yêu cầu</h3>
 <% if (it.requests.length === 0) { %><p class="muted">Chưa có yêu cầu nào.</p><% } else { %>
 <div class="table-wrap"><table class="list"><thead><tr><th>Mã</th><th>Tiêu đề</th><th>Giai đoạn</th><th>Trạng thái</th></tr></thead><tbody>
-<% for (const r of it.requests) { %><tr><td><a href="/requests/<%= r.id %>"><%= r.code %></a></td><td><%= r.title %></td><td><%= it.STAGE_LABELS[r.stage] %></td><td><span class="badge st-<%= r.status %>"><%= it.STATUS_LABELS[r.status] %></span></td></tr><% } %>
+<% for (const r of it.requests) { %><tr><td><a href="/requests/<%= r.id %>"><%= r.code %></a></td><td><%= r.title %></td><td><%= it.STAGE_LABELS[r.stage] || r.stage %></td><td><span class="badge st-<%= r.status %>"><%= it.STATUS_LABELS[r.status] || r.status %></span></td></tr><% } %>
 </tbody></table></div>
 <% } %></section>
 <section class="card"><h3>Thành viên và vai trò</h3>

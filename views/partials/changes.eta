@@ -12,7 +12,7 @@
       <% if (c.attachments.length) { %><div class="muted">Tệp: <%= c.attachments.map(a => a.filename).join(', ') %></div><% } %></td>
     <td><%= it.CR_KIND_LABELS[c.kind] %></td>
     <td><%= it.CR_SOURCE_LABELS[c.source] %></td>
-    <td><span class="badge st-cr-<%= c.status %>"><%= it.CR_STATUS_LABELS[c.status] %></span></td>
+    <td><span class="badge st-cr-<%= c.status %>"><%= it.CR_STATUS_LABELS[c.status] || c.status %></span></td>
     <td><% if (c.baselineTo !== null) { %>v<%= c.baselineFrom %> → v<%= c.baselineTo %><% } %></td>
     <td><% if (c.decidedAt) { %><%= it.fmtTime(c.decidedAt) %><% } %><% if (c.decisionNote) { %><div class="muted"><%= c.decisionNote %></div><% } %></td>
     <td>
