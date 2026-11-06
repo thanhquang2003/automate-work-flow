@@ -38,7 +38,8 @@ export async function webEnv() {
   const runner = { ...seats.runner, login: () => { const l = new FakeLogin(); logins.push(l); return l; } };
   const pipeline = new Pipeline(cfg, e.repo, { seatRunner: runner });
   const svc = wireProjects({ cfg, repo: e.repo, pipeline, systemOps: e.systemOps });
-  const app = await buildServer(cfg, { repo: e.repo, pipeline, seatRunner: runner, projects: svc });
+  const routes: string[] = [];
+  const app = await buildServer(cfg, { repo: e.repo, pipeline, seatRunner: runner, projects: svc, routeLog: (m, u) => { routes.push(`${m} ${u}`); } });
   apps.push(app);
   const cookie = (userId: number) => `devflow_sid=${signSession(cfg.secretKey, userId)}`;
   const get = (userId: number, url: string) => app.inject({ method: 'GET', url, headers: { cookie: cookie(userId), host: 'localhost:3000' } });
@@ -47,8 +48,9 @@ export async function webEnv() {
   const addMemberVia = async () => {
     const u = mkUser(e.repo, 'extra@x.com');
     const cur = e.repo.listProjectMembers(f.p.id).map(m => ({ userId: m.userId, roles: m.roles }));
+    if (cur.some(m => m.userId === u.id)) return u;
     await svc.setMembers(f.p.id, [...cur, { userId: u.id, roles: ['DEV'] }], e.pm.id);
     return u;
   };
-  return { ...e, ...f, addMemberVia, cfg, seats, logins, pipeline, svc, app, get, post, cookie, mkUser: (n: string, o: Parameters<typeof mkUser>[2] = {}) => mkUser(e.repo, `${n}@x.com`, o), seatState: (id: number, s: SeatState) => seats.state.set(id, s) };
+  return { ...e, ...f, addMemberVia, routes, cfg, seats, logins, pipeline, svc, app, get, post, cookie, mkUser: (n: string, o: Parameters<typeof mkUser>[2] = {}) => mkUser(e.repo, `${n}@x.com`, o), seatState: (id: number, s: SeatState) => seats.state.set(id, s) };
 }

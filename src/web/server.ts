@@ -29,6 +29,8 @@ export interface WebDeps {
   seatRunner?: SeatRunner;
   /** v3 (Task 6): project service joined to the pipeline (index.ts). Built here with no-op system ops when absent. */
   projects?: ProjectService;
+  /** Tests only: called for every route registered (method, url), to prove a permission table covers all writes. */
+  routeLog?: (method: string, url: string) => void;
 }
 
 const PUBLIC_PREFIXES = ['/static/', '/s/'];
@@ -43,6 +45,7 @@ export async function buildServer(cfg: Config, deps: WebDeps): Promise<FastifyIn
   await app.register(fastifyStatic, { root: `${ROOT}public`, prefix: '/static/' });
 
   const server = cfg.mode === 'server';
+  if (deps.routeLog) app.addHook('onRoute', r => { for (const m of ([] as string[]).concat(r.method)) deps.routeLog!(m, r.url); });
 
   app.addHook('onRequest', async (req, reply) => {
     const path = req.url.split('?')[0]!;

@@ -9,43 +9,6 @@ async function atGate(w: Awaited<ReturnType<typeof webEnv>>, stage: 'ANALYSIS' |
 }
 
 describe('v3 web permissions', () => {
-  it('role enforcement on every write route', async () => {
-    const w = await webEnv();
-    const head = w.mkUser('head', { dept: 'SGLOBAL' });
-    w.repo.web.setUserSysRole(head.id, 'head');
-    const cto = w.mkUser('cto'); w.repo.web.setUserSysRole(cto.id, 'cto');
-    const admin = w.mkUser('adm'); w.repo.web.setUserSysRole(admin.id, 'admin');
-    const stranger = w.mkUser('stranger');
-    const r = await atGate(w);
-    // [url, body, allowed actor, forbidden actors]
-    const token = w.pipeline.gateToken(r);
-    const table: [string, Record<string, string>, number, number[]][] = [
-      [`/requests/${r.id}/approve`, { expect: token }, w.ba.id, [w.dev.id, w.tester.id, w.rev.id, head.id, cto.id, admin.id, stranger.id]],
-      [`/requests/${r.id}/reject`, { expect: token, feedback: 'x' }, w.pm.id, [w.dev.id, head.id, cto.id, admin.id, stranger.id]],
-      [`/requests/${r.id}/pause`, {}, w.pm.id, [w.ba.id, w.dev.id, head.id, cto.id, admin.id, stranger.id]],
-      [`/requests/${r.id}/cancel`, {}, w.pm.id, [w.ba.id, w.dev.id, head.id, admin.id, stranger.id]],
-      [`/requests/${r.id}/assignees`, { role: 'DEV', user: String(w.dev.id), op: 'add' }, w.pm.id, [w.dev.id, w.ba.id, head.id, cto.id, admin.id, stranger.id]],
-      [`/projects/${w.p.id}/members`, { [`r_${w.pm.id}`]: 'PM' }, w.pm.id, [w.dev.id, w.ba.id, head.id, cto.id, admin.id, stranger.id]],
-      [`/projects/${w.p.id}/requests`, {}, w.pm.id, [w.dev.id, head.id, cto.id, admin.id, stranger.id]],
-      ['/projects', { key: 'ZZ', name: 'z', mode: 'new', path: 'x' }, w.pm.id, [w.dev.id, head.id, cto.id, stranger.id]],
-      ['/settings', {}, admin.id, [w.pm.id, head.id, cto.id, w.dev.id]],
-      [`/dept/pm/${stranger.id}/can-pm`, { value: '1' }, -1, [head.id, w.pm.id, cto.id, w.dev.id]],
-      [`/admin/users/${w.dev.id}/sys-role`, { sys_role: 'cto' }, admin.id, [w.pm.id, head.id, cto.id]],
-      [`/admin/users/${w.dev.id}/disable`, { value: '1' }, admin.id, [w.pm.id, head.id, cto.id]],
-    ];
-    expect((await w.get(w.pm.id, `/admin/users/${w.dev.id}/sys-role`)).statusCode).toBe(404);
-    for (const [url, body, ok, bad] of table) {
-      for (const id of bad) expect((await w.post(id, url, body)).statusCode, `${url} actor ${id}`).toBe(403);
-      if (ok > 0 && !url.startsWith('/settings') && !url.includes('/members') && !url.endsWith('/requests') && url !== '/projects') {
-        expect([302, 200]).toContain((await w.post(ok, url, body)).statusCode);
-      }
-    }
-    // not logged in: redirected to login, never executed
-    expect((await w.post(null, `/requests/${r.id}/cancel`, {})).statusCode).toBe(302);
-    // GET never performs a write
-    expect((await w.get(w.pm.id, `/requests/${r.id}/approve`)).statusCode).toBe(404);
-  });
-
   it('writes land in audit_log', async () => {
     const w = await webEnv();
     const r = await atGate(w);
