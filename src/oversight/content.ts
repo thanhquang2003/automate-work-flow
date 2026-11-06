@@ -34,7 +34,7 @@ export type ContentResult =
 // ---- secret paths ----
 
 const SECRET_NAME = [
-  /^\.env/, /\.(?:pem|key|p12|pfx|jks|keystore)(?:\.|$)/, /^id_(rsa|dsa|ecdsa|ed25519)/, /^credentials/, /^secrets?\.(?:ya?ml|json)$/,
+  /^\.env/, /\.(?:pem|key|p12|pfx|jks|keystore|tfvars)(?:[^a-z0-9]|$)/, /^terraform\.tfstate/, /^\.vault-token/, /^id_(rsa|dsa|ecdsa|ed25519)/, /^credentials/, /^secrets?\.(?:ya?ml|json)$/,
   /^\.npmrc$/, /^\.netrc$/, /^\.pgpass$/, /^\.pypirc$/, /^\.htpasswd$/, /^\.git-credentials/,
   /^\.claude$/, /^\.git$/, /^\.ssh$/, /^\.aws$/, /^\.gnupg$/, /^\.docker$/, /^\.kube$/,
 ];
@@ -126,25 +126,70 @@ const CODE_RE = /^[A-Za-z0-9._-]{1,40}$/;
 const LOG_RE = /^[A-Za-z0-9._-]{1,120}\.log$/;
 
 /**
- * Values of credential-looking keys (`GITLAB_TOKEN=`, `"accessToken":`, `password:`, `pwd=`, `Authorization:` ...)
- * are masked and the key name stays visible; basic-auth URLs, Bearer values, known token prefixes and long
- * hex/base64 runs are masked wherever they appear. Every quantifier is bounded so a hostile 1 MB line cannot
- * make the matching quadratic.
+ * Credentials in log text are masked, the key/flag name stays visible: values of credential-looking keys
+ * (`GITLAB_TOKEN=`, `"accessToken":`, `password:`, `pwd=` ...) and flags (`--token x`, `-p x`), Authorization,
+ * Cookie and Set-Cookie headers, Bearer/Basic values (also after a key), basic-auth URLs (up to the LAST `@`
+ * before the host), PEM private-key bodies (several lines), JWTs, known token prefixes and long hex/base64 runs,
+ * and the line after a bare `token:`. Every quantifier is bounded so a hostile 1 MB line cannot make the matching
+ * quadratic.
  */
 const MASK = '[đã ẩn]';
-const KEY_VALUE = /((?:token|passw(?:or)?d|pwd|secret|api[_-]?key|private[_-]?key|credential|cookie)[\w.-]{0,40}["']?[ \t]{0,20}[:=][ \t]{0,20})("[^"\n]{0,2000}"|'[^'\n]{0,2000}'|[^\s,;&"']{1,2000})/gi;
-const AUTH_HEADER = /\b((?:proxy-)?authorization|auth)[ \t]{0,5}[:=][ \t]{0,5}[^\n]{0,2000}/gi;
+const QUOTED = `"(?:[^"\\\\\\n]|\\\\.){0,2000}"|'(?:[^'\\\\\\n]|\\\\.){0,2000}'`;
+const STRONG = 'passw(?:or)?d|pwd|passphrase|secret';
+const WEAK = 'token|api[ _-]?key|private[_-]?key|credential';
+/** password/secret values may be several words: everything to the end of the line unless quoted. */
+const KV_STRONG = new RegExp(`((?:${STRONG})[\\w.-]{0,40}["']?[ \\t]{0,20}[:=][ \\t]{0,20})(${QUOTED}|[^\\n]{1,2000})`, 'gi');
+const KV_WEAK = new RegExp(`((?:${WEAK})[\\w.-]{0,40}["']?[ \\t]{0,20}[:=][ \\t]{0,20})(${QUOTED}|[^\\s,;&"']{1,2000})`, 'gi');
+/** `password is hunter2`, `secret was x`, `passwd hunter2`, `apikey abc12` (no separator). */
+const KV_WORDS = new RegExp(`\\b((?:${STRONG}|api[ _-]?key)[ \\t]{1,5}(?:is|was|=)[ \\t]{1,5})([^\\s,;]{1,2000})|\\b((?:passwd|pwd|apikey)[ \\t]{1,5})([^\\s,;]{1,2000})`, 'gi');
+const FLAG = new RegExp(`(^|[ \\t])((?:--[\\w-]{0,30}(?:token|passw(?:or)?d|pwd|secret|api-?key|credential)[\\w-]{0,30})|-p)(=|[ \\t]{1,20})(${QUOTED}|\\S{1,2000})`, 'gi');
+const AUTH_HEADER = /\b((?:proxy-)?authorization|auth|set-cookie|cookie)[ \t]{0,5}[:=][ \t]{0,5}[^\n]{1,2000}/gi;
+const SCHEME_VALUE = /\b(bearer|basic)[ \t]{1,5}[A-Za-z0-9._~+/=-]{4,2000}/gi;
+const URL_CREDS = /(\/\/[^/\s:@]{1,100}:)[^/\s]{1,200}@/g;
+const KEY_ONLY_LINE = new RegExp(`(?:${STRONG}|${WEAK})[\\w.-]{0,40}["']?[ \\t]{0,20}[:=][ \\t]{0,20}$`, 'i');
+const PEM_BEGIN = /-----BEGIN [A-Z ]{0,30}PRIVATE KEY-----/;
+const PEM_END = /-----END [A-Z ]{0,30}PRIVATE KEY-----/;
 const INLINE: RegExp[] = [
-  /\bbearer[ \t]{1,5}[^\s"']{1,2000}/gi, /\bsk-[A-Za-z0-9_-]{10,}/g, /\bgh[pousr]_[A-Za-z0-9]{10,}/g, /\bglpat-[A-Za-z0-9_-]{10,}/g,
+  /\beyJ[A-Za-z0-9_-]{0,300}\.[A-Za-z0-9_-]{1,300}\.[A-Za-z0-9_-]{1,300}/g,
+  /\bsk-[A-Za-z0-9_-]{10,}/g, /\bgh[pousr]_[A-Za-z0-9]{10,}/g, /\bglpat-[A-Za-z0-9_-]{10,}/g,
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g, /\b[0-9a-fA-F]{32,}\b/g, /[A-Za-z0-9+/_=-]{40,}/g,
 ];
+
+function redactLine(l: string): string {
+  let o = l.replace(AUTH_HEADER, (_m, k: string) => `${k}: ${MASK}`);
+  o = o.replace(SCHEME_VALUE, `$1 ${MASK}`);
+  o = o.replace(URL_CREDS, `$1${MASK}@`);
+  o = o.replace(FLAG, (_m, pre: string, flag: string, sep: string) => `${pre}${flag}${sep}${MASK}`);
+  o = o.replace(KV_STRONG, `$1${MASK}`);
+  o = o.replace(KV_WEAK, `$1${MASK}`);
+  o = o.replace(KV_WORDS, (_m, a?: string, _b?: string, c?: string) => `${a ?? c}${MASK}`);
+  return INLINE.reduce((x, re) => x.replace(re, MASK), o);
+}
+
 export function redactLog(text: string): string {
-  return text.split('\n').map(l => {
-    let o = l.replace(AUTH_HEADER, (_m, k: string) => `${k}: ${MASK}`);
-    o = o.replace(/(\/\/[^/\s:@]{1,100}:)[^@\s]{1,200}@/g, `$1${MASK}@`);
-    o = o.replace(KEY_VALUE, `$1${MASK}`);
-    return INLINE.reduce((x, re) => x.replace(re, MASK), o);
-  }).join('\n');
+  const out: string[] = [];
+  let inPem = false;
+  let valueNext = false;
+  for (const l of text.split('\n')) {
+    if (inPem) {
+      const e = PEM_END.exec(l);
+      if (e) { inPem = false; out.push(redactLine(l.slice(e.index))); }
+      continue; // the key body, including short last lines, is dropped
+    }
+    const b = PEM_BEGIN.exec(l);
+    if (b) {
+      const head = l.slice(0, b.index + b[0].length);
+      const rest = l.slice(b.index + b[0].length);
+      const e = PEM_END.exec(rest);
+      if (e) out.push(`${redactLine(head)} ${MASK} ${redactLine(rest.slice(e.index))}`);
+      else { inPem = true; out.push(`${redactLine(head)} ${MASK}`); }
+      continue;
+    }
+    if (valueNext && l.trim() !== '') { out.push(`${l.slice(0, l.length - l.trimStart().length)}${MASK}`); valueNext = false; continue; }
+    valueNext = KEY_ONLY_LINE.test(l);
+    out.push(redactLine(l));
+  }
+  return out.join('\n');
 }
 
 function logDir(project: ProjectRow, code: string, ctx: ContentCtx): string {

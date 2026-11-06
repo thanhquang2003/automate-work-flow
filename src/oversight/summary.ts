@@ -91,6 +91,8 @@ export function listBlockers(repo: Repo, projects: ProjectRow[]): Blocker[] {
 /**
  * A reject approval exists for the current stage (any part, DEVELOP task parts included) and nothing has answered it:
  * no later approve for the same part and no stage run started after it (a rerun clears the stage's approvals).
+ * Approvals and stage runs have no common sequence, so a run that started in the same millisecond as the reject is
+ * not counted as an answer: the conservative reading keeps the blocker visible.
  */
 function hasPendingReject(repo: Repo, r: RequestRow): boolean {
   const last = new Map<string, { id: number; decision: string; at: number }>();

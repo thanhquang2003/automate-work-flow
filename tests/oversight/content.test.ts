@@ -47,7 +47,7 @@ describe('readProjectFile', () => {
 
   it('secret files hidden (.env, *.pem, *.key, .claude/, .git/config)', async () => {
     const e = await env();
-    for (const p of ['.env', '.env.production', 'server.pem', 'server.KEY', '.claude/settings.json', '.claude', '.git/config', '.git', 'conf/.ssh/id_rsa', 'conf/.ssh', 'CREDENTIALS.json', '.npmrc', '.netrc', 'x/id_rsa.pub', 'a.p12', 'a.pfx', '.env.', '.env ', 'key.pem.bak', 'x.KEY.old', '.git-credentials', '.pypirc', '.htpasswd', '.docker/config.json', '.kube/config', 'secrets.yaml', 'Secrets.JSON', 'config/secrets.yml', 'a/.Git/config.']) {
+    for (const p of ['.env', '.env.production', 'server.pem', 'server.KEY', '.claude/settings.json', '.claude', '.git/config', '.git', 'conf/.ssh/id_rsa', 'conf/.ssh', 'CREDENTIALS.json', '.npmrc', '.netrc', 'x/id_rsa.pub', 'a.p12', 'a.pfx', '.env.', '.env ', 'key.pem.bak', 'x.KEY.old', '.git-credentials', '.pypirc', '.htpasswd', '.docker/config.json', '.kube/config', 'secrets.yaml', 'Secrets.JSON', 'config/secrets.yml', 'a/.Git/config.', 'key.pem~', 'a.pem_bak', 'terraform.tfstate', 'terraform.tfstate.backup', '.vault-token', 'prod.tfvars', 'x/prod.auto.tfvars']) {
       expect(await code(readProjectFile(e.p, undefined, p, e.ctx)), p).toBe('forbidden');
     }
     const root = await readProjectFile(e.p, undefined, '', e.ctx);
@@ -58,6 +58,7 @@ describe('readProjectFile', () => {
     expect(isSecretPath('a/.Env.local')).toBe(true);
     expect(isSecretPath('src/environment.ts')).toBe(false);
     expect(isSecretPath('docs/keyboard.md')).toBe(false);
+    expect(isSecretPath('src/a.pemx')).toBe(false);
     expect(isSecretPath('src/secrets-manager.ts')).toBe(false);
   });
 
@@ -178,6 +179,26 @@ describe('redactLog', () => {
       ['Authorization: Bearer abc.def', 'Authorization:', 'abc.def'],
       ['auth: basic dXNlcjpw', 'auth:', 'dXNlcjpw'],
       ['curl -H "Authorization: Bearer zzz"', 'Authorization:', 'zzz'],
+      ['token: Bearer abc123def', 'token:', 'abc123def'],
+      ['X-Token: Bearer abc123', 'X-Token:', 'abc123'],
+      ['--token abc12', '--token', 'abc12'],
+      ['--token=abc12', '--token=', 'abc12'],
+      ['run --password hunter2 now', '--password', 'hunter2'],
+      ['mysql -u root -p hunter2', '-p', 'hunter2'],
+      ['--api-key abc12', '--api-key', 'abc12'],
+      ['--secret x9y8z7', '--secret', 'x9y8z7'],
+      ['{"token":"a\\"b c d"}', '"token"', 'c d'],
+      ['password: correct horse battery', 'password:', 'horse'],
+      ['secret = my long phrase here', 'secret =', 'phrase'],
+      ['password is hunter2', 'password is', 'hunter2'],
+      ['passwd hunter2', 'passwd', 'hunter2'],
+      ['apikey abc12', 'apikey', 'abc12'],
+      ['api key: abc12', 'api key:', 'abc12'],
+      ['Cookie: a=1; sid=zzz999; theme=dark', 'Cookie:', 'zzz999'],
+      ['Set-Cookie: sid=zzz999; Path=/; HttpOnly', 'Set-Cookie:', 'zzz999'],
+      ['mysql://root:p@ss@host/db', 'mysql://root:', 'p@ss'],
+      ['see eyJhbGciOi.eyJzdWIiOiIx.c2ln here', 'see', 'eyJzdWIiOiIx'],
+      ['eyJh.eyJz.s', '', 'eyJz'],
     ];
     for (const [input, key, secret] of cases) {
       const out = redactLog(input);
@@ -187,8 +208,18 @@ describe('redactLog', () => {
     }
   });
 
+  it('masks multi-line secrets: value on the next line and PEM blocks', () => {
+    expect(redactLog('token:\n  abc12\nnext line')).toBe('token:\n  [đã ẩn]\nnext line');
+    expect(redactLog('password: \nhunter2\nok')).not.toContain('hunter2');
+    const pem = ['before', '-----BEGIN RSA PRIVATE KEY-----', 'MIIEowIBAAKCAQEA1234', 'abcd', '-----END RSA PRIVATE KEY-----', 'after'].join('\n');
+    const out = redactLog(pem);
+    expect(out).toBe(['before', '-----BEGIN RSA PRIVATE KEY----- [đã ẩn]', '-----END RSA PRIVATE KEY-----', 'after'].join('\n'));
+    expect(redactLog('{"k":"-----BEGIN PRIVATE KEY-----\\nMIIE\\nxx\\n-----END PRIVATE KEY-----\\n"}')).not.toContain('MIIE');
+    expect(redactLog('-----BEGIN PRIVATE KEY-----\nMIIE\nlast')).not.toContain('MIIE'); // unterminated: the rest is dropped
+  });
+
   it('keeps ordinary text readable', () => {
-    const log = ['the tokenizer splits words', 'tokens used 1234 of 5000', 'Reading src/auth/login.ts', 'author: Bob', 'secretary meeting at 9', 'build ok'].join('\n');
+    const log = ['tokenizer ran', 'tokens used: 5000', 'author: bob', 'the tokenizer splits words', 'tokens used 1234 of 5000', 'Reading src/auth/login.ts', 'author: Bob', 'secretary meeting at 9', 'build ok'].join('\n');
     expect(redactLog(log)).toBe(log);
     expect(redactLog('line1\npassword=x\nline3')).toBe('line1\npassword=[đã ẩn]\nline3');
   });
@@ -197,6 +228,8 @@ describe('redactLog', () => {
     const MB = 1024 * 1024;
     const lines = [
       'a'.repeat(MB), 'token'.repeat(MB / 5), 'token '.repeat(MB / 6), `token${' '.repeat(MB)}x`, '//a:'.repeat(MB / 4), `//u:${'p'.repeat(MB)}`,
+      '--token '.repeat(MB / 8), '-p '.repeat(MB / 3), 'password is '.repeat(MB / 12), 'cookie:'.repeat(MB / 7), 'eyJ'.repeat(MB / 3), `eyJ${'a'.repeat(MB)}`,
+      '-----BEGIN PRIVATE KEY----- '.repeat(MB / 28), '//a:'.repeat(MB / 4) + '@', 'token: '.repeat(MB / 8), `password:${' '.repeat(MB)}`, `"token":"${'\\"'.repeat(MB / 2)}`,
       'Bearer '.repeat(MB / 7), `bearer${' '.repeat(MB)}`, 'auth='.repeat(MB / 5), 'a1'.repeat(MB / 2), `${'f'.repeat(MB)}g`, 'password='.repeat(MB / 9),
     ];
     for (const l of lines) {

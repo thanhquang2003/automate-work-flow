@@ -121,18 +121,33 @@ describe('oversight data', () => {
     const f = await newReq(w, 'REQ-F'); w.repo.updateRequest(f.id, { stage: 'DESIGN', status: 'awaiting_seat' });
     w.repo.createStageRun(f.id, 'DESIGN'); await sleep(5);
     w.repo.addApproval({ requestId: f.id, stage: 'DESIGN', userId: w.se.id, decision: 'reject' });
-    // lingering DEVELOP task-part reject while other tasks run
-    const g = await newReq(w, 'REQ-G'); w.repo.updateRequest(g.id, { stage: 'DEVELOP', status: 'running' });
-    w.repo.createStageRun(g.id, 'DEVELOP'); await sleep(5);
-    w.repo.addApproval({ requestId: g.id, stage: 'DEVELOP', part: 'T-01', userId: w.rev.id, decision: 'reject' });
+    // PLANNING part rejects (the only parts the pipeline knows): 'tasks' with nothing after it, and 'testcases'
+    const g = await newReq(w, 'REQ-G'); w.repo.updateRequest(g.id, { stage: 'PLANNING', status: 'running' });
+    w.repo.createStageRun(g.id, 'PLANNING'); await sleep(5);
+    w.repo.addApproval({ requestId: g.id, stage: 'PLANNING', part: 'tasks', userId: w.pm.id, decision: 'reject' });
+    const l = await newReq(w, 'REQ-L'); w.repo.updateRequest(l.id, { stage: 'PLANNING', status: 'paused' });
+    w.repo.createStageRun(l.id, 'PLANNING'); await sleep(5);
+    w.repo.addApproval({ requestId: l.id, stage: 'PLANNING', part: 'testcases', userId: w.pm.id, decision: 'reject' });
     // answered rejects are not blockers: rerun started after it / approved afterwards
     const h = await newReq(w, 'REQ-H'); w.repo.updateRequest(h.id, { stage: 'DESIGN', status: 'running' });
     w.repo.addApproval({ requestId: h.id, stage: 'DESIGN', userId: w.se.id, decision: 'reject' }); await sleep(5);
     w.repo.createStageRun(h.id, 'DESIGN');
-    const i = await newReq(w, 'REQ-I'); w.repo.updateRequest(i.id, { stage: 'DEVELOP', status: 'running' });
-    w.repo.createStageRun(i.id, 'DEVELOP'); await sleep(5);
-    w.repo.addApproval({ requestId: i.id, stage: 'DEVELOP', part: 'T-01', userId: w.rev.id, decision: 'reject' });
-    w.repo.addApproval({ requestId: i.id, stage: 'DEVELOP', part: 'T-01', userId: w.rev.id, decision: 'approve' });
+    // 'tasks' rejected, then approved again: answered
+    const i = await newReq(w, 'REQ-I'); w.repo.updateRequest(i.id, { stage: 'PLANNING', status: 'running' });
+    w.repo.createStageRun(i.id, 'PLANNING'); await sleep(5);
+    w.repo.addApproval({ requestId: i.id, stage: 'PLANNING', part: 'tasks', userId: w.pm.id, decision: 'reject' });
+    w.repo.addApproval({ requestId: i.id, stage: 'PLANNING', part: 'tasks', userId: w.pm.id, decision: 'approve' });
+    // same millisecond: approvals and stage runs share no sequence, so the tie keeps the blocker visible
+    const m = await newReq(w, 'REQ-M'); w.repo.updateRequest(m.id, { stage: 'DESIGN', status: 'running' });
+    const mr = w.repo.createStageRun(m.id, 'DESIGN');
+    const ma = w.repo.addApproval({ requestId: m.id, stage: 'DESIGN', userId: w.se.id, decision: 'reject' });
+    w.repo.db.prepare('update approvals set at=? where id=?').run(5000, ma.id);
+    w.repo.db.prepare('update stage_runs set started_at=? where id=?').run(5000, mr.id);
+    const n = await newReq(w, 'REQ-N'); w.repo.updateRequest(n.id, { stage: 'DESIGN', status: 'running' });
+    const nr = w.repo.createStageRun(n.id, 'DESIGN');
+    const na = w.repo.addApproval({ requestId: n.id, stage: 'DESIGN', userId: w.se.id, decision: 'reject' });
+    w.repo.db.prepare('update approvals set at=? where id=?').run(5000, na.id);
+    w.repo.db.prepare('update stage_runs set started_at=? where id=?').run(5001, nr.id);
     // bug at the cap through needs_human, and a customer-proposed CR
     const j = await newReq(w, 'REQ-J'); w.repo.updateRequest(j.id, { stage: 'BUGFIX', status: 'running' });
     w.repo.upsertBug(j.id, { tcId: 'TC-88', gitlabIid: null, fixAttempts: 1, status: 'needs_human' });
@@ -140,13 +155,13 @@ describe('oversight data', () => {
     w.repo.createChangeRequest(k.id, { title: 'p', description: 'd', kind: 'add', source: 'customer', status: 'proposed' });
     const ok = await newReq(w, 'REQ-OK'); w.repo.updateRequest(ok.id, { stage: 'ANALYSIS', status: 'running' });
     const body = (await w.get(w.cto.id, '/oversight/blockers')).body;
-    for (const [code, label] of [['REQ-A', 'Chờ người phụ trách kết nối Claude'], ['REQ-B', 'Lỗi'], ['REQ-C', 'Thay đổi yêu cầu chờ PM quyết định'], ['REQ-D', 'Bug đã sửa quá số lần cho phép'], ['REQ-E', 'Chờ khách hàng trả lời'], ['REQ-F', 'Bị từ chối, đang chờ sửa'], ['REQ-G', 'Bị từ chối, đang chờ sửa'], ['REQ-J', 'Bug đã sửa quá số lần cho phép'], ['REQ-K', 'Thay đổi yêu cầu chờ PM quyết định']] as const) {
+    for (const [code, label] of [['REQ-A', 'Chờ người phụ trách kết nối Claude'], ['REQ-B', 'Lỗi'], ['REQ-C', 'Thay đổi yêu cầu chờ PM quyết định'], ['REQ-D', 'Bug đã sửa quá số lần cho phép'], ['REQ-E', 'Chờ khách hàng trả lời'], ['REQ-F', 'Bị từ chối, đang chờ sửa'], ['REQ-G', 'Bị từ chối, đang chờ sửa'], ['REQ-L', 'Bị từ chối, đang chờ sửa'], ['REQ-M', 'Bị từ chối, đang chờ sửa'], ['REQ-J', 'Bug đã sửa quá số lần cho phép'], ['REQ-K', 'Thay đổi yêu cầu chờ PM quyết định']] as const) {
       const rows = body.split('<tr>').filter(r => r.includes(`<td>${code}</td>`));
       expect(rows.some(r => r.includes(label)), `${code}: ${label}`).toBe(true);
     }
     expect(body).toContain('TC-77');
     expect(body).toContain('TC-88');
-    for (const c of ['REQ-H', 'REQ-I']) expect(body.split('<tr>').some(r => r.includes(`<td>${c}</td>`)), c).toBe(false);
+    for (const c of ['REQ-H', 'REQ-I', 'REQ-N']) expect(body.split('<tr>').some(r => r.includes(`<td>${c}</td>`)), c).toBe(false);
     expect(body).not.toContain('<td>REQ-OK</td>');
     // scoped: head of the other department sees none of them
     expect((await w.get(w.headSg.id, '/oversight/blockers')).body).not.toContain('REQ-A');
