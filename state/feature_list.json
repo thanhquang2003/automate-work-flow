@@ -141,7 +141,7 @@
         "owner:deploy v3 on the VPS"
       ],
       "complexity": "large",
-      "status": "planned",
+      "status": "in-progress",
       "layer": "Full-stack",
       "dependencies": [
         "FEAT-006",
@@ -149,7 +149,7 @@
       ],
       "evidence": null,
       "created": "2026-11-05",
-      "updated": "2026-11-05"
+      "updated": "2026-11-06"
     }
   ]
 }
