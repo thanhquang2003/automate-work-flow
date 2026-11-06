@@ -23,7 +23,8 @@ export class Worker {
   /** Claim due jobs up to the concurrency limit and start them. Returns once they are launched (see idle()). */
   async tick(): Promise<void> {
     while (this.running.size < Math.max(1, this.cfg.maxConcurrentJobs)) {
-      const job = this.repo.claimNextJob(this.pipeline.now());
+      // Per-seat concurrency (SEAT_CONCURRENCY) and per-seat rate-limit pauses: a job whose seat is busy waits.
+      const job = this.repo.claimNextJob(this.pipeline.now(), j => this.pipeline.canStart(j));
       if (!job) break;
       const p: Promise<void> = this.pipeline.runJob(job)
         .catch(e => { this.repo.failJob(job.id, e instanceof Error ? e.message : String(e)); })

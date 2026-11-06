@@ -22,10 +22,11 @@ async function main(): Promise<void> {
   const repo = new Repo(openDb(join(cfg.dataDir, 'devflow.db')));
   // Settings stored in the DB (Cài đặt page) override env; applied onto the shared cfg for new jobs.
   applySettings(cfg, repo);
-  const pipeline = new Pipeline(cfg, repo, { makeGitLab: req => gitlabFor(cfg, repo, req) });
+  const seatRunner = createSeatRunner(cfg);
+  // Server mode: every Claude run goes through the responsible person's seat (SudoSeatRunner).
+  const pipeline = new Pipeline(cfg, repo, { makeGitLab: req => gitlabFor(cfg, repo, req), seatRunner });
   registerAllStages();
   const systemOps: SystemOps = cfg.mode === 'server' ? new SudoSystemOps({ dfctlPath: cfg.dfctlPath }) : new NoopSystemOps();
-  const seatRunner = createSeatRunner(cfg);
   if (cfg.mode === 'server') {
     // Heal Linux groups/members left behind by a failed ensureProjectGroup/setMembers (idempotent).
     const rec = await reconcileProjects(repo, systemOps);

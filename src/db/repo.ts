@@ -270,14 +270,19 @@ export class Repo {
     return (requestId ? this.all('select * from jobs where request_id=? order by id', requestId) : this.all('select * from jobs order by id')).map(toJob);
   }
   /** Atomically claim the oldest due job. Paused jobs whose run_after has passed are reclaimable (intended: pauseJob sets run_after). */
-  claimNextJob(now: number): JobRow | undefined {
+  claimNextJob(now: number, accept?: (job: JobRow) => boolean): JobRow | undefined {
     return this.tx(() => {
-      const r = this.one("select * from jobs where status in ('queued','paused') and run_after<=? order by run_after, id limit 1", now);
+      // `accept` (per-seat concurrency / per-seat rate limit) may pass over due jobs; it sees them oldest first.
+      const rows = accept
+        ? this.all("select * from jobs where status in ('queued','paused') and run_after<=? order by run_after, id", now)
+        : this.all("select * from jobs where status in ('queued','paused') and run_after<=? order by run_after, id limit 1", now);
+      const r = rows.find(x => !accept || accept(toJob(x)));
       if (!r) return undefined;
       this.run("update jobs set status='running', attempts=attempts+1 where id=?", r.id);
-      return this.getJob(r.id);
+      return this.getJob(Number(r.id));
     });
   }
+  setJobPayload(id: number, payload: unknown): void { this.run('update jobs set payload=? where id=?', json(payload ?? {}), id); }
   setJobSeat(id: number, seatUserId: number | null): void { this.run('update jobs set seat_user_id=? where id=?', seatUserId, id); }
   finishJob(id: number): void { this.run("update jobs set status='done', last_error=null where id=?", id); }
   failJob(id: number, error: string): void { this.run("update jobs set status='failed', last_error=? where id=?", error, id); }
