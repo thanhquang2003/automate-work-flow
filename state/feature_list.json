@@ -123,13 +123,13 @@
         "CTO:see progress blockers and project content read-only"
       ],
       "complexity": "large",
-      "status": "in-progress",
+      "status": "done",
       "layer": "Full-stack",
       "dependencies": [
         "FEAT-003",
         "FEAT-005"
       ],
-      "evidence": null,
+      "evidence": "commits b074be5,ff49040,a9aab19,e451b24,d65926e on feat/v3-multiuser; gate green (560 tests); task review + 3 fix rounds (redaction hardening); last round verified by tests only per controller ruling",
       "created": "2026-11-05",
       "updated": "2026-11-06"
     },
