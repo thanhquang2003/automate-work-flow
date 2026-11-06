@@ -1,5 +1,5 @@
-import { safeWriteFile } from '../safe-fs.js';
-import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
+import { safeMkdirp, safeWriteFile } from '../safe-fs.js';
+import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
   CR_REENTER_STAGES, ImpactOut, STAGE_LABELS, type ChangeRequestRow, type CrKind, type ImpactOutT, type Question, type RequestStatus, type Stage,
@@ -14,7 +14,7 @@ import {
   answeredQuestions, answersPath, assumptionsPath, changeDir, codebaseMapPath, designFile, ensureOnBranch, integrationBranch,
   latestArtifact, missingHeadings, promptExtras, pushIfRemote,
 } from './common.js';
-import { safeFileName, uniqueName } from './intake.js';
+import { attachmentName, readAttachment, uniqueName } from './intake.js';
 
 /** H2 sections of impact.md that the decision screen relies on (see prompts/change-analyst.md). */
 const IMPACT_HEADINGS: [number, string][] = [
@@ -63,15 +63,16 @@ function copyCrAttachments(ctx: StageContext, crId: string): string[] {
   const atts = ctx.repo.listCrAttachments(ctx.req.id, crId);
   if (!atts.length) return [];
   const dir = join(ctx.ws.inputsDir, 'changes', crId);
-  mkdirSync(dir, { recursive: true });
+  safeMkdirp(dir, ctx.ws.trustRoot);
   const used = new Set<string>();
   const out: string[] = [];
   for (const a of atts) {
-    const name = uniqueName(safeFileName(a.filename), used);
+    const name = uniqueName(attachmentName(a.filename), used);
     const dest = join(dir, name);
     if (resolve(a.path) !== resolve(dest)) {
-      if (!existsSync(a.path)) { ctx.log(`Không tìm thấy file đính kèm ${a.filename} của ${crId}`, 'warn'); continue; }
-      safeWriteFile(dest, readFileSync(a.path));
+      const data = readAttachment(ctx, a.path, `${a.filename} của ${crId}`);
+      if (!data) continue;
+      safeWriteFile(dest, data, ctx.ws.trustRoot);
     }
     out.push(dest);
   }

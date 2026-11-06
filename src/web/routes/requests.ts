@@ -11,6 +11,7 @@ import { loadImpact } from '../../engine/changes.js';
 import { changeDir, readFlowState, readProjectInfo } from '../../engine/stages/common.js';
 import { FileTooLargeError, SafeFileStream, safeListTree, safeOpenRead, safeReadText, safeStatFile, safeWriteFile, UnsafePathError } from '../../engine/safe-fs.js';
 import { Workspace } from '../../engine/workspace.js';
+import { attachmentName, uniqueName } from '../../engine/stages/intake.js';
 import { StaleActionError } from '../../engine/pipeline.js';
 import { PermissionError } from '../../projects/service.js';
 import { PROJECT_ROLES, type ProjectRole } from '../../domain/types.js';
@@ -94,10 +95,8 @@ export function safeJoin(root: string, rel: string): string | undefined {
   return !p.startsWith(base + sep) ? undefined : p;
 }
 
-export const cleanName = (n: string): string => {
-  const b = basename(n.replace(/\\/g, '/')).replace(/[^\w.\- ()À-ỹ]/g, '_').replace(/^\.+/, '_');
-  return /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(b.replace(/\..*$/, '')) ? `${b}_` : b || 'file';
-};
+/** Name an upload gets in inputs/: the same function the INTAKE/CHANGE stages use (they must agree). */
+export const cleanName = attachmentName;
 
 const OPEN_CR = new Set(['proposed', 'pending', 'analyzing', 'awaiting_decision']);
 
@@ -191,9 +190,7 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
       const ws = Workspace.for(cfg, row.id).ensure();
       const used = new Set<string>();
       for (const s of saved) {
-        let name = s.name;
-        for (let i = 2; used.has(name); i++) name = `${i}_${s.name}`;
-        used.add(name);
+        const name = uniqueName(s.name, used);
         const dest = join(ws.inputsDir, name);
         safeWriteFile(dest, readFileSync(s.tmp), ws.trustRoot);
         repo.addAttachment(row.id, name, dest, s.size);

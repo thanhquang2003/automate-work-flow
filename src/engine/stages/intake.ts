@@ -1,16 +1,25 @@
-import { safeWriteFile } from '../safe-fs.js';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { safeMkdirp, safeReadFile, safeWriteFile, UnsafePathError } from '../safe-fs.js';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { extname, join, resolve } from 'node:path';
 import { GitLabError, type GlProject } from '../../gitlab/client.js';
 import { gitlabToken, type StageContext, type StageOutcome } from '../pipeline.js';
 import { Git } from '../../gitlab/git.js';
 import { ensureOnBranch, integrationBranch, writeProjectInfo, type ProjectInfo } from './common.js';
 
-/** Safe file name for inputs/: no directories, no reserved characters, never "." / ".." / empty. */
-export function safeFileName(name: string): string {
-  const base = name.replace(/^.*[\\/]/, '').replace(/[\u0000-\u001f<>:"|?*]/g, '_').trim().replace(/[. ]+$/, '');
-  return !base || base === '.' || base === '..' ? 'file' : base;
+/**
+ * The one name an uploaded attachment gets in inputs/ (web upload AND the INTAKE/CHANGE copy use it, so both sides
+ * agree and the stage never re-copies a file it already has): last path component, only [\w.\- ()À-ỹ], trimmed, no
+ * leading dot, no trailing dot/space, Windows reserved names suffixed with "_", never empty. Idempotent.
+ */
+export function attachmentName(raw: string): string {
+  let b = raw.replace(/^.*[\\/]/, '').replace(/[^\w.\- ()À-ỹ]/g, '_').trim().replace(/[. ]+$/, '').replace(/^\.+/, '_');
+  if (!b) return 'file';
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(b.replace(/\..*$/, '')) && !b.endsWith('_')) b = `${b}_`;
+  return b;
 }
+
+/** Same as attachmentName (older name). */
+export const safeFileName = attachmentName;
 
 /** "a.txt" → "a-2.txt", "a-3.txt"… until the (case-insensitive) name is unused. */
 export function uniqueName(name: string, used: Set<string>): string {
@@ -22,16 +31,32 @@ export function uniqueName(name: string, used: Set<string>): string {
   return out;
 }
 
-function copyAttachments(ctx: StageContext): number {
-  mkdirSync(ctx.ws.inputsDir, { recursive: true });
+/**
+ * Reads a stored attachment for copying into inputs/: through safe-fs (inputs/ is seat-writable, a seat could swap
+ * the stored file for a link), undefined (logged) when missing or unsafe.
+ */
+export function readAttachment(ctx: Pick<StageContext, 'log'>, path: string, label: string): Buffer | undefined {
+  try {
+    return safeReadFile(path);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') { ctx.log(`Không tìm thấy file đính kèm ${label}`, 'warn'); return undefined; }
+    if (e instanceof UnsafePathError) { ctx.log(`Bỏ qua file đính kèm ${label}: ${e.message}`, 'warn'); return undefined; }
+    throw e;
+  }
+}
+
+export function copyAttachments(ctx: StageContext): number {
+  safeMkdirp(ctx.ws.inputsDir, ctx.ws.trustRoot);
   let n = 0;
   const used = new Set<string>();
   for (const a of ctx.repo.listAttachments(ctx.req.id)) {
-    const name = uniqueName(safeFileName(a.filename), used);
+    const name = uniqueName(attachmentName(a.filename), used);
     const dest = join(ctx.ws.inputsDir, name);
     if (resolve(a.path) === resolve(dest)) { n++; continue; }
-    if (!existsSync(a.path)) { ctx.log(`Không tìm thấy file đính kèm ${a.filename}`, 'warn'); continue; }
-    safeWriteFile(dest, readFileSync(a.path));
+    const data = readAttachment(ctx, a.path, a.filename);
+    if (!data) continue;
+    safeWriteFile(dest, data, ctx.ws.trustRoot);
     n++;
   }
   return n;

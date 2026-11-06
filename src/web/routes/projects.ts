@@ -7,6 +7,7 @@ import type { Config } from '../../config.js';
 import { PROJECT_ROLES, type ProjectRole, type ProjectRow, type SoftwareType } from '../../domain/types.js';
 import { safeWriteFile } from '../../engine/safe-fs.js';
 import { Workspace } from '../../engine/workspace.js';
+import { uniqueName } from '../../engine/stages/intake.js';
 import { PermissionError, ProjectError } from '../../projects/service.js';
 import { can } from '../../security/permissions.js';
 import { actorOf, forbidPage, statusOfError } from '../authz.js';
@@ -185,9 +186,7 @@ export function projectRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
       const ws = Workspace.forRequest(cfg, repo, row).ensure();
       const used = new Set<string>();
       for (const s of saved) {
-        let name = s.name;
-        for (let i = 2; used.has(name); i++) name = `${i}_${s.name}`;
-        used.add(name);
+        const name = uniqueName(s.name, used);
         const dest = join(ws.inputsDir, name);
         safeWriteFile(dest, readFileSync(s.tmp));
         repo.addAttachment(row.id, name, dest, s.size);

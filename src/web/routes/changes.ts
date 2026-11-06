@@ -9,6 +9,7 @@ import { loadImpact } from '../../engine/changes.js';
 import { changeDir } from '../../engine/stages/common.js';
 import { safeMkdirp, safeWriteFile } from '../../engine/safe-fs.js';
 import { Workspace } from '../../engine/workspace.js';
+import { uniqueName } from '../../engine/stages/intake.js';
 import { markdownToHtml } from '../markdown-html.js';
 import { PermissionError } from '../../projects/service.js';
 import type { WebDeps } from '../server.js';
@@ -102,9 +103,7 @@ export function changeRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
       const used = new Set<string>();
       const failed: string[] = [];
       for (const s of saved) {
-        let name = s.name;
-        for (let i = 2; used.has(name); i++) name = `${i}_${s.name}`;
-        used.add(name);
+        const name = uniqueName(s.name, used);
         try {
           ws.ensure();
           safeMkdirp(dir, ws.trustRoot);
