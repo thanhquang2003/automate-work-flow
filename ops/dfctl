@@ -443,19 +443,24 @@ kill_group() {
 
 TRACK_PIDF="" TRACK_STOPF=""
 # Runs "$@" as the leader of a new session under a hard limit (TERM, then KILL after STOP_GRACE), tracked in
-# <dir>/<uid>-<runId> as "<pid> <starttime>". A stop marker <dir>/<uid>-<runId>.stop (written by stop-claude,
+# <dir>/<uid>-<runId> as "<dfctl pid> <dfctl starttime> [<timeout pid> <timeout starttime>]". The dfctl part is
+# written atomically with the reservation, before the run (and its scope) can exist, and the file is removed
+# only when this dfctl exits, i.e. after the run's own after-run steps. So the run counts as live from before
+# its first seat process until its own scope stop and sweep are done (see run_is_live). A stop marker <dir>/<uid>-<runId>.stop (written by stop-claude,
 # possibly before this run got going) is honoured before launch and right after the pid is recorded.
 # Exits with the command's status. stdin is passed through explicitly (a background job would get /dev/null).
 run_tracked_in() {
   local dir=$1 uid=$2 rid=$3 max=$4; shift 4
   TRACK_PIDF="$dir/$uid-$rid"; TRACK_STOPF="$dir/$uid-$rid.stop"
-  ( set -o noclobber; : > "$TRACK_PIDF" ) 2>/dev/null || die "run id already in use"
+  local me=$BASHPID mst
+  mst=$(proc_starttime "$me") || die "cannot read own start time"
+  ( set -o noclobber; printf '%s %s\n' "$me" "$mst" > "$TRACK_PIDF" ) 2>/dev/null || die "run id already in use"
   trap 'rm -f -- "$TRACK_PIDF" "$TRACK_PIDF.tmp" "$TRACK_STOPF"' EXIT
   [ -e "$TRACK_STOPF" ] && exit 143
   setsid timeout -s TERM -k "$STOP_GRACE" "$max" "$@" <&0 7>&- 9>&- &
   local child=$! st
   st=$(proc_starttime "$child" || true)
-  printf '%s %s\n' "$child" "${st:-0}" > "$TRACK_PIDF.tmp"
+  printf '%s %s %s %s\n' "$me" "$mst" "$child" "${st:-0}" > "$TRACK_PIDF.tmp"
   mv -f -- "$TRACK_PIDF.tmp" "$TRACK_PIDF"
   [ -e "$TRACK_STOPF" ] && kill_group "$child"
   local rc=0
@@ -479,8 +484,8 @@ stop_in() {
   local pidf="$dir/$uid-$rid" stopf="$dir/$uid-$rid.stop"
   ( set -o noclobber; : > "$stopf" ) 2>/dev/null || true
   [ -f "$pidf" ] || { echo "not running"; return 0; }
-  local pid="" st=""
-  read -r pid st < "$pidf" || true
+  local _dp _ds pid="" st=""
+  read -r _dp _ds pid st < "$pidf" || true
   [ -n "$pid" ] || { echo "stop requested"; return 0; }
   [[ $pid =~ ^[1-9][0-9]*$ && $st =~ ^[0-9]+$ ]] || die "bad pid file"
   [ -d "/proc/$pid" ] || { echo "not running"; return 0; }
@@ -522,17 +527,18 @@ stop_scope() {
   return 1
 }
 
-# Pid of the live tracking `timeout` of <uid>-<rid> in <dir> (owner uid <owner>), or failure.
-tracked_pid() {
-  local dir=$1 uid=$2 rid=$3 owner=$4 pid="" st=""
+# A run is live while the dfctl process that owns its pid file is alive (owner uid <owner>, same start time):
+# from before its first seat process (start), through the run, until its own after-run steps (scope stop,
+# stray check, sweep) are done. An empty pid file is a run whose reservation is being written: live.
+run_is_live() {
+  local dir=$1 uid=$2 rid=$3 owner=$4 dp="" ds=""
   [ -f "$dir/$uid-$rid" ] || return 1
-  read -r pid st < "$dir/$uid-$rid" 2>/dev/null || true
-  [[ $pid =~ ^[1-9][0-9]*$ && $st =~ ^[0-9]+$ ]] || return 1
-  [ -d "/proc/$pid" ] || return 1
-  [ "$(stat -c %u -- "/proc/$pid" 2>/dev/null)" = "$owner" ] || return 1
-  [ "$(cat -- "/proc/$pid/comm" 2>/dev/null || true)" = timeout ] || return 1
-  [ "$(proc_starttime "$pid" || true)" = "$st" ] || return 1
-  printf '%s\n' "$pid"
+  read -r dp ds _ < "$dir/$uid-$rid" 2>/dev/null || true
+  [ -n "$dp" ] || return 0
+  [[ $dp =~ ^[1-9][0-9]*$ && $ds =~ ^[0-9]+$ ]] || return 1
+  [ -d "/proc/$dp" ] || return 1
+  [ "$(stat -c %u -- "/proc/$dp" 2>/dev/null)" = "$owner" ] || return 1
+  [ "$(proc_starttime "$dp" || true)" = "$ds" ]
 }
 # "dfctl-<uid>-<rid>.scope" -> "<uid> <rid>" (pure).
 parse_scope_name() {
@@ -549,8 +555,8 @@ scope_rid_of_cgroup() {
   done <<< "$cg"
   return 1
 }
-# Orphan = a dfctl scope whose tracking dfctl/timeout is gone (devflow.service stop/restart/crash).
-is_orphan_run() { ! tracked_pid "$1" "$2" "$3" "$4" >/dev/null; }
+# Orphan = a dfctl scope whose owning dfctl is gone (devflow.service stop/restart/crash).
+is_orphan_run() { ! run_is_live "$1" "$2" "$3" "$4"; }
 # Stops every orphaned dfctl scope (of seat <uid>, or all). Returns 1 if one could not be stopped.
 # A stale pid file left behind is harmless: its pid is dead, so the run counts as not live.
 reap_orphans() {
@@ -569,11 +575,20 @@ reap_orphans() {
 }
 # Backstop: every process of <seat os user> must be inside a live, tracked dfctl scope of <uid>. Others are
 # killed and reported (return 1).
+# Is a process with this cgroup text a stray for run <own rid> of seat <uid>? (pure apart from run_is_live)
+# Not a stray only when it sits in the scope of ANOTHER run of the same seat whose dfctl is still live
+# (starting, running or in its own after-run steps).
+is_stray() {
+  local cg=$1 uid=$2 own=$3 dir=$4 owner=$5 rid
+  rid=$(scope_rid_of_cgroup "$cg" "$uid") || return 0
+  [ "$rid" != "$own" ] || return 0
+  ! run_is_live "$dir" "$uid" "$rid" "$owner"
+}
 seat_strays() {
-  local user=$1 uid=$2 p cg rid bad=0
+  local user=$1 uid=$2 own=${3-} p cg bad=0
   for p in $(pgrep -u "$user" 2>/dev/null); do
     cg=$(cat -- "/proc/$p/cgroup" 2>/dev/null) || continue
-    if rid=$(scope_rid_of_cgroup "$cg" "$uid") && ! is_orphan_run "$RUN_DIR" "$uid" "$rid" 0; then continue; fi
+    is_stray "$cg" "$uid" "$own" "$RUN_DIR" 0 || continue
     printf 'dfctl: process %s of %s is outside any live dfctl scope; killing it\n' "$p" "$user" >&2
     kill -KILL "$p" 2>/dev/null || true
     bad=1
@@ -589,7 +604,7 @@ TRACK_UID="" TRACK_RID="" TRACK_SCOPE=0 TRACK_SEAT_USER=""
 after_tracked_run() {
   if [ "$TRACK_SCOPE" = 1 ]; then
     stop_scope "$TRACK_UID" "$TRACK_RID" || return "$SWEEP_FAILED"
-    if [ -n "$TRACK_SEAT_USER" ]; then seat_strays "$TRACK_SEAT_USER" "$TRACK_UID" || return "$SWEEP_FAILED"; fi
+    if [ -n "$TRACK_SEAT_USER" ]; then seat_strays "$TRACK_SEAT_USER" "$TRACK_UID" "$TRACK_RID" || return "$SWEEP_FAILED"; fi
   fi
   if [ ${#TRACK_POST[@]} -gt 0 ]; then "${TRACK_POST[@]}" || return $?; fi
   return 0
@@ -973,7 +988,7 @@ self_test() {
     bg=$!
     pid=""
     for i in $(seq 1 50); do
-      read -r pid st < "$tdir/5-run${mode}xyz" 2>/dev/null || true
+      { read -r _a _b pid st < "$tdir/5-run${mode}xyz"; } 2>/dev/null || true
       [ -n "$pid" ] && break
       sleep 0.1
     done
@@ -981,7 +996,7 @@ self_test() {
     ( stop_in "$tdir" 5 "run${mode}xyz" "$me" ) >/dev/null 2>&1
     wait "$bg" 2>/dev/null || true
     sleep 0.3
-    ok "stop ($mode): tracked run recorded its pid" test -n "$pid"
+    ok "stop ($mode): tracked run recorded its timeout pid" test -n "$pid"
     no "stop ($mode): whole process group gone" quiet kill -0 -- "-${pid:-999999999}"
     ok "stop ($mode): finished promptly" test $((SECONDS - t0)) -le 8
     ok "stop ($mode): pid file and marker cleaned" test ! -e "$tdir/5-run${mode}xyz" -a ! -e "$tdir/5-run${mode}xyz.stop"
@@ -1122,14 +1137,36 @@ self_test() {
   ok "no pid file -> orphan" is_orphan_run "$od" 7 abcdef12 "$me"
   printf '99999999 1\n' > "$od/7-deadbeef"
   ok "dead pid -> orphan" is_orphan_run "$od" 7 deadbeef "$me"
-  printf '%s %s\n' "$$" "$(proc_starttime $$)" > "$od/7-notatimeout"
-  ok "live pid that is not dfctl's timeout -> orphan" is_orphan_run "$od" 7 notatimeout "$me"
+  printf '%s 1\n' "$$" > "$od/7-wrongstart"
+  ok "live pid with another start time (pid reuse) -> orphan" is_orphan_run "$od" 7 wrongstart "$me"
+  printf '%s %s\n' "$$" "$(proc_starttime $$)" > "$od/7-dfctllive"
+  no "owning dfctl alive -> live" is_orphan_run "$od" 7 dfctllive "$me"
+  # Sequence A: a run whose reservation is being written (empty pid file) or whose dfctl has not launched the
+  # seat process yet is live; a concurrent reap/strays check must not stop it.
+  : > "$od/7-starting"
+  no "empty pid file (run starting) -> live" is_orphan_run "$od" 7 starting "$me"
   ( run_tracked_in "$od" 7 livetrack 30 /bin/sh -c 'sleep 30' ) </dev/null >/dev/null 2>&1 &
   local lbg=$!
   for i in $(seq 1 50); do [ -s "$od/7-livetrack" ] && break; sleep 0.1; done
   no "live tracked run -> not an orphan" is_orphan_run "$od" 7 livetrack "$me"
   ( stop_in "$od" 7 livetrack "$me" ) >/dev/null 2>&1; wait "$lbg" 2>/dev/null || true
   ok "after its stop -> orphan" is_orphan_run "$od" 7 livetrack "$me"
+  # Sequence B: run B's timeout has exited, B's dfctl is still in its after-run step; run A finishing at the
+  # same time must not treat B's leftovers as strays. A's own scope and dead or unknown scopes are strays.
+  ( sleep 5 ) & local bdf=$!
+  printf '%s %s 99999999 1\n' "$bdf" "$(proc_starttime "$bdf")" > "$od/7-runbbbbb"
+  no "process in run B's scope while B's dfctl is ending -> not a stray for A" is_stray '0::/system.slice/dfctl-7-runbbbbb.scope' 7 runaaaaa "$od" "$me"
+  printf '%s %s\n' "$$" "$(proc_starttime $$)" > "$od/7-runaaaaa"   # A's own dfctl is alive (it is the checker)
+  ok "process in A's own scope after A's stop -> stray" is_stray '0::/system.slice/dfctl-7-runaaaaa.scope' 7 runaaaaa "$od" "$me"
+  ok "process outside any dfctl scope -> stray" is_stray '0::/user.slice/user-1000.slice/session-3.scope' 7 runaaaaa "$od" "$me"
+  ok "process in another seat's scope -> stray" is_stray '0::/system.slice/dfctl-8-runbbbbb.scope' 7 runaaaaa "$od" "$me"
+  kill "$bdf" 2>/dev/null; wait "$bdf" 2>/dev/null || true
+  ok "run B's leftovers after B's dfctl is gone -> stray" is_stray '0::/system.slice/dfctl-7-runbbbbb.scope' 7 runaaaaa "$od" "$me"
+  ( run_tracked_in "$od" 7 earlylive 30 /bin/sh -c 'sleep 30' ) </dev/null >/dev/null 2>&1 &
+  local ebg=$!
+  for i in $(seq 1 100); do [ -e "$od/7-earlylive" ] && break; sleep 0.02; done
+  no "a run is live from the moment its pid file exists" is_orphan_run "$od" 7 earlylive "$me"
+  ( stop_in "$od" 7 earlylive "$me" ) >/dev/null 2>&1; wait "$ebg" 2>/dev/null || true
 
   echo "# kernel protections, worktree lock, cron/at"
   mkdir -p "$od/fs"; echo 1 > "$od/fs/protected_hardlinks"; echo 1 > "$od/fs/protected_symlinks"

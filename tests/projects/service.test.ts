@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { PermissionError, ProjectError } from '../../src/projects/service.js';
+import { PermissionError, ProjectError, ProjectService } from '../../src/projects/service.js';
 import { fullProject, git, mkEnv, mkGitRepo, mkUser } from './helpers.js';
 
 const reqIn = (e: ReturnType<typeof mkEnv>, projectId: number, code: string, by = e.pm.id) =>
@@ -21,17 +21,28 @@ describe('createProject', () => {
     expect(e.ops.groups).toEqual([[p.id, path]]);
     expect(e.repo.web.listAudit({ projectId: p.id }).map(a => a.action)).toContain('project.create');
   });
-  it('existing repo with hard-linked git objects is rejected before any DB row', async () => {
-    const e = mkEnv();
-    const path = join(e.root, 'linked');
+  function hardLinkedRepo(e: ReturnType<typeof mkEnv>, name: string): string {
+    const path = join(e.root, name);
     mkGitRepo(path);
     const objects = join(path, '.git', 'objects');
     const sub = readdirSync(objects).find(d => /^[0-9a-f]{2}$/.test(d))!;
-    const obj = join(objects, sub, readdirSync(join(objects, sub))[0]!);
-    linkSync(obj, join(e.base, 'other-copy'));
-    await expect(e.svc.createProject({ mode: 'existing', key: 'HL', name: 'h', path, createdBy: e.pm.id })).rejects.toThrow(/hard-link/);
+    linkSync(join(objects, sub, readdirSync(join(objects, sub))[0]!), join(e.base, `${name}-copy`));
+    return path;
+  }
+  it('server mode: existing repo with hard-linked git objects is rejected before any DB row', async () => {
+    const e = mkEnv();
+    const svc = new ProjectService({ cfg: { ...e.cfg, mode: 'server' }, repo: e.repo, systemOps: e.systemOps });
+    const path = hardLinkedRepo(e, 'linked');
+    await expect(svc.createProject({ mode: 'existing', key: 'HL', name: 'h', path, createdBy: e.pm.id })).rejects.toThrow(/hard-link/);
     expect(e.repo.getProjectByKey('HL')).toBeUndefined();
     expect(e.ops.groups).toEqual([]);
+  });
+  it('local mode: a repo made by a plain local git clone (hard links) is accepted', async () => {
+    const e = mkEnv();
+    expect(e.cfg.mode).toBe('local');
+    const path = hardLinkedRepo(e, 'cloned');
+    const p = await e.svc.createProject({ mode: 'existing', key: 'CL', name: 'c', path, createdBy: e.pm.id });
+    expect(e.repo.getProjectByKey('CL')?.id).toBe(p.id);
   });
   it('existing non-git non-empty folder rejected', async () => {
     const e = mkEnv();

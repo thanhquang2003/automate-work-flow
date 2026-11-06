@@ -145,8 +145,9 @@ export class ProjectService {
       if (!statSync(path).isDirectory()) throw new ProjectError('Đường dẫn dự án không phải thư mục.');
       if (existsSync(join(path, '.git'))) {
         // In server mode dfctl refuses hard-linked files under .git (they could tie the project to another
-        // repository's objects); say so now instead of failing later with a sweep error.
-        const linked = findHardLinked(join(path, '.git'));
+        // repository's objects); say so now instead of failing later with a sweep error. Local mode has no
+        // seats or sweeps: a repo made by a plain local `git clone` (hard links) stays fine there.
+        const linked = this.deps.cfg.mode === 'server' ? findHardLinked(join(path, '.git')) : undefined;
         if (linked) {
           throw new ProjectError(`Repo có tệp hard-link trong .git (${linked.slice(path.length + 1)}), ví dụ do "git clone" từ thư mục cục bộ. Hãy chạy "git repack -a -d" rồi xóa .git/objects/info/alternates (nếu có), hoặc clone lại bằng --no-hardlinks, rồi thử lại.`);
         }
