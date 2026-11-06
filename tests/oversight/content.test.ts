@@ -199,6 +199,34 @@ describe('redactLog', () => {
       ['mysql://root:p@ss@host/db', 'mysql://root:', 'p@ss'],
       ['see eyJhbGciOi.eyJzdWIiOiIx.c2ln here', 'see', 'eyJzdWIiOiIx'],
       ['eyJh.eyJz.s', '', 'eyJz'],
+      ['curl -u admin:hunter2 http://h', 'curl -u admin:', 'hunter2'],
+      ['curl --user admin:hunter2 http://h', '--user admin:', 'hunter2'],
+      ['curl -s -uadmin:hunter2 http://h', '-uadmin:', 'hunter2'],
+      ['mysql -uroot -phunter2', '-uroot', 'hunter2'],
+      ['mysql -phunter2 db', '-p', 'hunter2'],
+      ['run -pSECRET now', '-p', 'SECRET'],
+      ['git clone https://tok@host/x', 'https://', 'tok@'],
+      ['git clone https://ghp_abc@github.com/o/r.git', 'github.com/o/r.git', 'ghp_abc'],
+      ['ssh://deploytoken123@host/repo', 'ssh://', 'deploytoken123'],
+      ['token github_pat_11ABCDEFG0abcdefghij_klmno', 'token', 'github_pat_11ABCDEFG0'],
+      ['npm_abcdefghijklmnop1234', '', 'npm_abcdefghijklmnop1234'],
+      ['key AKIAIOSFODNN7EXAMPLE', 'key', 'AKIAIOSFODNN7EXAMPLE'],
+      ['key ASIAIOSFODNN7EXAMPLE', 'key', 'ASIAIOSFODNN7EXAMPLE'],
+      ['slack xoxb-1234567890-abcdef', 'slack', 'xoxb-1234567890'],
+      ['x ghs_abcdefghijklmnop1234 y', 'x', 'ghs_abcdefghijklmnop'],
+      ['x gho_abcdefghijklmnop1234 y', 'x', 'gho_abcdefghijklmnop'],
+      ['x ghu_abcdefghijklmnop1234 y', 'x', 'ghu_abcdefghijklmnop'],
+      ['x ghr_abcdefghijklmnop1234 y', 'x', 'ghr_abcdefghijklmnop'],
+      ['x glpat-abcdefghijklmnop12 y', 'x', 'glpat-abcdefghijklmnop'],
+      ['x sk-abcdefghijklmnop12 y', 'x', 'sk-abcdefghijklmnop'],
+      ['pass=hunter2', 'pass=', 'hunter2'],
+      ['DB_PASS: hunter2', 'DB_PASS:', 'hunter2'],
+      ['mysqldump --pass hunter2', '--pass', 'hunter2'],
+      ['--db-pass=hunter2', '--db-pass=', 'hunter2'],
+      ['session=abc123xyz', 'session=', 'abc123xyz'],
+      ['sessionid: abc123xyz', 'sessionid:', 'abc123xyz'],
+      ['connect.sid=s%3Aabc', 'connect.sid=', 's%3Aabc'],
+      ['{"session_id":"abc123xyz"}', '"session_id"', 'abc123xyz'],
     ];
     for (const [input, key, secret] of cases) {
       const out = redactLog(input);
@@ -219,7 +247,7 @@ describe('redactLog', () => {
   });
 
   it('keeps ordinary text readable', () => {
-    const log = ['tokenizer ran', 'tokens used: 5000', 'author: bob', 'the tokenizer splits words', 'tokens used 1234 of 5000', 'Reading src/auth/login.ts', 'author: Bob', 'secretary meeting at 9', 'build ok'].join('\n');
+    const log = ['tokenizer ran', 'tokens used: 5000', 'author: bob', 'mailto:a@b.com', 'ask user@host about it', 'mail me at a@b.com', 'git@github.com:o/r.git', 'tests passed: 5', 'bypass=1', 'inside=3', 'sessions: 5', 'mkdir src', 'ls -la', 'the tokenizer splits words', 'tokens used 1234 of 5000', 'Reading src/auth/login.ts', 'author: Bob', 'secretary meeting at 9', 'build ok'].join('\n');
     expect(redactLog(log)).toBe(log);
     expect(redactLog('line1\npassword=x\nline3')).toBe('line1\npassword=[đã ẩn]\nline3');
   });
@@ -230,6 +258,7 @@ describe('redactLog', () => {
       'a'.repeat(MB), 'token'.repeat(MB / 5), 'token '.repeat(MB / 6), `token${' '.repeat(MB)}x`, '//a:'.repeat(MB / 4), `//u:${'p'.repeat(MB)}`,
       '--token '.repeat(MB / 8), '-p '.repeat(MB / 3), 'password is '.repeat(MB / 12), 'cookie:'.repeat(MB / 7), 'eyJ'.repeat(MB / 3), `eyJ${'a'.repeat(MB)}`,
       '-----BEGIN PRIVATE KEY----- '.repeat(MB / 28), '//a:'.repeat(MB / 4) + '@', 'token: '.repeat(MB / 8), `password:${' '.repeat(MB)}`, `"token":"${'\\"'.repeat(MB / 2)}`,
+      '-u '.repeat(MB / 3), '-u a:'.repeat(MB / 5), '-p'.repeat(MB / 2), 'https://'.repeat(MB / 8) + 'a', `https://${'a'.repeat(MB)}`, 'github_pat_'.repeat(MB / 11), 'npm_'.repeat(MB / 4), 'AKIA'.repeat(MB / 4), 'sid='.repeat(MB / 4), 'session:'.repeat(MB / 8), '--pass '.repeat(MB / 7), '--user '.repeat(MB / 7),
       'Bearer '.repeat(MB / 7), `bearer${' '.repeat(MB)}`, 'auth='.repeat(MB / 5), 'a1'.repeat(MB / 2), `${'f'.repeat(MB)}g`, 'password='.repeat(MB / 9),
     ];
     for (const l of lines) {

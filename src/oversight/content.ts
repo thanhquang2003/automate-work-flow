@@ -135,14 +135,21 @@ const LOG_RE = /^[A-Za-z0-9._-]{1,120}\.log$/;
  */
 const MASK = '[đã ẩn]';
 const QUOTED = `"(?:[^"\\\\\\n]|\\\\.){0,2000}"|'(?:[^'\\\\\\n]|\\\\.){0,2000}'`;
-const STRONG = 'passw(?:or)?d|pwd|passphrase|secret';
+const STRONG = 'passw(?:or)?d|pwd|passphrase|secret|(?<![a-z])pass(?![a-z])';
 const WEAK = 'token|api[ _-]?key|private[_-]?key|credential';
 /** password/secret values may be several words: everything to the end of the line unless quoted. */
 const KV_STRONG = new RegExp(`((?:${STRONG})[\\w.-]{0,40}["']?[ \\t]{0,20}[:=][ \\t]{0,20})(${QUOTED}|[^\\n]{1,2000})`, 'gi');
 const KV_WEAK = new RegExp(`((?:${WEAK})[\\w.-]{0,40}["']?[ \\t]{0,20}[:=][ \\t]{0,20})(${QUOTED}|[^\\s,;&"']{1,2000})`, 'gi');
 /** `password is hunter2`, `secret was x`, `passwd hunter2`, `apikey abc12` (no separator). */
 const KV_WORDS = new RegExp(`\\b((?:${STRONG}|api[ _-]?key)[ \\t]{1,5}(?:is|was|=)[ \\t]{1,5})([^\\s,;]{1,2000})|\\b((?:passwd|pwd|apikey)[ \\t]{1,5})([^\\s,;]{1,2000})`, 'gi');
-const FLAG = new RegExp(`(^|[ \\t])((?:--[\\w-]{0,30}(?:token|passw(?:or)?d|pwd|secret|api-?key|credential)[\\w-]{0,30})|-p)(=|[ \\t]{1,20})(${QUOTED}|\\S{1,2000})`, 'gi');
+const FLAG = new RegExp(`(^|[ \\t])((?:--[\\w-]{0,30}(?:token|passw(?:or)?d|pwd|secret|api-?key|credential)[\\w-]{0,30})|--(?:[\\w-]{0,29}-)?pass(?![\\w])|-p)(=|[ \\t]{1,20})(${QUOTED}|\\S{1,2000})`, 'gi');
+const KV_SESSION = new RegExp(`((?<![a-z])(?:session(?:[_-]?id)?|sid)["']?[ \\t]{0,20}[:=][ \\t]{0,20})(${QUOTED}|[^\\s,;&"']{1,2000})`, 'gi');
+/** curl `-u user:pass` / `--user user:pass` (also `-uuser:pass`): the password part is masked. */
+const USER_FLAG = /(^|[ \t])(--user[ \t=]{1,20}|-u[ \t]{0,20})([^\s:]{1,100}:)\S{1,2000}/g;
+/** `-phunter2`, `-pSECRET` (mysql style, value attached): everything after `-p` up to the space. */
+const ATTACHED_P = /(^|[ \t])-p([^\s=-]\S{0,2000})/g;
+/** `https://token@host/x`: userinfo of a scheme:// URL without a password. */
+const URL_TOKEN = /\b((?:https?|git|ssh|ftps?|svn|git\+ssh):\/\/)[^/\s:@]{1,200}@/gi;
 const AUTH_HEADER = /\b((?:proxy-)?authorization|auth|set-cookie|cookie)[ \t]{0,5}[:=][ \t]{0,5}[^\n]{1,2000}/gi;
 const SCHEME_VALUE = /\b(bearer|basic)[ \t]{1,5}[A-Za-z0-9._~+/=-]{4,2000}/gi;
 const URL_CREDS = /(\/\/[^/\s:@]{1,100}:)[^/\s]{1,200}@/g;
@@ -151,6 +158,7 @@ const PEM_BEGIN = /-----BEGIN [A-Z ]{0,30}PRIVATE KEY-----/;
 const PEM_END = /-----END [A-Z ]{0,30}PRIVATE KEY-----/;
 const INLINE: RegExp[] = [
   /\beyJ[A-Za-z0-9_-]{0,300}\.[A-Za-z0-9_-]{1,300}\.[A-Za-z0-9_-]{1,300}/g,
+  /\bgithub_pat_[A-Za-z0-9_]{10,200}/g, /\bnpm_[A-Za-z0-9]{16,200}/g, /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,
   /\bsk-[A-Za-z0-9_-]{10,}/g, /\bgh[pousr]_[A-Za-z0-9]{10,}/g, /\bglpat-[A-Za-z0-9_-]{10,}/g,
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g, /\b[0-9a-fA-F]{32,}\b/g, /[A-Za-z0-9+/_=-]{40,}/g,
 ];
@@ -159,9 +167,13 @@ function redactLine(l: string): string {
   let o = l.replace(AUTH_HEADER, (_m, k: string) => `${k}: ${MASK}`);
   o = o.replace(SCHEME_VALUE, `$1 ${MASK}`);
   o = o.replace(URL_CREDS, `$1${MASK}@`);
+  o = o.replace(URL_TOKEN, `$1${MASK}@`);
+  o = o.replace(USER_FLAG, `$1$2$3${MASK}`);
+  o = o.replace(ATTACHED_P, `$1-p${MASK}`);
   o = o.replace(FLAG, (_m, pre: string, flag: string, sep: string) => `${pre}${flag}${sep}${MASK}`);
   o = o.replace(KV_STRONG, `$1${MASK}`);
   o = o.replace(KV_WEAK, `$1${MASK}`);
+  o = o.replace(KV_SESSION, `$1${MASK}`);
   o = o.replace(KV_WORDS, (_m, a?: string, _b?: string, c?: string) => `${a ?? c}${MASK}`);
   return INLINE.reduce((x, re) => x.replace(re, MASK), o);
 }
