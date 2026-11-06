@@ -423,8 +423,18 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
     let opened: { fd: number; file: string } | undefined;
     let unsafe = false;
     for (const file of cands) {
-      // A folder is "not found" (404), not "refused": only links and special files get 403.
-      if (safeStatFile(file, ws.trustRoot) === undefined && lstatSync(file, { throwIfNoEntry: false })?.isDirectory()) continue;
+      // A folder, or a path below a file (ENOTDIR) or missing, is "not found" (404), not "refused": only links and
+      // special files get 403.
+      let kind: 'dir' | 'missing' | 'other' = 'other';
+      try {
+        const st = lstatSync(file, { throwIfNoEntry: false });
+        kind = !st ? 'missing' : st.isDirectory() ? 'dir' : 'other';
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code !== 'ENOTDIR' && code !== 'ENOENT') throw e;
+        kind = 'missing';
+      }
+      if (kind === 'missing' || (kind === 'dir' && safeStatFile(file, ws.trustRoot) === undefined)) continue;
       try {
         opened = { fd: safeOpenRead(file, ws.trustRoot).fd, file };
         break;

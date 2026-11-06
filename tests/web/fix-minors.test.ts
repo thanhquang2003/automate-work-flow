@@ -60,6 +60,10 @@ describe('re-review minors', () => {
     expect((await app.inject({ method: 'GET', url: `/requests/${r.id}/files/sub` })).statusCode).toBe(404);
     expect((await app.inject({ method: 'GET', url: `/requests/${r.id}/files/evidence` })).statusCode).toBe(404);
     expect((await app.inject({ method: 'GET', url: `/requests/${r.id}/files/link.txt` })).statusCode).toBe(403);
+    // Round 2 item 2: a path below a FILE (ENOTDIR) is 404, not a 500.
+    writeFileSync(join(ws.artifactsDir, 'analysis.md'), '# a');
+    expect((await app.inject({ method: 'GET', url: `/requests/${r.id}/files/analysis.md/x` })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'GET', url: `/requests/${r.id}/files/evidence/nope/x` })).statusCode).toBe(404);
   });
 
   it('m4: a pre-planted requests/<code> link makes project request creation fail cleanly (no orphan row)', async () => {
