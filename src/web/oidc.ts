@@ -12,7 +12,14 @@ const GOOGLE_ISSUER = new URL('https://accounts.google.com');
 /** Real Google client (openid-client, authorization code + PKCE, id_token validated with state and nonce). */
 export function googleOidcClient(cfg: Config): OidcClient {
   let conf: Promise<oc.Configuration> | undefined;
-  const config = () => (conf ??= oc.discovery(GOOGLE_ISSUER, cfg.google.clientId, cfg.google.clientSecret));
+  const config = () => {
+    if (!conf) {
+      const p = oc.discovery(GOOGLE_ISSUER, cfg.google.clientId, cfg.google.clientSecret);
+      conf = p;
+      p.catch(() => { if (conf === p) conf = undefined; }); // a failed discovery must be retried next time
+    }
+    return conf;
+  };
   return {
     async authUrl(p) {
       const c = await config();

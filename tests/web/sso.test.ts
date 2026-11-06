@@ -180,4 +180,24 @@ describe('google sso', () => {
     const h = { 'content-type': 'application/x-www-form-urlencoded', origin: 'http://localhost:3000', host: 'localhost:3000' };
     expect((await app.inject({ method: 'POST', url: '/login/local', payload: 'username=a&password=b', headers: h })).statusCode).toBe(404);
   });
+  it('rejects suffix-spoofed and malformed email domains', async () => {
+    const { login, repo } = await boot();
+    for (const [i, email] of ['x@evil-corp.com', 'x@corp.com.evil.com', 'a@corp.com@evil.com', 'nocorp.com', '@corp.com'].entries()) {
+      const res = await login({ email, sub: `sp${i}` });
+      expect(res.statusCode).toBe(403);
+      expect(sessionOf(res)).toBeUndefined();
+    }
+    expect(repo.web.listUsers()).toHaveLength(0);
+  });
+  it('/setup is 404 in server mode with SSO and creates no user', async () => {
+    const { app, repo } = await boot();
+    const h = { 'content-type': 'application/x-www-form-urlencoded', origin: 'http://localhost:3000', host: 'localhost:3000' };
+    expect((await app.inject({ method: 'GET', url: '/setup', headers: { host: 'localhost:3000' } })).statusCode).toBe(404);
+    const post = await app.inject({ method: 'POST', url: '/setup', payload: 'username=evil&password=password123', headers: h });
+    expect(post.statusCode).toBe(404);
+    expect(sessionOf(post)).toBeUndefined();
+    expect(repo.web.listUsers()).toHaveLength(0);
+    const root = await app.inject({ method: 'GET', url: '/', headers: { host: 'localhost:3000' } });
+    expect(root.headers.location).toBe('/login');
+  });
 });

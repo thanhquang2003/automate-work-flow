@@ -97,9 +97,10 @@ export function authRoutes(app: FastifyInstance, cfg: Config, deps: WebDeps): vo
       return deny(reply, 400, 'Không xác thực được với Google. Hãy thử lại.');
     }
     const email = claims.email.trim().toLowerCase();
-    const domain = email.split('@')[1] ?? '';
+    const parts = email.split('@');
+    const domain = parts.length === 2 && parts[0] ? parts[1]! : '';
     // An empty allow-list rejects everybody (server mode does not force it to be set).
-    if (!claims.emailVerified || !email.includes('@') || !domain || !cfg.allowedEmailDomains.includes(domain)) {
+    if (!claims.emailVerified || !domain || !cfg.allowedEmailDomains.includes(domain)) {
       return deny(reply, 403, 'Email này không được phép đăng nhập (chưa xác minh hoặc không thuộc tên miền cho phép).');
     }
     const bySub = repo.web.getUserByGoogleSub(claims.sub);
@@ -142,10 +143,12 @@ export function authRoutes(app: FastifyInstance, cfg: Config, deps: WebDeps): vo
   });
 
   app.get('/setup', async (_req, reply) => {
+    if (sso) return reply.callNotFound();
     if (cfg.mode === 'local' || repo.web.listUsers().length > 0) return reply.redirect('/');
     return reply.type('text/html; charset=utf-8').send(page('setup', 'Thiết lập quản trị viên'));
   });
   app.post('/setup', async (req, reply) => {
+    if (sso) return reply.callNotFound();
     if (cfg.mode === 'local' || repo.web.listUsers().length > 0) return reply.redirect('/');
     const b = (req.body ?? {}) as Form;
     const username = (b.username ?? '').trim();

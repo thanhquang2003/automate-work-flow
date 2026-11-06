@@ -13,7 +13,7 @@ export interface Ctx {
   /** The project the action targets. */
   project?: { departmentId: number | null };
   /** The user an admin/department action targets. */
-  targetUser?: { departmentId: number | null };
+  targetUser?: { departmentId: number | null; sysRole?: SysRole };
   /** For `user.setDepartment`: the department the user is being moved to. */
   targetDepartmentId?: number | null;
   /** For `project.members.edit`: department of every user in the proposed member list. */
@@ -28,10 +28,13 @@ export type Action =
   | 'oversight.view' | 'oversight.content' | 'admin.settings'
   | { type: 'gate.approve'; stage: Stage; part?: string };
 
-/** Role whose assignees may approve each gate (PM may approve any gate; PLANNING is PM only). */
+/**
+ * Role whose assignees may approve each gate. `null` = PM only (PLANNING, DONE, CHANGE).
+ * Stages absent from the map (INTAKE, TEST, BUGFIX) have no approval gate: nobody can approve them.
+ */
 export const GATE_APPROVER: Partial<Record<Stage, ProjectRole | null>> = {
   CODEBASE_SCAN: 'SE', ANALYSIS: 'BA', CLARIFY: 'BA', BREAKDOWN: 'BA', DESIGN: 'SE',
-  PLANNING: null, DEVELOP: 'REVIEWER', TEST: null, BUGFIX: 'REVIEWER', DONE: null,
+  PLANNING: null, DEVELOP: 'REVIEWER', CHANGE: null, DONE: null,
 };
 
 const validSys = (r: unknown): r is SysRole => (SYS_ROLES as readonly string[]).includes(r as string);
@@ -65,9 +68,10 @@ export function can(actor: Actor, action: Action, ctx: Ctx = {}): boolean {
     case 'task.assign':
       return isPm;
     case 'cr.decide':
-      return isPm || roles.includes('BA');
+      return isPm;
     case 'gate.approve': {
       if (typeof action === 'string') return false;
+      if (!Object.hasOwn(GATE_APPROVER, action.stage)) return false;
       if (isPm) return true;
       const approver = GATE_APPROVER[action.stage];
       if (!approver) return false;
@@ -83,7 +87,7 @@ export function can(actor: Actor, action: Action, ctx: Ctx = {}): boolean {
     case 'user.setDepartment':
       if (sys === 'admin') return true;
       // head/deputy only pull unassigned users into their own department
-      return manager && ctx.targetUser?.departmentId === null && ownDept(ctx.targetDepartmentId);
+      return manager && ctx.targetUser?.departmentId === null && ctx.targetUser.sysRole === 'member' && ownDept(ctx.targetDepartmentId);
     case 'oversight.view':
     case 'oversight.content': {
       if (sys === 'admin' || sys === 'cto') return true;
