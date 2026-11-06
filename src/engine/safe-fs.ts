@@ -3,7 +3,7 @@ import {
   close as fsClose, read as fsRead, closeSync, constants, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, readdirSync, readlinkSync, readSync, realpathSync,
   rmSync, unlinkSync, writeSync,
 } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /**
  * Symlink-safe file access for DevFlow writes/reads under folders that Claude seats can write
@@ -118,26 +118,97 @@ function openChecked(path: string, flags: number, root: string | undefined, writ
 }
 
 /**
+ * Test-only seams (no sleeps): called at the race windows of the write path so a test can swap a folder for a link
+ * exactly there. Never set outside tests.
+ */
+export const safeFsTestHooks: { beforeParentOpen?: (p: string) => void; beforeFileOpen?: (p: string) => void; afterFileOpen?: (p: string) => void } = {};
+
+/** On Linux: the opened directory must really be `dir` under the (real) root. Fails closed. */
+function checkDirFd(dfd: number, dir: string, root: string | undefined): void {
+  if (!root) return;
+  let real: string;
+  try { real = readlinkSync(`/proc/self/fd/${dfd}`); } catch { throw new UnsafePathError(`cannot verify ${dir}; refusing`); }
+  let realRoot: string;
+  try { realRoot = realpathSync(root); } catch { throw new UnsafePathError(`${root} vanished`); }
+  const want = join(realRoot, relative(root, dir));
+  if (real !== want) throw new UnsafePathError(`${dir} resolved to ${real}; refusing`);
+}
+
+/**
+ * Opens `p` for writing (flags: O_WRONLY plus O_APPEND or nothing) inside its VERIFIED parent folder (Linux): the
+ * parent is opened O_DIRECTORY|O_NOFOLLOW and its descriptor checked under the root; the file is then looked up,
+ * opened (O_CREAT|O_EXCL only when missing, never O_TRUNC) and, on failure, removed again ONLY through
+ * `/proc/self/fd/<dirfd>/<name>`, so swapping any path component later cannot redirect the open or the cleanup.
+ * After the open the parent descriptor is checked again (a swap in between fails loudly before any byte is written)
+ * and a file this call created is removed only if it is still the same inode.
+ */
+function openInVerifiedDir(p: string, r: string | undefined, extra: number): number {
+  const dir = dirname(p);
+  const name = basename(p);
+  safeFsTestHooks.beforeParentOpen?.(p);
+  let dfd: number;
+  try {
+    dfd = openSync(dir, constants.O_RDONLY | (constants.O_DIRECTORY ?? 0) | NOFOLLOW | NONBLOCK);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ELOOP' || code === 'ENOTDIR') throw new UnsafePathError(`${dir} is not a directory (or is a symlink); refusing to write ${p}`);
+    throw e;
+  }
+  try {
+    if (!fstatSync(dfd).isDirectory()) throw new UnsafePathError(`${dir} is not a directory; refusing`);
+    checkDirFd(dfd, dir, r);
+    const via = `/proc/self/fd/${dfd}/${name}`;
+    safeFsTestHooks.beforeFileOpen?.(p);
+    const pre = lstatSync(via, { throwIfNoEntry: false });
+    if (pre && !pre.isFile()) throw new UnsafePathError(`${p} is not a regular file (${kindOf(pre)}); refusing to write it`);
+    if (pre && pre.nlink > 1) throw new UnsafePathError(`${p} has ${pre.nlink} hard links; refusing to write it`);
+    let fd: number;
+    try {
+      fd = openSync(via, constants.O_WRONLY | extra | (pre ? 0 : constants.O_CREAT | constants.O_EXCL) | NOFOLLOW | NONBLOCK, 0o664);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ELOOP' || code === 'EEXIST') throw new UnsafePathError(`${p} changed while opening it (${code}); refusing`);
+      if (code === 'ENXIO' || code === 'EISDIR' || code === 'EAGAIN') throw new UnsafePathError(`${p} is not a regular file (${code}); refusing`);
+      throw e;
+    }
+    let created: { ino: number; dev: number } | undefined;
+    try {
+      const st = fstatSync(fd);
+      if (!pre) created = { ino: st.ino, dev: st.dev };
+      if (!st.isFile()) throw new UnsafePathError(`${p} is not a regular file; refusing`);
+      if (st.nlink > 1) throw new UnsafePathError(`${p} has ${st.nlink} hard links; refusing to write it`);
+      safeFsTestHooks.afterFileOpen?.(p);
+      checkDirFd(dfd, dir, r); // the folder must still be where it was checked, before any byte is written
+      return fd;
+    } catch (e) {
+      closeSync(fd);
+      if (!pre) {
+        // Remove the empty file this call created, through the verified folder, and only if it is still ours.
+        try {
+          const st = lstatSync(via, { throwIfNoEntry: false });
+          if (st && st.isFile() && created && st.ino === created.ino && st.dev === created.dev) unlinkSync(via);
+        } catch { /* leave it */ }
+      }
+      throw e;
+    }
+  } finally {
+    closeSync(dfd);
+  }
+}
+
+/**
  * Writes (replaces) a file. Missing folders are created; a symlink, hard-linked file or special file at `path` is
- * refused (UnsafePathError). Every folder below the root is checked with lstat, the file is opened with O_NOFOLLOW
- * (O_EXCL when it did not exist) and WITHOUT O_TRUNC, and only after the descriptor's real path was checked under the
- * root is it truncated and written: a link or folder swapped in at any point is refused before any byte changes.
- * (Not temp-file + rename: worktrees are shared with concurrent `git add -A` runs that would pick temp names up.)
+ * refused (UnsafePathError). Every folder below the root is checked with lstat; on Linux the file is opened and written
+ * only through its verified parent folder descriptor (see openInVerifiedDir), WITHOUT O_TRUNC; it is truncated and
+ * written only after every check passed. (Not temp-file + rename: worktrees are shared with concurrent `git add -A`.)
  */
 export function safeWriteFile(path: string, data: string | Uint8Array, root?: string): void {
   const p = resolve(path);
   const r = rootFor(p, root);
   checkParents(p, r, true);
-  const existed = lstatSync(p, { throwIfNoEntry: false }) !== undefined;
-  let fd: number;
-  try {
-    fd = openChecked(p, constants.O_WRONLY | constants.O_CREAT | (existed ? 0 : constants.O_EXCL), r, true);
-  } catch (e) {
-    // A file this call created in a folder swapped for a link after the checks: remove it again (it is empty).
-    if (!existed && e instanceof UnsafePathError && /resolved to/.test(e.message)) { try { unlinkSync(p); } catch { /* gone */ } }
-    if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new UnsafePathError(`${p} appeared while writing it; refusing`);
-    throw e;
-  }
+  const fd = process.platform === 'linux'
+    ? openInVerifiedDir(p, r, 0)
+    : openChecked(p, constants.O_WRONLY | constants.O_CREAT, r, true);
   try {
     ftruncateSync(fd, 0);
     const buf = typeof data === 'string' ? Buffer.from(data, 'utf8') : data;
@@ -148,12 +219,14 @@ export function safeWriteFile(path: string, data: string | Uint8Array, root?: st
   }
 }
 
-/** Opens a file for appending (log files); the caller closes the descriptor. */
+/** Opens a file for appending (log files) the same way; the caller closes the descriptor. */
 export function safeOpenAppend(path: string, root?: string): number {
   const p = resolve(path);
   const r = rootFor(p, root);
   checkParents(p, r, true);
-  return openChecked(p, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND, r, true);
+  return process.platform === 'linux'
+    ? openInVerifiedDir(p, r, constants.O_APPEND)
+    : openChecked(p, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND, r, true);
 }
 
 /** A file is larger than the caller allows reading whole; nothing was allocated for it. */
