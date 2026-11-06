@@ -1,4 +1,4 @@
-import { readdirSync } from 'node:fs';
+import { lstatSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { Config } from '../config.js';
 import type { Repo } from '../db/repo.js';
@@ -554,38 +554,67 @@ export class Pipeline {
   /** Reason a project is stopped after a failed sweep, if it is. */
   isProjectBlocked(projectId: number): string | undefined { return this.blockedProjects.get(projectId); }
 
+  /** Projects still waiting for their startup sweep: none of their jobs may start (canStart). */
+  private sweeping = new Set<number>();
+
   /**
-   * Server start (I1): after a crash/restart DevFlow must not run git on a worktree a seat may have touched before
-   * dfctl swept the project. Sweeps every request/task worktree (`<project>/.devflow/worktrees/*`) of every
-   * non-archived project, one project after the other; a project whose sweep fails is stopped exactly like a failed
-   * post-run sweep (blocked, queued jobs failed, requests needs_human). Must complete before the worker starts.
-   * A project without any worktree has had no seat run left to sweep (seats only run inside worktrees).
+   * Request and task worktrees of a project that exist on disk, derived ONLY from the database (request codes and
+   * task ids): `.devflow/worktrees` is seat-writable, a directory listing would let a seat add sweeps at will.
    */
-  async startupSweep(): Promise<{ swept: number[]; blocked: { projectId: number; error: string }[] }> {
+  private knownWorktrees(projectId: number, projectPath: string): string[] {
+    const out: string[] = [];
+    for (const r of this.repo.listRequestsByProject(projectId)) {
+      if (!r.code) continue;
+      let ws: Workspace;
+      try { ws = Workspace.forProject(projectPath, r.code); } catch { continue; }
+      const cands = [ws.repoDir];
+      for (const t of this.repo.listTasks(r.id)) { try { cands.push(ws.taskWorktree(t.id)); } catch { /* invalid id */ } }
+      // Anything at that path is swept (dfctl itself refuses a worktree that is a symlink: the project is then stopped).
+      for (const c of cands) if (lstatSync(c, { throwIfNoEntry: false })) out.push(c);
+    }
+    return [...new Set(out)].sort();
+  }
+
+  /**
+   * Server start (I1/I1b): after a crash/restart DevFlow must not run git on a project a seat may have touched before
+   * dfctl swept it. Every non-archived project is gated at once (its jobs wait, see canStart; other projects are not
+   * affected) and swept: one `dfctl sweep-project <id> <worktree>` per DB-known worktree, or one project-level
+   * `dfctl sweep-project <id>` when it has none (this also re-applies dfctl's persistent sweep-failed marker). Up to
+   * `concurrency` projects are swept at the same time. A project whose sweep fails is stopped like a failed post-run
+   * sweep (blocked, queued jobs failed, requests needs_human); the gate is lifted for each project as soon as it is
+   * done. The gates are set synchronously, before this returns its promise.
+   */
+  startupSweep(concurrency = 3): Promise<{ swept: number[]; blocked: { projectId: number; error: string }[] }> {
+    const projects = this.repo.listProjects();
+    for (const p of projects) this.sweeping.add(p.id);
     const swept: number[] = [];
     const blocked: { projectId: number; error: string }[] = [];
-    for (const p of this.repo.listProjects()) {
-      const dir = join(p.path, '.devflow', 'worktrees');
+    const one = async (p: (typeof projects)[number]): Promise<void> => {
       try {
-        let names: string[] = [];
-        try { names = readdirSync(dir).sort(); } catch (e) {
-          if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`cannot list ${dir}: ${(e as Error).message}`);
-        }
-        // Names only: dfctl itself refuses a worktree path that is (or contains) a symlink.
-        for (const n of names) await this.seatRunner.sweepProject(p.id, join(dir, n));
+        const wts = this.knownWorktrees(p.id, p.path);
+        if (!wts.length) await this.seatRunner.sweepProject(p.id);
+        for (const w of wts) await this.seatRunner.sweepProject(p.id, w);
         swept.push(p.id);
       } catch (e) {
         // Fail closed: any error (SeatSweepError or dfctl not reachable) stops the project until an admin clears it.
         const msg = e instanceof Error ? e.message : String(e);
         blocked.push({ projectId: p.id, error: msg });
         this.stopProject(p.id, msg);
+      } finally {
+        this.sweeping.delete(p.id);
       }
-    }
-    return { swept, blocked };
+    };
+    const queue = [...projects];
+    const lane = async (): Promise<void> => { for (let p = queue.shift(); p; p = queue.shift()) await one(p); };
+    return Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, queue.length)) }, lane)).then(() => ({ swept, blocked }));
   }
 
   /** True when a job may start now (worker: per-seat concurrency and per-seat rate limit). */
   canStart(job: JobRow): boolean {
+    if (this.sweeping.size && job.requestId) {
+      const pid = this.repo.getRequest(job.requestId)?.projectId;
+      if (pid != null && this.sweeping.has(pid)) return false;
+    }
     if (!this.multiUser || job.seatUserId == null) return true;
     if (this.seatPausedTill(job.seatUserId) !== undefined) return false;
     let n = 0;

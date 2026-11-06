@@ -16,7 +16,7 @@ export function fakeSeats() {
   const calls: SeatCall[] = [];
   const state = new Map<number, SeatState>();
   const statusChecks: number[] = [];
-  const sweeps: [number, string][] = [];
+  const sweeps: [number, string | undefined][] = [];
   let sweepFail = false;
   let behave: (c: SeatCall) => Promise<RunResult> | RunResult = () => ({ ok: true, resultText: 'ok' });
   const runner: SeatRunner = {

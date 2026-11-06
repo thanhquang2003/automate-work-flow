@@ -38,12 +38,8 @@ async function main(): Promise<void> {
   }
   const worker = new Worker(cfg, repo, pipeline);
   const app = await buildServer(cfg, { repo, pipeline, systemOps, seatRunner, projects });
-  await app.listen({ host: cfg.host, port: cfg.port });
-  // Server mode: dfctl sweeps every project's worktrees BEFORE the worker requeues/runs any job (I1);
-  // a project whose sweep fails stays blocked. The web UI is already up meanwhile (jobs only queue).
-  await startEngine(cfg, pipeline, worker);
-  console.log(`DevFlow (${cfg.mode}) đang chạy tại http://${cfg.host === '0.0.0.0' ? 'localhost' : cfg.host}:${cfg.port}`);
 
+  // Signal handlers first: a stop during the (possibly long) startup sweep still shuts down cleanly.
   let stopping = false;
   const shutdown = (sig: string) => {
     if (stopping) return;
@@ -56,6 +52,11 @@ async function main(): Promise<void> {
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  await app.listen({ host: cfg.host, port: cfg.port });
+  console.log(`DevFlow (${cfg.mode}) đang chạy tại http://${cfg.host === '0.0.0.0' ? 'localhost' : cfg.host}:${cfg.port}`);
+  // Server mode: every project is gated and swept by dfctl before ITS jobs run (I1/I1b); the worker starts at once.
+  await startEngine(cfg, pipeline, worker);
 }
 
 main().catch(e => { console.error(e); process.exit(1); });

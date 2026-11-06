@@ -181,6 +181,9 @@ describe.skipIf(!hasBash)('SudoSeatRunner', () => {
     const wt = '/srv/p/.devflow/worktrees/R1';
     await runner.sweepProject(4, wt);
     expect(f.calls().at(-1)).toEqual(['sweep-project', '4', wt]);
+    // Project-level sweep (startup, project without worktrees): no worktree argument at all.
+    await runner.sweepProject(4);
+    expect(f.calls().at(-1)).toEqual(['sweep-project', '4']);
     f.set('sweep-fail', '1');
     await expect(runner.sweepProject(4, wt)).rejects.toThrow(/hard-linked/);
     await expect(runner.sweepProject(4, wt)).rejects.toBeInstanceOf(SeatSweepError);

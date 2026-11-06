@@ -114,7 +114,7 @@ async function boot() {
     login(): LoginSession { const l = new FakeLogin(); logins.push(l); return l; },
     async status(userId) { return { state: seatState.get(userId) ?? 'connected' }; },
     async logout() { /* nothing */ },
-    async sweepProject(projectId, worktree) { timeline.push(`sweep:${projectId}:${basename(worktree)}`); },
+    async sweepProject(projectId, worktree) { timeline.push(`sweep:${projectId}:${worktree ? basename(worktree) : '-'}`); },
   };
 
   const pipeline = new Pipeline(cfg, repo, { seatRunner: runner, makeGitLab: () => gl.client });

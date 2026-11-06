@@ -32,9 +32,10 @@ export interface SeatRunner {
   /**
    * Root-side sweep of a project's git dirs (dfctl sweep-project). Must be awaited before DevFlow runs git
    * on a project after a seat run that did not end normally (aborted/timeout) and before git on a worktree.
-   * Throws SeatSweepError when the sweep fails. No-op in local mode.
+   * Throws SeatSweepError when the sweep fails. No-op in local mode. Without `worktree`: project-level sweep (the
+   * project's .git only; used at startup for a project with no worktree).
    */
-  sweepProject(projectId: number, worktree: string): Promise<void>;
+  sweepProject(projectId: number, worktree?: string): Promise<void>;
 }
 
 export function newRunId(): string { return randomBytes(12).toString('hex'); }
@@ -171,10 +172,10 @@ export class SudoSeatRunner implements SeatRunner {
   }
 
   /** Waits for any run on `worktree` to be fully finished (dfctl's per-worktree lock), then sweeps. */
-  async sweepProject(projectId: number, worktree: string): Promise<void> {
+  async sweepProject(projectId: number, worktree?: string): Promise<void> {
     if (!Number.isInteger(projectId) || projectId < 1) throw new Error(`Invalid project id: ${String(projectId)}`);
-    if (typeof worktree !== 'string' || !isAbsolute(worktree)) throw new Error('Worktree path must be absolute');
-    const r = await this.exec(this.dfctl('sweep-project', String(projectId), worktree), 20 * 60_000);
+    if (worktree !== undefined && (typeof worktree !== 'string' || !isAbsolute(worktree))) throw new Error('Worktree path must be absolute');
+    const r = await this.exec(this.dfctl('sweep-project', String(projectId), ...(worktree === undefined ? [] : [worktree])), 20 * 60_000);
     if (r.code !== 0) {
       throw new SeatSweepError(`dfctl sweep-project ${projectId} failed (exit ${r.code}): ${r.stderr.trim().slice(-300)}`);
     }
