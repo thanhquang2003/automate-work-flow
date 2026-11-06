@@ -46,11 +46,16 @@ Lấy UUID của tổ chức Claude Team trong trang quản trị của Anthropi
 | `ALLOWED_EMAIL_DOMAINS` | Tên miền email được đăng nhập, cách nhau dấu phẩy. **Phải khác rỗng**: để trống thì mọi lần đăng nhập đều bị từ chối. |
 | `ADMIN_EMAILS`, `CTO_EMAILS` | Danh sách email, gán vai trò ngay lần đăng nhập Google đầu tiên. |
 | `HEAD_EMAILS`, `DEPUTY_EMAILS` | Trưởng/phó phòng theo phòng, dạng `DEV:a@x,b@x;SGLOBAL:c@x`. |
+| `GITLAB_URL` | Địa chỉ GitLab, ví dụ `https://gitlab.example.com`. Có thể nhập trong trang Cài đặt (giá trị ở đó ghi đè biến môi trường). |
+| `GITLAB_TOKEN` | Personal Access Token dùng chung của DevFlow, quyền **`api` và `write_repository`**. Nhập qua biến môi trường hoặc trang Cài đặt; token nhập ở trang Cài đặt được lưu mã hóa bằng `SECRET_KEY`. Mỗi người còn có thể đặt token riêng ở trang **Tài khoản** (`/me`, lưu mã hóa); yêu cầu dùng token của người tạo yêu cầu khi có, nếu không thì dùng token chung. |
+| `GITLAB_DEFAULT_GROUP` | Group mặc định khi tạo project GitLab mới (chế độ dự án "mới" có đẩy lên GitLab). |
 | `PROJECT_ROOTS` | Thư mục gốc chứa các dự án (phải trùng với `PROJECT_ROOTS` của install-server.sh). |
 | `SEAT_CONCURRENCY` | Số lần chạy Claude đồng thời trên mỗi seat (mặc định 1). |
 | `MAX_CONCURRENT_JOBS` | Tổng số job đồng thời (mặc định 4 ở server mode). |
 | `DFCTL_PATH` | Mặc định `/usr/local/lib/devflow/dfctl`. Server mode không khởi động nếu dfctl thiếu, không thuộc root hoặc ghi được bởi người khác. |
 | `BREAKGLASS_ADMIN` | Tên một tài khoản admin cục bộ dùng mật khẩu khi Google hỏng (để trống = tắt). Đặt mật khẩu bằng `BREAKGLASS_PASSWORD=<mật khẩu ≥ 12 ký tự> npm run admin:set-password -- <tên>` (nếu bỏ biến này, script hỏi và hiện chữ gõ; không truyền mật khẩu qua tham số dòng lệnh). Script chỉ nhận đúng tên trong `BREAKGLASS_ADMIN`. |
+
+**GitLab** là tùy chọn nhưng quyết định luồng nhánh/MR: khi dự án gắn với một GitLab project (`gitlab_project` lúc tạo dự án) và có URL cùng token, mỗi task mở một MR vào `devflow/<mã>` và DevFlow tự merge MR task đó (lần lượt, có khóa theo yêu cầu); đến DONE DevFlow chỉ **mở** MR cuối `devflow/<mã>` vào nhánh mặc định và **không bao giờ merge** MR này (người có thẩm quyền review và merge trên GitLab); bug do Tester tìm thấy được log thành issue. Khi không có GitLab (hoặc không truy cập được), DevFlow chạy ở chế độ cục bộ: merge task vào `devflow/<mã>` bằng git, không có MR/issue, nhánh mặc định không bị đụng tới. Token GitLab chỉ dùng cho lệnh mạng của git/GitLab, không bao giờ đưa vào môi trường của seat.
 
 Đăng nhập bằng mật khẩu đã bị bỏ, ngoại trừ break-glass. Trang `/setup` bị khóa khi bật Google.
 
@@ -64,7 +69,7 @@ Có hai phòng ban cố định: **DEV** và **SGLOBAL**.
 4. PM tạo dự án (thư mục dưới `PROJECT_ROOTS`; chế độ "có sẵn", "clone" hoặc "mới"), thêm thành viên cùng phòng và gán vai trò dự án (PM, BA, SE, DEV, REVIEWER, TESTER), rồi tạo yêu cầu với mã tự nhập.
 5. Mỗi thành viên vào trang "Claude của tôi" và kết nối seat của mình (mở link, dán mã vào ô ẩn).
 
-Quy tắc mã yêu cầu: `^[A-Za-z0-9._-]{1,40}$`, duy nhất trong dự án, không trùng nhánh `devflow/<mã>`. Quy tắc tiền tố nghiêm hơn: không cho `ERP` và `ERP-1` cùng tồn tại trong một dự án (nhánh/worktree task `<mã>-<TASK>` sẽ đụng nhau).
+Quy tắc mã yêu cầu: `^[A-Za-z0-9._-]{1,40}$`, duy nhất trong dự án, không trùng nhánh `devflow/<mã>`. Lưu ý xung đột tên nhánh git: `devflow/<mã>` là một nhánh nên không thể có thêm nhánh `devflow/<mã>/x` (thư mục và file trùng tên trong `refs/heads`), và ngược lại; đừng tạo nhánh tay có dạng đó trong repo dự án. Quy tắc tiền tố nghiêm hơn: không cho `ERP` và `ERP-1` cùng tồn tại trong một dự án (nhánh/worktree task `<mã>-<TASK>` sẽ đụng nhau).
 
 ## 8. Vận hành
 
@@ -87,7 +92,7 @@ Chưa có mục nào dưới đây được chạy ở nơi phát triển (khôn
 5. Hành vi dfctl thật: `useradd/groupadd/gpasswd`, `runuser/setpriv --init-groups`, `env -C` (coreutils ≥ 8.28), `stop-claude` với tiến trình root/khác user, quyền sở hữu/chmod do HARDEN lên file thật của seat (từ chối do sai chủ, xóa symlink), `flock`/`chown -h`, từ chối khi không có systemd, cron/at deny với bản cron đã cài.
 6. Văn bản lỗi thật của Claude: các mẫu nhận diện "hết hạn/chưa đăng nhập" (`login expired`, `Invalid API key · Please run /login`, `not logged in`, ...) là suy đoán; chủ động làm hết hạn/đăng xuất một seat rồi xem yêu cầu có chuyển `awaiting_seat` và hiện nút kết nối không. Định dạng `claude auth status` thật (parser xử lý JSON `loggedIn` và văn bản).
 7. Đường dẫn Claude thật cho thành viên: một dự án thử với đủ 6 vai trò chạy trọn một yêu cầu nhỏ; xác nhận mỗi lần gọi chạy đúng `dfu-<id>` của người phụ trách (`ps -o user`), trong `<dự án>/.devflow/worktrees/…`.
-8. Gỡ thành viên khi job đang chạy: thời gian thật của "dừng + sweep" trước khi group thay đổi. Đổi người chạy giữa chừng. Hai Dev song song với GitLab thật (luồng MR cho task song song mới được thử với GitLab giả).
+8. GitLab thật (E2E chỉ dùng GitLab giả): với PAT quyền `api` + `write_repository`, chạy một yêu cầu có hai Dev song song và xác nhận: MR của từng task được tạo và merge lần lượt vào `devflow/<mã>` (không có xung đột index/lock ở worktree yêu cầu), MR cuối ở DONE được mở và **không** bị merge, issue bug được tạo/đóng, nhánh mặc định không đổi; thử token thiếu quyền để thấy thông báo lỗi rõ ràng. Gỡ thành viên khi job đang chạy: thời gian thật của "dừng + sweep" trước khi group thay đổi. Đổi người chạy giữa chừng. 
 9. Trình duyệt: hiển thị các trang Eta mới (hộp việc, dự án, phân công, "Claude của tôi", quản trị, giám sát), SSE trang seat, luồng đăng nhập Google thật (`googleOidcClient` chưa được chạy với Google thật) — redirect URI phải khớp.
 10. Giám sát: với repo lớn thật, thời gian đọc (mỗi lần xem file chạy vài tiến trình git, chưa có cache); thử thấy `.env`/`*.pem` bị ẩn.
 11. Managed settings: file `/etc/claude-code/managed-settings.json` có tác dụng thật (mục 5).

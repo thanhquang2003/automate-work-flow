@@ -164,7 +164,7 @@ async function boot() {
       if (pred()) return;
       const bad = repo.listRequests().filter(r => ['failed', 'needs_human', 'cancelled'].includes(r.status));
       if (bad.length) throw new Error(`${what}: ${bad.map(r => `${r.id} ${r.status}@${r.stage}: ${repo.listEvents(r.id).slice(-3).map(e => e.message).join(' | ')}`).join(' ; ')}`);
-            if (!repo.listRequests().some(r => r.status === 'running')) throw new Error(`${what}: nothing left to run but the condition is false: ${JSON.stringify(repo.listRequests().map(r => [r.code, r.stage, r.status]))} jobs=${JSON.stringify(repo.listJobs().filter(j => j.status !== 'done').map(j => [j.requestId, j.kind, j.status, j.payload]))} runs=${JSON.stringify(repo.listStageRuns('REQ-001').map(r => [r.stage, r.attempt, r.status]))} events=${JSON.stringify(repo.listEvents('REQ-001').slice(-14).map(e => e.message))}`);
+      if (!repo.listRequests().some(r => r.status === 'running')) throw new Error(`${what}: nothing left to run but the condition is false: ${JSON.stringify(repo.listRequests().map(r => [r.code, r.stage, r.status]))}`);
     }
     throw new Error(`timed out: ${what}`);
   };
@@ -219,7 +219,7 @@ describe('v3 multi-user end to end', () => {
     for (const d of dirs) rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
-  const EMAILS = { head: 'head@corp.com', pm: 'pm@corp.com', ba1: 'ba1@corp.com', ba2: 'ba2@corp.com', se: 'se@corp.com', dev1: 'dev1@corp.com', dev2: 'dev2@corp.com', rev: 'rev@corp.com', tester: 'tester@corp.com', outsider: 'outsider@corp.com', cto: 'cto@corp.com', sghead: 'sghead@corp.com' };
+  const EMAILS = { admin: 'root@corp.com', head: 'head@corp.com', pm: 'pm@corp.com', ba1: 'ba1@corp.com', ba2: 'ba2@corp.com', se: 'se@corp.com', dev1: 'dev1@corp.com', dev2: 'dev2@corp.com', rev: 'rev@corp.com', tester: 'tester@corp.com', outsider: 'outsider@corp.com', cto: 'cto@corp.com', sghead: 'sghead@corp.com' };
   const E = EMAILS;
   const A = 'ALPHA-1';
   const B = 'BETA-2';
@@ -305,7 +305,9 @@ describe('v3 multi-user end to end', () => {
   it('parallel requests reach the first gate; every Claude call is on the right seat inside a worktree', async () => {
     await w.settle(() => at(A, 'CODEBASE_SCAN')() && at(B, 'CODEBASE_SCAN')(), 'CODEBASE_SCAN gates');
     const scans = w.calls.filter(c => c.role === 'explorer');
-    // The codebase map is cached per GitLab project: the first request scans, the second reuses it.
+    // The codebase map is cached per GitLab project. With SEAT_CONCURRENCY=1 the single SE runs the two scans one
+    // after the other, so the second request finds the first one's map and does not call Claude (with a higher
+    // seat limit both could scan at once and this count would change).
     expect(scans).toHaveLength(1);
     expect([A, B]).toContain(scans[0]!.wt);
     expect(scans[0]!.userId).toBe(id('se'));
@@ -339,7 +341,7 @@ describe('v3 multi-user end to end', () => {
     await w.settle(() => at(A, 'CLARIFY', 'awaiting_customer')() && at(B, 'CLARIFY', 'awaiting_customer')(), 'CLARIFY');
 
     const qid = w.repo.listQuestions(rid(A))[0]!.id;
-    const before = JSON.stringify(w.repo.latestAnswers(rid(A)).entries().toArray?.() ?? [...w.repo.latestAnswers(rid(A))]);
+    const before = JSON.stringify([...w.repo.latestAnswers(rid(A))]);
     for (const e of [E.dev1, E.tester, E.rev, E.outsider, E.cto]) {
       expect((await w.post(e, `/requests/${rid(A)}/answers`, { qid, answer: 'Nhân viên' })).statusCode, e).toBe(403);
       expect((await w.post(e, `/requests/${rid(A)}/continue`)).statusCode, e).toBe(403);
@@ -393,9 +395,14 @@ describe('v3 multi-user end to end', () => {
       expect(w.repo.listStageRuns(rid(code)).filter(r => r.stage === 'DESIGN').map(r => r.status)).toContain('awaiting_seat');
     }
     // The CTO sees it as a blocker.
-    const bl = await w.get(E.cto, `/oversight/projects/${projectId}`);
+    const AWAITING = 'Chờ người phụ trách kết nối Claude';
+    const bl = await w.get(E.cto, '/oversight/blockers');
     expect(bl.statusCode).toBe(200);
+    expect(bl.body).toContain(AWAITING);
     expect(bl.body).toContain(A);
+    expect(bl.body).toContain(B);
+    const proj = await w.get(E.cto, `/oversight/projects/${projectId}`);
+    expect(proj.body).toContain(AWAITING);
 
     // The SE reconnects through the seat page: the login succeeds and the parked jobs wake up at once.
     w.seatState.set(id('se'), 'connected');
@@ -405,6 +412,9 @@ describe('v3 multi-user end to end', () => {
     await login.result;
     await w.settle(() => at(A, 'DESIGN')() && at(B, 'DESIGN')(), 'DESIGN gates after reconnect');
     expect(w.calls.filter(c => c.role === 'architect' && c.outcome === 'ok').every(c => c.userId === id('se'))).toBe(true);
+    // Resumed: the blocker is gone from the CTO's list.
+    const after = await w.get(E.cto, '/oversight/blockers');
+    expect(after.body).not.toContain(AWAITING);
     expect((await approve(E.se, A)).statusCode).toBe(302);
     expect((await approve(E.se, B)).statusCode).toBe(302);
   }, T);
@@ -425,14 +435,20 @@ describe('v3 multi-user end to end', () => {
   }, T);
 
   it('DEVELOP: two Devs work in parallel worktrees; merges are serialized; reviewer approves; TEST/BUGFIX; PM closes', async () => {
-    const mergeCalls: string[] = [];
+    // Merges into devflow/<code> go through the fake GitLab. The first one is held on a gate: the second must not
+    // enter mergeMR until it is released (the per-request merge lock), so any overlap would show in `entered`.
+    const entered: string[] = [];
     let active = 0;
     let maxActive = 0;
+    const firstMergeIn = deferred();
+    const releaseFirstMerge = deferred();
     const origMerge = w.gl.client.mergeMR.bind(w.gl.client);
     w.gl.client.mergeMR = (async (...a: Parameters<typeof origMerge>) => {
-      active++; maxActive = Math.max(maxActive, active); mergeCalls.push(String(a[1]));
-      await new Promise(r => setImmediate(r));
-      try { return await origMerge(...a); } finally { active--; }
+      active++; maxActive = Math.max(maxActive, active); entered.push(String(a[1]));
+      try {
+        if (entered.length === 1) { firstMergeIn.resolve(); await releaseFirstMerge.promise; }
+        return await origMerge(...a);
+      } finally { active--; }
     }) as typeof origMerge;
 
     // Tasks exist after PLANNING: the PM gives T-02 to the second Dev (a reviewer cannot).
@@ -443,15 +459,24 @@ describe('v3 multi-user end to end', () => {
     // Rendezvous: both developer calls are inside Claude at the same moment.
     const d1 = w.hold(c => c.wt === `${A}-T-01` && c.role === 'developer');
     const d2 = w.hold(c => c.wt === `${A}-T-02` && c.role === 'developer');
-    await w.pumpUntil(Promise.all([d1.started.promise, d2.started.promise]), 'both developers in flight').catch(e => { throw new Error(`${e.message} ${JSON.stringify([w.repo.listRequests().map(r => [r.code, r.stage, r.status]), w.repo.listJobs(rid(A)).slice(-6).map(j => [j.kind, j.status, j.payload, j.seatUserId, j.lastError]), w.calls.slice(-4).map(c => [c.wt, c.role, c.userId, c.outcome]), w.repo.listTasks(rid(A)).map(t => [t.id, t.status, t.assigneeId]), w.repo.listEvents(rid(A)).slice(-6).map(e => e.message)])}`); });
+    await w.pumpUntil(Promise.all([d1.started.promise, d2.started.promise]), 'both developers in flight');
     const devs = w.calls.filter(c => c.wt.startsWith(`${A}-T-`) && c.role === 'developer');
     expect(new Map(devs.map(c => [c.wt, c.userId]))).toEqual(new Map([[`${A}-T-01`, id('dev1')], [`${A}-T-02`, id('dev2')]]));
     expect(new Set(devs.map(c => c.cwd)).size).toBe(2);
     expect(existsSync(join(projectPath, '.devflow', 'worktrees', `${A}-T-01`))).toBe(true);
     expect(existsSync(join(projectPath, '.devflow', 'worktrees', `${A}-T-02`))).toBe(true);
     d1.release.resolve(); d2.release.resolve();
+    // One task reaches its merge and is held there; the other task finishes its review and then has to wait.
+    await w.pumpUntil(firstMergeIn.promise, 'first merge entered');
+    await w.pumpUntil((async () => {
+      while (!['T-01', 'T-02'].every(t => w.calls.some(c => c.wt === `${A}-${t}` && c.role === 'reviewer' && c.outcome === 'ok'))) await new Promise(r => setImmediate(r));
+    })(), 'both tasks reviewed');
+    for (let i = 0; i < 300; i++) { await w.worker.tick(); await new Promise(r => setImmediate(r)); } // bounded yielding, not a sleep
+    expect(entered, 'second merge must wait for the first').toHaveLength(1);
+    releaseFirstMerge.resolve();
     await finishGatesUntil(A, 'DEVELOP');
 
+    expect(entered).toHaveLength(2);
     expect(maxActive).toBe(1);
     expect([...w.gl.mrs.values()].filter(m => m.target === `devflow/${A}` && m.state === 'merged').map(m => m.source).sort()).toEqual([`devflow/${A}-T-01`, `devflow/${A}-T-02`]);
     const tree = git(projectPath, 'ls-tree', '-r', '--name-only', `devflow/${A}`);
@@ -484,7 +509,7 @@ describe('v3 multi-user end to end', () => {
     expect((await w.post(E.pm, `/requests/${rid(B)}/tasks/T-02/assign`, { user: String(id('dev2')) })).statusCode).toBe(302);
     const h = w.hold(c => c.wt === `${B}-T-02` && c.role === 'developer');
     await w.pumpUntil(h.started.promise, 'dev2 inside Claude');
-    expect(w.calls.at(-1)!.userId === id('dev2') || w.calls.some(c => c.wt === `${B}-T-02` && c.userId === id('dev2'))).toBe(true);
+    expect(w.calls.filter(c => c.wt === `${B}-T-02` && c.role === 'developer').map(c => c.userId)).toEqual([id('dev2')]);
 
     const keep = w.repo.listProjectMembers(projectId).filter(m => m.userId !== id('dev2'));
     const body: Record<string, string[]> = Object.fromEntries(keep.map(m => [`r_${m.userId}`, m.roles]));
@@ -528,10 +553,35 @@ describe('v3 multi-user end to end', () => {
     expect(page.statusCode).toBe(200);
     expect(page.body).toContain(A);
     expect(page.body).toContain(B);
-    expect((await w.get(E.cto, '/oversight/blockers')).statusCode).toBe(200);
-    expect((await w.get(E.cto, '/oversight/users')).statusCode).toBe(200);
+    // Everything is finished: the blockers page has nothing about the two requests.
+    const blockers = await w.get(E.cto, '/oversight/blockers');
+    expect(blockers.statusCode).toBe(200);
+    expect(blockers.body).not.toContain(A);
+    expect(blockers.body).not.toContain(B);
+    // Per-person page: members with their e-mail and a seat yes/no (never credentials).
+    w.seatState.set(id('tester'), 'disconnected');
+    const usersPage = await w.get(E.cto, '/oversight/users');
+    expect(usersPage.statusCode).toBe(200);
+    const row = (email: string): string => usersPage.body.split('<tr>').find(r => r.includes(email)) ?? '';
+    expect(row(E.dev1)).toContain('Đã kết nối');
+    expect(row(E.tester)).toContain('Chưa kết nối');
+    expect(row(E.pm)).toContain('Có'); // can_be_pm
+    expect(usersPage.body).not.toMatch(/token|password|credential/i);
     expect((await w.get(E.head, pj)).statusCode).toBe(200);
-    expect((await w.get('root@corp.com' in {} ? E.cto : E.cto, pj)).statusCode).toBe(200);
+    // The admin is not a member of the project: oversight read access only, no project rights.
+    const aPage = await w.get(E.admin, pj);
+    expect(aPage.statusCode).toBe(200);
+    expect(aPage.body).toContain(A);
+    expect(aPage.body).toContain(B);
+    expect((await w.get(E.admin, '/oversight/projects')).body).toContain('ERP');
+    expect((await w.get(E.admin, `${pj}/files?ref=main&path=README.md`)).body).toContain('# app');
+    const membersBefore = JSON.stringify(w.repo.listProjectMembers(projectId));
+    expect((await w.get(E.admin, `/projects/${projectId}`)).statusCode).toBe(403);
+    expect((await w.post(E.admin, `/projects/${projectId}/members`, { [`r_${id('admin')}`]: ['PM'] })).statusCode).toBe(403);
+    expect((await w.post(E.admin, `/requests/${rid(A)}/approve`, { expect: w.gate(rid(A)) })).statusCode).toBe(403);
+    expect((await w.post(E.admin, `/requests/${rid(A)}/tasks/T-02/assign`, { user: String(id('dev2')) })).statusCode).toBe(403);
+    expect(JSON.stringify(w.repo.listProjectMembers(projectId))).toBe(membersBefore);
+    expect(status(A).status).toBe('done');
     expect((await w.get(E.sghead, pj)).statusCode).toBe(404);
     expect((await w.get(E.sghead, `${pj}/files?path=README.md`)).statusCode).toBe(404);
     for (const e of [E.pm, E.dev1, E.outsider]) expect((await w.get(e, pj)).statusCode, e).toBe(403);
@@ -540,13 +590,18 @@ describe('v3 multi-user end to end', () => {
     const readme = await w.get(E.cto, `${pj}/files?ref=main&path=README.md`);
     expect(readme.statusCode).toBe(200);
     expect(readme.body).toContain('# app');
-    const root = await w.get(E.cto, `${pj}/files?ref=main`);
-    expect(root.statusCode).toBe(200);
-    expect(root.body).toContain('README.md');
-    expect(root.body).not.toContain('.env');
-    const env = await w.get(E.cto, `${pj}/files?ref=main&path=.env`);
-    expect(env.statusCode).toBe(404);
-    expect(env.body).not.toContain('hunter2');
+    // The secret really is in the repository (default branch and the request branch inherit it) ...
+    for (const ref of ['main', `devflow/${A}`]) expect(git(projectPath, 'ls-tree', '--name-only', ref).split('\n'), ref).toContain('.env');
+    // ... and is hidden from listings and direct requests on both refs.
+    for (const ref of ['main', `devflow/${A}`]) {
+      const root = await w.get(E.cto, `${pj}/files?ref=${encodeURIComponent(ref)}`);
+      expect(root.statusCode, ref).toBe(200);
+      expect(root.body, ref).toContain('README.md');
+      expect(root.body, ref).not.toMatch(/\.env\b/);
+      const env = await w.get(E.cto, `${pj}/files?ref=${encodeURIComponent(ref)}&path=.env`);
+      expect(env.statusCode, ref).toBe(404);
+      expect(env.body, ref).not.toContain('hunter2');
+    }
     expect((await w.get(E.cto, `${pj}/files?ref=main&path=../../etc/passwd`)).statusCode).toBeGreaterThanOrEqual(400);
     const deliv = await w.get(E.cto, `${pj}/files?ref=devflow/${A}&path=docs/devflow/${A}/deliverables`);
     expect(deliv.statusCode).toBe(200);

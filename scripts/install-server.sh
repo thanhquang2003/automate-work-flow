@@ -67,6 +67,11 @@ CLAUDE_REAL="$(realpath -e -- "$CLAUDE_BIN")" || die "CLAUDE_BIN does not exist"
 [ "$(stat -c %u -- "$CLAUDE_REAL")" = 0 ] || die "claude binary $CLAUDE_REAL must be owned by root (install it as root, not per user)"
 (( (8#$(stat -c %a -- "$CLAUDE_REAL") & 8#022) == 0 )) || die "claude binary $CLAUDE_REAL is writable by group/others"
 
+GIT_VER="$(git --version 2>/dev/null | sed -n 's/^git version \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')"
+[ -n "$GIT_VER" ] || die "git not found or version not readable"
+GIT_MAJOR="${GIT_VER%%.*}"; GIT_MINOR="${GIT_VER#*.}"
+{ [ "$GIT_MAJOR" -gt 2 ] || { [ "$GIT_MAJOR" -eq 2 ] && [ "$GIT_MINOR" -ge 43 ]; }; } || die "git 2.43 or newer required (found $GIT_VER)"
+
 NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
 [ -n "$NODE_BIN" ] && [ -x "$NODE_BIN" ] || die "node not found; set NODE_BIN to a node 24 binary"
 NODE_MAJOR="$("$NODE_BIN" -p 'process.versions.node.split(".")[0]')"
