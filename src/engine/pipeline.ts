@@ -327,7 +327,7 @@ export class Pipeline {
   /** After CHANGE: gate the analysed CRs, or auto-accept them (auto mode, no remove, effort within the ceiling). */
   private afterChange(job: JobRow, req: RequestRow, run: StageRunRow, userPaused: boolean): void {
     const { repo } = this;
-    const ws = Workspace.for(this.cfg, req.id);
+    const ws = Workspace.forRequest(this.cfg, this.repo, req);
     const analysed = repo.listChangeRequests(req.id).filter(c => c.status === 'analyzing');
     const missing = analysed.filter(c => !loadImpact(ws, c.id)).map(c => c.id);
     const fail = (error: string): void => this.applyOutcome(job, req, run, { kind: 'fail', error }, userPaused);
@@ -409,7 +409,7 @@ export class Pipeline {
       return;
     }
 
-    const ws = Workspace.for(this.cfg, reqId);
+    const ws = Workspace.forRequest(this.cfg, this.repo, this.repo.getRequest(reqId)!);
     const impacts = accepted.map(c => {
       const i = loadImpact(ws, c.id);
       if (!i) throw new Error(`Không đọc được báo cáo tác động (impact.json) hợp lệ của ${c.id}`);
@@ -502,7 +502,7 @@ export class Pipeline {
       }
       const req = this.repo.getRequest(reqId)!;
       run = this.repo.createStageRun(reqId, stage, payload.feedback ?? null);
-      const ws = Workspace.for(this.cfg, reqId).ensure();
+      const ws = Workspace.forRequest(this.cfg, this.repo, req).ensure();
       this.log(reqId, 'info', `Bắt đầu giai đoạn ${stage} (lần ${run.attempt})`);
       const reg = registry.get(stage);
       if (reg) outcome = await reg.handler(this.makeContext(req, ws, run, payload.feedback, !!payload.resume, controller.signal));

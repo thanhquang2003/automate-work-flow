@@ -8,7 +8,7 @@ import { buildPrompt } from '../prompt.js';
 import type { StageContext, StageOutcome } from '../pipeline.js';
 import { OutputError, readJsonOutput, runClaudeStep } from './claude-json.js';
 import {
-  DOCS_PATHSPEC, artifactName, contextFileVars, crResponsible, designFile, ensureOnBranch, fileRef, integrationBranch, isIncremental, promptExtras,
+  artifactName, contextFileVars, crResponsible, designFile, ensureOnBranch, fileRef, integrationBranch, isIncremental, promptExtras,
   pushIfRemote, sortedTestCases, tcSheetRow, updateFlowState,
 } from './common.js';
 
@@ -207,7 +207,7 @@ export async function planning(ctx: StageContext): Promise<StageOutcome> {
         if (bug && bug.status !== 'closed') repo.upsertBug(req.id, { ...bug, fixAttempts: 0, status: 'closed', note: `Đóng do ${cr ?? 'thay đổi yêu cầu'}` });
       }
     });
-    const out = join(ws.artifactsDir, artifactName('TestCase', req.id, ctx.baseline));
+    const out = join(ws.artifactsDir, artifactName('TestCase', ctx.ws.key, ctx.baseline));
     await writeTestCases(templatePath(ctx.cfg, 'testcase'), sortedTestCases(repo, req.id).map(tcSheetRow), out);
     const active = <T extends { scopeStatus: string }>(xs: T[]): number => xs.filter(x => x.scopeStatus === 'active').length;
     ctx.log(`Đã cập nhật kế hoạch: ${active(m.tasks)} task, ${active(m.tcs)} test case còn hiệu lực (giữ lịch sử kiểm thử); xuất ${out}`);
@@ -229,7 +229,7 @@ export async function planning(ctx: StageContext): Promise<StageOutcome> {
   repo.clearBugs(req.id);
   updateFlowState(ws, s => { s.runs = {}; s.issueUrls = {}; s.bugSynced = {}; s.lastFixSeq = 0; });
 
-  const out = join(ws.artifactsDir, artifactName('TestCase', req.id, ctx.baseline));
+  const out = join(ws.artifactsDir, artifactName('TestCase', ctx.ws.key, ctx.baseline));
   await writeTestCases(templatePath(ctx.cfg, 'testcase'), sortedTestCases(repo, req.id).map(tcSheetRow), out);
   ctx.log(`Đã lập ${taskRows.length} task, ${tcRows.length} test case; xuất ${out}`);
   await commitPlan(ctx);
@@ -239,9 +239,9 @@ export async function planning(ctx: StageContext): Promise<StageOutcome> {
 async function commitPlan(ctx: StageContext): Promise<void> {
   const { ws, req } = ctx;
   if (existsSync(join(ws.repoDir, '.git'))) {
-    const branch = integrationBranch(req.id);
+    const branch = integrationBranch(ctx.ws.key);
     await ensureOnBranch(ctx, branch);
-    const committed = await ctx.git.commitPaths([DOCS_PATHSPEC], `docs(devflow): ${req.id} kế hoạch task và test case`);
+    const committed = await ctx.git.commitPaths([ctx.ws.docsRel], `docs(devflow): ${req.id} kế hoạch task và test case`);
     if (committed) await pushIfRemote(ctx, branch);
   }
 }

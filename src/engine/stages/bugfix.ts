@@ -62,7 +62,7 @@ export async function bugfix(ctx: StageContext): Promise<StageOutcome> {
 
   const base = await prepareIntegration(ctx);
   let bug = bugs.find(b => b.status === 'fixing') ?? bugs[0]!;
-  const branch = workBranch(req.id, `fix-${bug.tcId}`);
+  const branch = workBranch(ctx.ws.key, `fix-${bug.tcId}`);
   if (bug.status === 'open') {
     bug = { ...bug, fixAttempts: bug.fixAttempts + 1, status: 'fixing' };
     repo.upsertBug(req.id, bug);

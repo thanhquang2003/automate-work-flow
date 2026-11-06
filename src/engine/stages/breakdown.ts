@@ -117,7 +117,7 @@ export async function breakdown(ctx: StageContext): Promise<StageOutcome> {
   const cancelledBy = (f: FeatureRow): { cancelledBy?: string } => (f.scopeStatus === 'cancelled' ? { cancelledBy: f.changedByCr ?? '' } : {});
   const fns = features.filter(f => f.kind === 'function');
   const nfs = features.filter(f => f.kind === 'nonfunction');
-  const xlsx = join(ws.artifactsDir, artifactName('ULNL', req.id, ctx.baseline));
+  const xlsx = join(ws.artifactsDir, artifactName('ULNL', ctx.ws.key, ctx.baseline));
   await writeUlnl(
     tpl,
     fns.map(f => ({ code: f.code, name: f.name, description: f.description, type_code: f.typeCode, unit_test: f.unitTest, note: f.note, ...cancelledBy(f) })),

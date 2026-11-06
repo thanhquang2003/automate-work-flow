@@ -86,7 +86,7 @@ export function changeRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
         return back(reply, id, 'changes', msgOf(e));
       }
       // The CHANGE job runs on a later worker tick, so attaching synchronously here is visible to it.
-      const dir = join(Workspace.for(cfg, id).ensure().inputsDir, 'changes', crId);
+      const dir = join(Workspace.forRequest(cfg, repo, repo.getRequest(id)!).ensure().inputsDir, 'changes', crId);
       const used = new Set<string>();
       const failed: string[] = [];
       for (const s of saved) {
@@ -140,7 +140,7 @@ export function changeRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline
     const r = repo.getRequest(id);
     const cr = r && repo.getChangeRequest(id, crId);
     if (!r || !cr) return errPage(req, reply, 404, 'Không tìm thấy yêu cầu thay đổi.');
-    const ws = Workspace.for(cfg, id);
+    const ws = Workspace.forRequest(cfg, repo, r);
     const md = join(changeDir(ws, crId), 'impact.md');
     return html(reply, render('impact', layout(req, `${cr.id} - Tác động`), {
       r, cr, impact: loadImpact(ws, crId), impactHtml: existsSync(md) ? markdownToHtml(readFileSync(md, 'utf8')) : '',

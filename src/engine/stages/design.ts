@@ -7,7 +7,7 @@ import { buildPrompt } from '../prompt.js';
 import type { StageContext, StageOutcome } from '../pipeline.js';
 import { OutputError, readTextOutput, runClaudeStep } from './claude-json.js';
 import {
-  DOCS_PATHSPEC, artifactName, contextFileVars, effectiveChanges, ensureOnBranch, headingHasCode, headings, integrationBranch, isIncremental,
+  artifactName, contextFileVars, effectiveChanges, ensureOnBranch, headingHasCode, headings, integrationBranch, isIncremental,
   missingHeadings, promptExtras, pushIfRemote,
 } from './common.js';
 
@@ -132,18 +132,18 @@ export async function design(ctx: StageContext): Promise<StageOutcome> {
   });
   if (!r.ok) return { kind: 'fail', error: r.error };
 
-  const tkctOut = join(ws.artifactsDir, artifactName('TKCT', req.id, ctx.baseline));
-  const tkdbOut = join(ws.artifactsDir, artifactName('TKDB', req.id, ctx.baseline));
+  const tkctOut = join(ws.artifactsDir, artifactName('TKCT', ctx.ws.key, ctx.baseline));
+  const tkdbOut = join(ws.artifactsDir, artifactName('TKDB', ctx.ws.key, ctx.baseline));
   const history = changeHistoryMarkdown(repo, req.id);
   await renderDocx(templatePath(ctx.cfg, 'tkct'), history ? withChangeHistory(r.value.tkct, history) : r.value.tkct, tkctOut);
   await renderDocx(templatePath(ctx.cfg, 'tkdb'), r.value.tkdb, tkdbOut);
   ctx.log(`Đã xuất ${tkctOut} và ${tkdbOut}`);
 
   if (existsSync(join(ws.repoDir, '.git'))) {
-    const branch = integrationBranch(req.id);
+    const branch = integrationBranch(ctx.ws.key);
     await ensureOnBranch(ctx, branch);
     // Only docs/devflow is committed: build outputs left by the scan must not land on the branch.
-    const committed = await ctx.git.commitPaths([DOCS_PATHSPEC], `docs(devflow): ${req.id} phân tích, bóc tách và thiết kế`);
+    const committed = await ctx.git.commitPaths([ctx.ws.docsRel], `docs(devflow): ${req.id} phân tích, bóc tách và thiết kế`);
     const pushed = committed && (await pushIfRemote(ctx, branch));
     ctx.log(committed ? `Đã commit tài liệu lên nhánh ${branch}${pushed ? ' và push lên GitLab' : ' (chưa có remote, không push)'}` : 'Tài liệu không thay đổi, không cần commit');
   } else {

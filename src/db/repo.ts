@@ -5,6 +5,7 @@ import type {
   RequestPatch, RequestRow, Stage, StageRunRow, TaskRow, TestCaseRow,
   ApprovalDecision, ApprovalRow, NewProject, ProjectMemberRow, ProjectRole, ProjectRow, RequestAssigneeRow,
 } from '../domain/types.js';
+import { PROJECT_ROLES } from '../domain/types.js';
 import { WebRepo } from './web-repo.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -23,6 +24,11 @@ const toApproval = (r: Row): ApprovalRow => ({
 });
 
 /** Request codes: PM-entered, unique per project. Also used as the branch suffix `devflow/<code>`. */
+/** Throws on anything that is not a ProjectRole (the DB columns are free text). */
+export function assertProjectRole(role: unknown): asserts role is ProjectRole {
+  if (!(PROJECT_ROLES as readonly unknown[]).includes(role)) throw new Error(`Vai trò dự án không hợp lệ: ${String(role)}`);
+}
+
 export const REQUEST_CODE_RE = /^[A-Za-z0-9._-]{1,40}$/;
 
 const json = (v: unknown): string => JSON.stringify(v);
@@ -152,6 +158,10 @@ export class Repo {
 
   listRequests(): RequestRow[] {
     return this.all('select * from requests order by created_at desc, id desc').map(toRequest);
+  }
+
+  listRequestsByProject(projectId: number): RequestRow[] {
+    return this.all('select * from requests where project_id=? order by created_at, id', projectId).map(toRequest);
   }
 
   updateRequest(id: string, patch: RequestPatch): RequestRow {
@@ -495,6 +505,7 @@ export class Repo {
   // ---- project members ----
   /** Insert or replace a member's roles in the project. */
   setProjectMember(projectId: number, userId: number, roles: ProjectRole[], addedBy: number | null): void {
+    roles.forEach(assertProjectRole);
     this.run(`insert into project_members(project_id,user_id,roles,added_by,added_at) values(?,?,?,?,?)
       on conflict(project_id,user_id) do update set roles=excluded.roles`, projectId, userId, json(roles), addedBy, Date.now());
   }
@@ -516,6 +527,7 @@ export class Repo {
   // ---- request assignees ----
   /** Replace the ordered list of people for `role` on a request; the first (position 0) is the runner. */
   setRequestAssignees(requestId: string, role: ProjectRole, userIds: number[]): void {
+    assertProjectRole(role);
     this.tx(() => {
       this.run('delete from request_assignees where request_id=? and role=?', requestId, role);
       [...new Set(userIds)].forEach((u, i) => this.run('insert into request_assignees(request_id,role,user_id,position) values(?,?,?,?)', requestId, role, u, i));

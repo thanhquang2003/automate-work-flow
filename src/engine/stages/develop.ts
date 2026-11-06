@@ -63,7 +63,7 @@ export async function develop(ctx: StageContext): Promise<StageOutcome> {
     }
     const st = readFlowState(ctx.ws);
     const key = `feedback-${(st.feedbackItems ?? 0) + 1}`;
-    const branch = workBranch(req.id, key);
+    const branch = workBranch(ctx.ws.key, key);
     await startBranch(ctx, branch, base);
     const item: WorkItem = {
       key, kind: `chỉnh sửa theo nhận xét (${key})`, branch, base, assignment: feedbackAssignment(ctx.feedback),
@@ -84,8 +84,8 @@ export async function develop(ctx: StageContext): Promise<StageOutcome> {
   // A task sent back to todo by a change request was merged before: redo it on a fresh branch (-v<baseline>) from the
   // current integration branch, with a new MR, instead of the old, already merged one.
   const reopened = task.status === 'todo' && task.branch !== null;
-  const branch = reopened || !task.branch ? workBranch(req.id, reopened ? `${task.id}-v${ctx.baseline}` : task.id) : task.branch;
-  const key = branch.slice(integrationBranch(req.id).length + 1) || task.id;
+  const branch = reopened || !task.branch ? workBranch(ctx.ws.key, reopened ? `${task.id}-v${ctx.baseline}` : task.id) : task.branch;
+  const key = branch.slice(integrationBranch(ctx.ws.key).length + 1) || task.id;
   const mrIid = reopened ? null : task.mrIid;
   if (reopened) ctx.log(`Task ${task.id} được làm lại theo thay đổi yêu cầu${task.changedByCr ? ` ${task.changedByCr}` : ''} trên nhánh mới ${branch}`);
   let rounds = task.reviewRounds;

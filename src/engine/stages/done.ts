@@ -33,8 +33,8 @@ export async function writeReport(ctx: StageContext): Promise<string> {
   const count = (s: string): number => tcs.filter(tc => status(tc.id) === s).length;
   const untested = tcs.filter(tc => !status(tc.id)).length;
   const art = (kind: ArtifactKind): string => {
-    const p = latestArtifact(ws, kind, req.id);
-    const name = p ? basename(p) : artifactName(kind, req.id, ctx.baseline);
+    const p = latestArtifact(ws, kind, ws.key);
+    const name = p ? basename(p) : artifactName(kind, ctx.ws.key, ctx.baseline);
     return p ? `[${name}](${name})` : `${name} (chưa có)`;
   };
   const tcNote = (tc: (typeof allTcs)[number]): string =>
@@ -48,7 +48,7 @@ export async function writeReport(ctx: StageContext): Promise<string> {
   const lines = [
     `# Báo cáo tổng kết ${req.id} — ${req.title}`,
     '',
-    `- Nhánh tích hợp: \`${integrationBranch(req.id)}\``,
+    `- Nhánh tích hợp: \`${integrationBranch(ctx.ws.key)}\``,
     `- Merge request cuối: ${state.finalMrUrl ?? (info?.gitlab ? '(chưa mở được)' : 'không có GitLab — code chỉ nằm trên nhánh cục bộ trong workspace, cần đẩy lên GitLab thủ công')}`,
     `- Số task: ${tasks.length} (hoàn thành ${tasks.filter(t => t.status === 'done').length})`,
     ...(ctx.baseline > 1 ? [`- Phiên bản yêu cầu: v${ctx.baseline} · Vòng lặp ${req.iteration}`] : []),
@@ -123,7 +123,7 @@ export async function done(ctx: StageContext): Promise<StageOutcome> {
   const gl = projectGitLab(ctx);
   if (existsSync(join(ws.repoDir, '.git'))) await prepareIntegration(ctx);
   if (gl) {
-    const branch = integrationBranch(req.id);
+    const branch = integrationBranch(ctx.ws.key);
     await pushIfRemote(ctx, branch);
     const found = await gl.client.findOpenMR(gl.pid, branch, gl.defaultBranch);
     // A new iteration (accepted CRs) on a still-open final MR: summarise it there instead of opening another MR.

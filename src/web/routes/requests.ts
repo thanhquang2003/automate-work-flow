@@ -171,7 +171,7 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
     if (!r) return notFound(req, reply);
     const q = req.query as { tab?: string; err?: string; ok?: string };
     const tab: Tab = (TABS as readonly string[]).includes(q.tab ?? '') ? (q.tab as Tab) : 'overview';
-    const ws = Workspace.for(cfg, id);
+    const ws = Workspace.forRequest(cfg, repo, r);
     const data: Record<string, unknown> = { r, tab, TABS, attachments: repo.listAttachments(id), stageRuns: repo.listStageRuns(id) };
     if (tab === 'analysis') {
       const p = join(ws.devflowDir, 'analysis.md');
@@ -266,7 +266,7 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
     // Fastify already percent-decoded the wildcard; decoding again would break names containing '%'.
     const rel = (req.params as Record<string, string>)['*'] ?? '';
     if (!getReq(id)) return notFound(req, reply);
-    const ws = Workspace.for(cfg, id);
+    const ws = Workspace.forRequest(cfg, repo, getReq(id)!);
     let file = safeJoin(ws.artifactsDir, rel);
     if (file && !(existsSync(file) && statSync(file).isFile()) && rel.startsWith('evidence/')) file = safeJoin(ws.evidenceDir, rel.slice('evidence/'.length));
     if (!file) return html(reply, render('error', layout(req, 'Bị từ chối'), { code: 403, message: 'Đường dẫn không hợp lệ.' }), 403);
@@ -281,7 +281,7 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
   app.get('/requests/:id/bundle.zip', async (req, reply) => {
     const { id } = req.params as { id: string };
     if (!getReq(id)) return notFound(req, reply);
-    const ws = Workspace.for(cfg, id);
+    const ws = Workspace.forRequest(cfg, repo, getReq(id)!);
     const zip = new ZipArchive({ zlib: { level: 6 } });
     zip.on('error', () => zip.abort());
     if (existsSync(ws.artifactsDir)) zip.directory(ws.artifactsDir, false);

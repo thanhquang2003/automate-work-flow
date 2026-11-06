@@ -345,7 +345,7 @@ export async function test(ctx: StageContext): Promise<StageOutcome> {
     if (await commitTesterOutput(ctx, baseline, `test(devflow): ${req.id} kết quả kiểm thử lần ${runLabel}`)) await pushIfRemote(ctx, branch);
     p = plan(ctx, active, state);
   }
-  await writeTestCases(templatePath(ctx.cfg, 'testcase'), sortedTestCases(repo, req.id).map(tcSheetRow), join(ws.artifactsDir, artifactName('TestCase', req.id, ctx.baseline)));
+  await writeTestCases(templatePath(ctx.cfg, 'testcase'), sortedTestCases(repo, req.id).map(tcSheetRow), join(ws.artifactsDir, artifactName('TestCase', ctx.ws.key, ctx.baseline)));
 
   if (p.kind === 'bugfix') {
     ctx.log(`Còn ${p.failing.length} test case F: ${p.failing.join(', ')} → sửa lỗi`, 'warn');

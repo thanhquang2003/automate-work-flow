@@ -211,7 +211,7 @@ export function ensureGitignore(repoDir: string): boolean {
  * `.devflow-tmp/` is gitignored (committed and pushed on the integration branch). Returns the branch name.
  */
 export async function prepareIntegration(ctx: StageContext): Promise<string> {
-  const branch = integrationBranch(ctx.req.id);
+  const branch = integrationBranch(ctx.ws.key);
   await ensureOnBranch(ctx, branch);
   if (await ctx.git.hasRemote()) await ctx.git.pull(branch);
   if (ensureGitignore(ctx.ws.repoDir)) {

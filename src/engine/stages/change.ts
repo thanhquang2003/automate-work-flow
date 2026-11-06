@@ -10,7 +10,7 @@ import type { StageContext, StageOutcome } from '../pipeline.js';
 import { typeTable } from './breakdown.js';
 import { OutputError, readJsonOutput, readTextOutput, runClaudeStep } from './claude-json.js';
 import {
-  DOCS_PATHSPEC, answeredQuestions, answersPath, assumptionsPath, changeDir, codebaseMapPath, designFile, ensureOnBranch, integrationBranch,
+  answeredQuestions, answersPath, assumptionsPath, changeDir, codebaseMapPath, designFile, ensureOnBranch, integrationBranch,
   latestArtifact, missingHeadings, promptExtras, pushIfRemote,
 } from './common.js';
 import { safeFileName, uniqueName } from './intake.js';
@@ -91,7 +91,7 @@ function artifactsText(ctx: StageContext, crIds: Set<string>): string {
     ['Bản đồ mã nguồn', codebaseMapPath(ws)],
   ];
   const lines = items.map(([label, p]) => `- ${label}: ${existsSync(p) ? `\`${p}\`` : '(chưa có)'}`);
-  const tcBook = latestArtifact(ws, 'TestCase', ctx.req.id);
+  const tcBook = latestArtifact(ws, 'TestCase', ws.key);
   lines.push(`- Kết quả kiểm thử (file test case mới nhất): ${tcBook ? `\`${tcBook}\`` : '(chưa có)'}`);
   const changes = join(ws.devflowDir, 'changes');
   const older = existsSync(changes) ? readdirSync(changes).filter(n => /^CR-\d+$/.test(n) && !crIds.has(n)).sort() : [];
@@ -183,7 +183,7 @@ export async function change(ctx: StageContext): Promise<StageOutcome> {
   ctx.log(`Phân tích tác động của ${crs.map(c => c.id).join(', ')}`);
 
   const hasGit = existsSync(join(ws.repoDir, '.git'));
-  const branch = integrationBranch(req.id);
+  const branch = integrationBranch(ctx.ws.key);
   if (hasGit) {
     // A stage interrupted mid-edit (DEVELOP/BUGFIX) may leave a dirty task branch that would block the checkout:
     // stash it (never popped automatically — the CR may change what that work should be; the stash stays recoverable).
@@ -291,7 +291,7 @@ export async function change(ctx: StageContext): Promise<StageOutcome> {
 
   if (hasGit) {
     await ensureOnBranch(ctx, branch);
-    const committed = await ctx.git.commitPaths([`${DOCS_PATHSPEC}/changes`], `docs(devflow): ${req.id} phân tích tác động ${[...crIds].join(', ')}`);
+    const committed = await ctx.git.commitPaths([`${ctx.ws.docsRel}/changes`], `docs(devflow): ${req.id} phân tích tác động ${[...crIds].join(', ')}`);
     const pushed = committed && (await pushIfRemote(ctx, branch));
     ctx.log(committed ? `Đã commit báo cáo tác động lên nhánh ${branch}${pushed ? ' và push lên GitLab' : ''}` : 'Báo cáo tác động không thay đổi, không cần commit');
   }

@@ -6,7 +6,7 @@ import { buildPrompt } from '../prompt.js';
 import type { StageContext } from '../pipeline.js';
 import { OutputError, readJsonOutput, readTextOutput, runClaudeStep } from './claude-json.js';
 import {
-  DOCS_PATHSPEC, codebaseMapPath, designFile, fileRef, projectGitLab, promptExtras, pushIfRemote, scratchDir, type ProjectGitLab,
+  codebaseMapPath, designFile, fileRef, projectGitLab, promptExtras, pushIfRemote, scratchDir, type ProjectGitLab,
 } from './common.js';
 
 export const MAX_REVIEW_ROUNDS = 3;
@@ -160,7 +160,7 @@ export async function developAndReview(ctx: StageContext, w: WorkItem): Promise<
     if (gl && mr) {
       await gl.client.addMRNote(gl.pid, mr.iid, md);
     } else {
-      const rel = `${DOCS_PATHSPEC}/reviews/${w.key}-r${round}.md`;
+      const rel = `${ctx.ws.docsRel}/reviews/${w.key}-r${round}.md`;
       const p = join(ws.repoDir, ...rel.split('/'));
       mkdirSync(join(p, '..'), { recursive: true });
       writeFileSync(p, `# Review ${w.kind}\n\n${md}`, 'utf8');

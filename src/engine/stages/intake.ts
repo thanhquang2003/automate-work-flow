@@ -2,7 +2,8 @@ import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { extname, join, resolve } from 'node:path';
 import { GitLabError, type GlProject } from '../../gitlab/client.js';
 import { gitlabToken, type StageContext, type StageOutcome } from '../pipeline.js';
-import { ensureOnBranch, integrationBranch, writeProjectInfo } from './common.js';
+import { Git } from '../../gitlab/git.js';
+import { ensureOnBranch, integrationBranch, writeProjectInfo, type ProjectInfo } from './common.js';
 
 /** Safe file name for inputs/: no directories, no reserved characters, never "." / ".." / empty. */
 export function safeFileName(name: string): string {
@@ -78,9 +79,57 @@ async function cloneProject(ctx: StageContext, p: GlProject, branch: string): Pr
   });
 }
 
+/**
+ * Project-rooted request: the project already holds the repo, so INTAKE only adds the request worktree
+ * `.devflow/worktrees/<code>` on branch `devflow/<code>`, cut from the project's default branch.
+ */
+async function intakeProject(ctx: StageContext): Promise<StageOutcome> {
+  const { req, ws } = ctx;
+  const project = ctx.repo.getProject(req.projectId!);
+  if (!project) return { kind: 'fail', error: `Không tìm thấy dự án #${req.projectId}` };
+  const branch = integrationBranch(ws.key);
+  const n = copyAttachments(ctx);
+  if (n) ctx.log(`Đã chép ${n} file đính kèm vào ${ws.inputsDir}`);
+
+  if (existsSync(join(ws.repoDir, '.git'))) {
+    await ensureOnBranch(ctx, branch);
+    ctx.log(`Worktree đã có sẵn, dùng nhánh ${branch}`);
+    return { kind: 'next' };
+  }
+  const pg = new Git(project.path, { token: gitlabToken(ctx.gitlab) || ctx.cfg.gitlab.token || undefined });
+  await pg.excludeLocal('.devflow/');
+  if (await pg.hasRemote()) {
+    try { await pg.fetch(); } catch (e) { ctx.log(`Không fetch được origin (${(e as Error).message}); dùng bản cục bộ.`, 'warn'); }
+  }
+  const def = project.defaultBranch;
+  let base = def;
+  if (!(await pg.branchExists(def))) {
+    if (await pg.refExists(`origin/${def}`)) base = `origin/${def}`;
+    else return { kind: 'fail', error: `Dự án không có nhánh mặc định "${def}".` };
+  } else if (await pg.refExists(`origin/${def}`) && await pg.isAncestor(def, `origin/${def}`)) {
+    base = `origin/${def}`; // remote is ahead: start from the newest code
+  }
+  mkdirSync(join(ws.repoDir, '..'), { recursive: true });
+  await pg.worktreeAdd(ws.repoDir, branch, base);
+
+  let info: ProjectInfo = { gitlab: false, defaultBranch: def, branch };
+  if (project.gitlabProject && ctx.gitlab) {
+    try {
+      const p = await ctx.gitlab.getProject(project.gitlabProject);
+      info = { gitlab: true, projectId: p.id, pathWithNamespace: p.path_with_namespace, defaultBranch: def, webUrl: (p as GlProject & { web_url?: string }).web_url, branch };
+    } catch (e) {
+      ctx.log(`Không truy cập được GitLab project "${project.gitlabProject}": ${(e as Error).message}. Chạy ở chế độ cục bộ.`, 'warn');
+    }
+  }
+  writeProjectInfo(ws, info);
+  ctx.log(`Đã tạo worktree ${ws.repoDir} trên nhánh ${branch} (tách từ ${base})`);
+  return { kind: 'next' };
+}
+
 export async function intake(ctx: StageContext): Promise<StageOutcome> {
   const { req, ws } = ctx;
-  const branch = integrationBranch(req.id);
+  if (ws.isProjectRooted) return intakeProject(ctx);
+  const branch = integrationBranch(ctx.ws.key);
   const n = copyAttachments(ctx);
   if (n) ctx.log(`Đã chép ${n} file đính kèm vào ${ws.inputsDir}`);
 

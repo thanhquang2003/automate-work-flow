@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 export interface GitOpts {
   protectedBranch?: string;
@@ -194,6 +194,93 @@ export class Git {
 
   async headSha(): Promise<string> {
     return (await this.run(['rev-parse', 'HEAD'])).trim();
+  }
+
+  // ---- project layout (v3): worktrees, local exclude, remotes ----
+
+  /** True when `name` is a valid branch name according to `git check-ref-format --branch`. */
+  async isValidBranchName(name: string): Promise<boolean> {
+    if (!name || name.startsWith('-') || /[\s\0]/.test(name)) return false;
+    return (await this.exec(['check-ref-format', '--branch', name], { allowFail: true })).code === 0;
+  }
+
+  /** True when the ref exists locally (refs/heads) or as a remote-tracking branch of origin. */
+  async branchExistsAnywhere(branch: string): Promise<boolean> {
+    this.checkRef(branch);
+    if (await this.branchExists(branch)) return true;
+    return (await this.exec(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`], { allowFail: true })).code === 0;
+  }
+
+  async hasCommits(): Promise<boolean> {
+    return (await this.exec(['rev-parse', '--verify', '--quiet', 'HEAD'], { allowFail: true })).code === 0;
+  }
+
+  /** True when `ancestor` is reachable from `descendant`. */
+  async isAncestor(ancestor: string, descendant: string): Promise<boolean> {
+    this.checkRef(ancestor);
+    this.checkRef(descendant);
+    return (await this.exec(['merge-base', '--is-ancestor', ancestor, descendant], { allowFail: true })).code === 0;
+  }
+
+  async refExists(ref: string): Promise<boolean> {
+    this.checkRef(ref);
+    return (await this.exec(['rev-parse', '--verify', '--quiet', ref], { allowFail: true })).code === 0;
+  }
+
+  async fetch(): Promise<void> {
+    await this.run(['fetch', '--quiet', 'origin']);
+  }
+
+  async addRemote(name: string, url: string): Promise<void> {
+    if (!/^[\w.-]+$/.test(name)) throw new Error(`Invalid remote name: ${name}`);
+    await this.exec(['remote', 'add', name, '--', url]);
+  }
+
+  /**
+   * `git worktree add`: checks out `branch` in `path`. When the branch does not exist it is created from `base`
+   * (required then); an existing branch is reused as is.
+   */
+  async worktreeAdd(path: string, branch: string, base?: string): Promise<void> {
+    this.checkRef(branch);
+    if (await this.branchExists(branch)) {
+      await this.run(['worktree', 'add', '--', path, branch]);
+      return;
+    }
+    if (!base) throw new Error(`Branch ${branch} does not exist and no base was given`);
+    this.checkRef(base);
+    await this.run(['worktree', 'add', '-b', branch, '--', path, base]);
+  }
+
+  /** Removes a linked worktree (refuses when it has local changes unless `force`). The branch is kept. */
+  async worktreeRemove(path: string, force = false): Promise<void> {
+    await this.run(['worktree', 'remove', ...(force ? ['--force'] : []), '--', path]);
+  }
+
+  async worktreeList(): Promise<{ path: string; branch: string | null; head: string }[]> {
+    const out = await this.run(['worktree', 'list', '--porcelain']);
+    const res: { path: string; branch: string | null; head: string }[] = [];
+    for (const block of out.split(/\n\n+/)) {
+      const lines = block.split('\n').filter(Boolean);
+      const wt = lines.find(l => l.startsWith('worktree '));
+      if (!wt) continue;
+      const br = lines.find(l => l.startsWith('branch '));
+      res.push({
+        path: wt.slice(9), head: (lines.find(l => l.startsWith('HEAD ')) ?? '').slice(5),
+        branch: br ? br.slice(7).replace(/^refs\/heads\//, '') : null,
+      });
+    }
+    return res;
+  }
+
+  /** Adds `entry` to the repository's local `.git/info/exclude` (shared by all worktrees) when missing. */
+  async excludeLocal(entry: string): Promise<void> {
+    if (!entry || /[\r\n\0]/.test(entry)) throw new Error(`Invalid exclude entry: ${JSON.stringify(entry)}`);
+    const rel = (await this.run(['rev-parse', '--git-path', 'info/exclude'])).trim();
+    const file = resolve(this.cwd, rel);
+    const cur = await readFile(file, 'utf8').catch(() => '');
+    if (cur.split(/\r?\n/).some(l => l.trim() === entry)) return;
+    await mkdir(dirname(file), { recursive: true });
+    await appendFile(file, `${cur && !cur.endsWith('\n') ? '\n' : ''}${entry}\n`, 'utf8');
   }
 
   async hasRemote(): Promise<boolean> {

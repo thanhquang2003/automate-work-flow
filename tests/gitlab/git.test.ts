@@ -121,3 +121,28 @@ describe('Git', () => {
     expect(await git.aheadCount('main', 'feat')).toBe(0);
   });
 });
+
+describe('Git worktrees and exclude', () => {
+  it('worktreeAdd/List/Remove and excludeLocal', async () => {
+    const dir = join(root, 'wt-main');
+    const git0 = new Git(dir);
+    await git0.clone(remote, '', dir);
+    await git0.excludeLocal('.devflow/');
+    await git0.excludeLocal('.devflow/');
+    const ex = readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8').split('\n').filter(l => l === '.devflow/');
+    expect(ex).toHaveLength(1);
+    const wt = join(dir, '.devflow', 'worktrees', 'A');
+    await git0.worktreeAdd(wt, 'devflow/A', 'main');
+    expect(g(wt, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('devflow/A');
+    expect(g(dir, 'status', '--porcelain')).toBe('');
+    const list = await git0.worktreeList();
+    expect(list.map(w => w.branch)).toContain('devflow/A');
+    expect(await git0.branchExists('devflow/A')).toBe(true);
+    await git0.worktreeRemove(wt);
+    expect(existsSync(wt)).toBe(false);
+    expect(await git0.branchExists('devflow/A')).toBe(true);
+    await git0.worktreeAdd(wt, 'devflow/A'); // existing branch reused
+    expect(await git0.isValidBranchName('devflow/a..b')).toBe(false);
+    expect(await git0.isValidBranchName('devflow/ok')).toBe(true);
+  });
+});
