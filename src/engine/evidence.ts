@@ -1,5 +1,5 @@
-import { existsSync, lstatSync, readdirSync, rmSync } from 'node:fs';
-import { safeCopyTree } from './safe-fs.js';
+import { existsSync, lstatSync, readdirSync } from 'node:fs';
+import { safeCopyTree, safeRemove } from './safe-fs.js';
 import { join } from 'node:path';
 import type { z } from 'zod';
 import type { TestResultSchema } from '../domain/types.js';
@@ -56,7 +56,7 @@ export function copyEvidence(evidenceDir: string, artifactsDir: string, tcId: st
   if (!safeTcId(tcId)) return [];
   const src = join(evidenceDir, tcId);
   const dest = join(artifactsDir, 'evidence', tcId);
-  rmSync(dest, { recursive: true, force: true });
+  safeRemove(dest, undefined, { recursive: true });
   const files = evidenceFiles(src);
   if (!files.length) return [];
   return safeCopyTree(src, dest).map(f => `evidence/${tcId}/${f}`);

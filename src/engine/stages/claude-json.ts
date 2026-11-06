@@ -1,6 +1,5 @@
 import { existsSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
-import { UnsafePathError, safeReadText } from '../safe-fs.js';
+import { UnsafePathError, safeReadText, safeRemove } from '../safe-fs.js';
 import { z } from 'zod';
 import type { ProjectRole } from '../../domain/types.js';
 import type { StageContext } from '../pipeline.js';
@@ -71,7 +70,7 @@ export interface ClaudeStepOpts<T> {
  */
 export async function runClaudeStep<T>(ctx: StageContext, o: ClaudeStepOpts<T>): Promise<StepResult<T>> {
   const maxRetries = o.maxRetries ?? MAX_SCHEMA_RETRIES;
-  for (const f of o.clean ?? []) await rm(f, { force: true });
+  for (const f of o.clean ?? []) safeRemove(f);
   let prompt = o.prompt;
   let resumeSessionId: string | undefined;
   let lastError = '';

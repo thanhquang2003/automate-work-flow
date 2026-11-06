@@ -1,5 +1,5 @@
 import { prepareWrite } from '../safe-fs.js';
-import { rmSync } from 'node:fs';
+import { safeRemove } from '../safe-fs.js';
 import { extname, join } from 'node:path';
 import { TestResultsOut, type SoftwareType, type TestCaseRow } from '../../domain/types.js';
 import { writeTestCases } from '../../office/testcase-xlsx.js';
@@ -58,7 +58,7 @@ async function runTester(ctx: StageContext, branch: string, targets: TestCaseRow
   const { ws, req } = ctx;
   const out = resultsPath(ctx);
   const runNo = (id: string): number => (state.runs[id]?.length ?? 0) + 1;
-  for (const tc of targets) rmSync(join(ws.evidenceDir, tc.id), { recursive: true, force: true });
+  for (const tc of targets) safeRemove(join(ws.evidenceDir, tc.id), undefined, { recursive: true });
   const nums = targets.map(t => runNo(t.id));
   const lo = Math.min(...nums);
   const hi = Math.max(...nums);

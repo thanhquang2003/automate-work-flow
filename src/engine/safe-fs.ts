@@ -1,6 +1,6 @@
 import {
   closeSync, constants, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, readdirSync, readlinkSync, readSync, realpathSync,
-  unlinkSync, writeSync,
+  rmSync, unlinkSync, writeSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
@@ -20,6 +20,11 @@ export class UnsafePathError extends Error {
 }
 
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+const NONBLOCK = constants.O_NONBLOCK ?? 0;
+
+function kindOf(st: { isSymbolicLink(): boolean; isDirectory(): boolean; isFIFO(): boolean; isSocket(): boolean }): string {
+  return st.isSymbolicLink() ? 'symlink' : st.isDirectory() ? 'directory' : st.isFIFO() ? 'FIFO' : st.isSocket() ? 'socket' : 'device or special file';
+}
 const roots = new Set<string>();
 
 /** Registers a folder DevFlow owns (a project folder or a legacy workspace); paths under it are checked from there. */
@@ -85,12 +90,18 @@ function checkFd(fd: number, path: string, root: string | undefined): void {
 }
 
 function openChecked(path: string, flags: number, root: string | undefined, write: boolean): number {
+  // The final component must be a regular file (or missing when creating): a FIFO, device, directory or link is
+  // refused before open. O_NONBLOCK makes a FIFO swapped in after this check fail or return at once instead of
+  // blocking the event loop forever; it has no effect on regular files, which the fstat below insists on.
+  const pre = lstatSync(path, { throwIfNoEntry: false });
+  if (pre && !pre.isFile()) throw new UnsafePathError(`${path} is not a regular file (${kindOf(pre)}); refusing`);
   let fd: number;
   try {
-    fd = openSync(path, flags | NOFOLLOW, 0o664);
+    fd = openSync(path, flags | NOFOLLOW | NONBLOCK, 0o664);
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     if (code === 'ELOOP' || code === 'EMLINK') throw new UnsafePathError(`${path} is a symlink; refusing`);
+    if (code === 'ENXIO' || code === 'EISDIR' || code === 'EAGAIN') throw new UnsafePathError(`${path} is not a regular file (${code}); refusing`);
     throw e;
   }
   try {
@@ -198,4 +209,24 @@ export function safeCopyTree(src: string, dst: string, srcRoot?: string, dstRoot
   };
   walk('');
   return out;
+}
+
+/**
+ * Deletes `path` below a trusted root: parents are checked with lstat (no symlinked folder on the way); a regular
+ * file or a symlink (the link itself, never its target) is unlinked; a directory only with `recursive` (rm does not
+ * follow links inside it); anything else is refused. A missing path is fine.
+ */
+export function safeRemove(path: string, root?: string, o: { recursive?: boolean } = {}): void {
+  const p = resolve(path);
+  const r = rootFor(p, root);
+  checkParents(p, r, false); // throws on a symlinked / non-directory parent
+  const st = lstatSync(p, { throwIfNoEntry: false });
+  if (!st) return;
+  if (st.isFile() || st.isSymbolicLink()) { unlinkSync(p); return; }
+  if (st.isDirectory()) {
+    if (!o.recursive) throw new UnsafePathError(`${p} is a directory; refusing to delete it`);
+    rmSync(p, { recursive: true, force: true });
+    return;
+  }
+  throw new UnsafePathError(`${p} is not a regular file (${kindOf(st)}); refusing to delete it`);
 }
