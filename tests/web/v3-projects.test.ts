@@ -123,9 +123,45 @@ describe('v3 projects, inbox, admin pages', () => {
     }
     expect((await w.get(admin.id, '/admin/users')).statusCode).toBe(200);
     expect((await w.get(admin.id, '/settings')).body).toContain('PROJECT_ROOTS');
-    expect((await w.post(admin.id, `/admin/users/${w.dev.id}/sys-role`, { sys_role: 'cto' })).statusCode).toBe(302);
-    expect(w.repo.web.getUser(w.dev.id)!.sysRole).toBe('cto');
+    const free = w.mkUser('free');
+    expect((await w.post(admin.id, `/admin/users/${free.id}/sys-role`, { sys_role: 'cto' })).statusCode).toBe(302);
+    expect(w.repo.web.getUser(free.id)!.sysRole).toBe('cto');
     expect((await w.post(admin.id, '/settings', { project_roots: '/srv/p, /srv/q', seat_concurrency: '2' })).headers.location).toContain('ok=');
     expect(w.cfg.projectRoots).toEqual(['/srv/p', '/srv/q']);
+  });
+
+  it('sys-role keeps the department invariant (I3)', async () => {
+    const w = await webEnv();
+    const admin = w.mkUser('adm'); w.repo.web.setUserSysRole(admin.id, 'admin');
+    const flash = (res: { headers: Record<string, unknown> }) => decodeURIComponent(String(res.headers.location));
+    // A project member (DEV) or PM cannot become cto/admin: refused with a Vietnamese message, nothing changes.
+    for (const [uid, role] of [[w.dev.id, 'cto'], [w.pm.id, 'admin']] as const) {
+      const res = await w.post(admin.id, `/admin/users/${uid}/sys-role`, { sys_role: role });
+      expect(flash(res)).toContain('thành viên dự án');
+      expect(w.repo.web.getUser(uid)).toMatchObject({ sysRole: 'member' });
+      expect(w.repo.web.getUser(uid)!.departmentId).not.toBeNull();
+    }
+    // A non-member with a department becomes cto: the department is cleared.
+    const free = w.mkUser('free');
+    expect(free.departmentId).not.toBeNull();
+    expect(flash(await w.post(admin.id, `/admin/users/${free.id}/sys-role`, { sys_role: 'cto' }))).toContain('ok=');
+    expect(w.repo.web.getUser(free.id)).toMatchObject({ sysRole: 'cto', departmentId: null });
+    // ...and a cto cannot be given a department.
+    const dev = String(w.repo.web.getDepartmentByCode('DEV')!.id);
+    expect(flash(await w.post(admin.id, `/admin/users/${free.id}/department`, { department_id: dev }))).toContain('err=');
+    expect(w.repo.web.getUser(free.id)!.departmentId).toBeNull();
+    // head/deputy need a department.
+    const nodept = w.mkUser('nodept', { dept: null });
+    for (const role of ['head', 'deputy']) {
+      expect(flash(await w.post(admin.id, `/admin/users/${nodept.id}/sys-role`, { sys_role: role }))).toContain('phải thuộc một phòng');
+      expect(w.repo.web.getUser(nodept.id)!.sysRole).toBe('member');
+    }
+    const withDept = w.mkUser('withdept');
+    expect(flash(await w.post(admin.id, `/admin/users/${withDept.id}/sys-role`, { sys_role: 'deputy' }))).toContain('ok=');
+    expect(w.repo.web.getUser(withDept.id)).toMatchObject({ sysRole: 'deputy', departmentId: withDept.departmentId });
+    // A deputy's department cannot be stripped; demoting to member keeps it.
+    expect(flash(await w.post(admin.id, `/admin/users/${withDept.id}/department`, { department_id: '' }))).toContain('err=');
+    expect(flash(await w.post(admin.id, `/admin/users/${withDept.id}/sys-role`, { sys_role: 'member' }))).toContain('ok=');
+    expect(w.repo.web.getUser(withDept.id)).toMatchObject({ sysRole: 'member', departmentId: withDept.departmentId });
   });
 });

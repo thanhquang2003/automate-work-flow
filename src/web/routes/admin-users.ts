@@ -50,14 +50,28 @@ export function adminUserRoutes(app: FastifyInstance, cfg: Config, { repo }: Web
     if (!(SYS_ROLES as readonly string[]).includes(b.sys_role ?? '')) throw new Error('Vai trò hệ thống không hợp lệ.');
     const role = b.sys_role as SysRole;
     if (u.sysRole === 'admin' && role !== 'admin' && repo.web.listUsers().filter(x => x.sysRole === 'admin' && !x.disabled).length <= 1) throw new Error('Không thể hạ quản trị viên cuối cùng.');
-    repo.web.setUserSysRole(u.id, role);
-    auditWeb(repo, req, 'user.setSysRole', { detail: { userId: u.id, from: u.sysRole, to: role } });
+    // Department invariant (Global Constraints): cto/admin belong to no department and hold no project role;
+    // head/deputy belong to exactly one department. Demoting to member keeps the department.
+    const oversight = role === 'cto' || role === 'admin';
+    if (oversight && repo.listProjects({ includeArchived: true }).some(p => repo.getProjectMember(p.id, u.id))) {
+      throw new Error('Người này đang là thành viên dự án nên không thể chuyển sang CTO/quản trị viên; hãy gỡ khỏi các dự án trước.');
+    }
+    if ((role === 'head' || role === 'deputy') && u.departmentId === null) {
+      throw new Error('Trưởng/phó phòng phải thuộc một phòng; hãy gán phòng cho người này trước.');
+    }
+    repo.tx(() => {
+      repo.web.setUserSysRole(u.id, role);
+      if (oversight && u.departmentId !== null) repo.web.setUserDepartment(u.id, null);
+    });
+    auditWeb(repo, req, 'user.setSysRole', { detail: { userId: u.id, from: u.sysRole, to: role, ...(oversight && u.departmentId !== null ? { departmentCleared: u.departmentId } : {}) } });
     return `Đã đổi vai trò của ${u.email ?? u.username}.`;
   });
   adminWrite('department', 'user.setDepartment', (u, b, req) => {
     const raw = (b.department_id ?? '').trim();
     const d = raw ? repo.web.getDepartment(Number(raw)) : undefined;
     if (raw && !d) throw new Error('Phòng không tồn tại.');
+    if (!d && (u.sysRole === 'head' || u.sysRole === 'deputy')) throw new Error('Trưởng/phó phòng phải thuộc một phòng; hãy đổi vai trò trước khi gỡ phòng.');
+    if (d && (u.sysRole === 'cto' || u.sysRole === 'admin')) throw new Error('CTO/quản trị viên không thuộc phòng nào.');
     // A project member must keep a department (the project's rule): an empty value must not bypass this.
     if ((d ? d.id : null) !== u.departmentId && repo.listProjects({ includeArchived: true }).some(p => repo.getProjectMember(p.id, u.id))) throw new Error('Người này đang là thành viên dự án nên không thể gỡ hoặc đổi phòng; hãy gỡ khỏi các dự án trước.');
     repo.web.setUserDepartment(u.id, d ? d.id : null);
