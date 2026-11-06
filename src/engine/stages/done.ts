@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { safeReadText, safeWriteFile } from '../safe-fs.js';
+import { safeCopyTree, safeIsFile, safeReadFile, safeReadText, safeWriteFile } from '../safe-fs.js';
 import { basename, join, relative } from 'node:path';
 import type { StageContext, StageOutcome } from '../pipeline.js';
 import {
@@ -151,5 +151,33 @@ export async function done(ctx: StageContext): Promise<StageOutcome> {
   }
   const report = await writeReport(ctx);
   ctx.log(`Đã ghi báo cáo ${report}`);
+  if (ws.isProjectRooted && existsSync(join(ws.repoDir, '.git'))) await commitDeliverables(ctx);
   return { kind: 'next' };
+}
+
+/**
+ * v3: the final Office deliverables (latest TKCT, TKDB, ULNL, TestCase), the report and the evidence referenced by
+ * the test case workbook are copied to `docs/devflow/<code>/deliverables/` and committed on devflow/<code>
+ * (pushed when there is a remote, so the final MR shows them). Symlinks are never followed (safe-fs).
+ */
+export async function commitDeliverables(ctx: StageContext): Promise<string[]> {
+  const { ws, req } = ctx;
+  const rel = `${ws.docsRel}/deliverables`;
+  const dest = join(ws.repoDir, ...rel.split('/'));
+  const copied: string[] = [];
+  for (const kind of ['TKCT', 'TKDB', 'ULNL', 'TestCase'] as ArtifactKind[]) {
+    const p = latestArtifact(ws, kind, ws.key);
+    if (!p || !safeIsFile(p)) continue;
+    safeWriteFile(join(dest, basename(p)), safeReadFile(p));
+    copied.push(basename(p));
+  }
+  const report = join(ws.artifactsDir, 'report.md');
+  if (safeIsFile(report)) { safeWriteFile(join(dest, 'report.md'), safeReadFile(report)); copied.push('report.md'); }
+  copied.push(...safeCopyTree(join(ws.artifactsDir, 'evidence'), join(dest, 'evidence')).map(f => `evidence/${f}`));
+  if (!copied.length) return copied;
+  const branch = integrationBranch(ws.key);
+  const committed = await ctx.git.commitPaths([rel], `docs(devflow): ${req.id} tài liệu bàn giao`);
+  if (committed) await pushIfRemote(ctx, branch);
+  ctx.log(`Đã lưu ${copied.length} tài liệu bàn giao vào ${rel}/`);
+  return copied;
 }

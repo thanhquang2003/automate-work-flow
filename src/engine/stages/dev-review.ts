@@ -3,6 +3,7 @@ import { safeWriteFile } from '../safe-fs.js';
 import { join } from 'node:path';
 import type { z } from 'zod';
 import { ReviewOut } from '../../domain/types.js';
+import type { Git } from '../../gitlab/git.js';
 import { buildPrompt } from '../prompt.js';
 import type { StageContext } from '../pipeline.js';
 import { OutputError, readJsonOutput, readTextOutput, runClaudeStep } from './claude-json.js';
@@ -40,6 +41,12 @@ export interface WorkItem {
   saveRounds(n: number): void;
   mrIid: number | null;
   saveMr(iid: number): void;
+  /**
+   * v3 task worktrees: the integration branch is checked out in the request worktree, so the merge runs there
+   * (this git), serialized per request by `serializeMerge`.
+   */
+  mergeGit?: Git;
+  serializeMerge?: <T>(fn: () => Promise<T>) => Promise<T>;
 }
 
 export type LoopResult =
@@ -170,18 +177,26 @@ export async function developAndReview(ctx: StageContext, w: WorkItem): Promise<
   }
 
   // ---- merge ----
-  if (gl) {
-    const mr = w.mrIid ? await gl.client.getMR(gl.pid, w.mrIid) : { ...(await ensureMr(ctx, gl, w, summary)), state: 'opened' };
-    // After a crash between mergeMR and the caller's bookkeeping the MR is already merged: do not merge again.
-    if (mr.state === 'merged') ctx.log(`MR !${mr.iid} đã được merge trước đó`);
-    else await gl.client.mergeMR(gl.pid, mr.iid);
-    await ctx.git.checkout(w.base);
-    await ctx.git.pull(w.base);
-    ctx.log(`Đã merge MR !${mr.iid} (${w.branch} → ${w.base})`);
-    return { kind: 'merged', mrIid: mr.iid, mrUrl: gl.webUrl ? `${gl.webUrl}/-/merge_requests/${mr.iid}` : mr.web_url || undefined };
-  }
-  await ctx.git.checkout(w.base);
-  await ctx.git.merge(w.branch, `Merge ${w.branch} vào ${w.base}: ${w.mrTitle}`);
-  ctx.log(`Đã merge cục bộ ${w.branch} → ${w.base} (không có GitLab)`);
-  return { kind: 'merged' };
+  const target = w.mergeGit ?? ctx.git;
+  const onBase = async (): Promise<void> => {
+    if (!w.mergeGit) await ctx.git.checkout(w.base);
+    else if ((await target.currentBranch()) !== w.base) await target.checkout(w.base);
+  };
+  const merge = async (): Promise<LoopResult> => {
+    if (gl) {
+      const mr = w.mrIid ? await gl.client.getMR(gl.pid, w.mrIid) : { ...(await ensureMr(ctx, gl, w, summary)), state: 'opened' };
+      // After a crash between mergeMR and the caller's bookkeeping the MR is already merged: do not merge again.
+      if (mr.state === 'merged') ctx.log(`MR !${mr.iid} đã được merge trước đó`);
+      else await gl.client.mergeMR(gl.pid, mr.iid);
+      await onBase();
+      await target.pull(w.base);
+      ctx.log(`Đã merge MR !${mr.iid} (${w.branch} → ${w.base})`);
+      return { kind: 'merged', mrIid: mr.iid, mrUrl: gl.webUrl ? `${gl.webUrl}/-/merge_requests/${mr.iid}` : mr.web_url || undefined };
+    }
+    await onBase();
+    await target.merge(w.branch, `Merge ${w.branch} vào ${w.base}: ${w.mrTitle}`);
+    ctx.log(`Đã merge cục bộ ${w.branch} → ${w.base} (không có GitLab)`);
+    return { kind: 'merged' };
+  };
+  return w.serializeMerge ? w.serializeMerge(merge) : merge();
 }

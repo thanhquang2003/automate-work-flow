@@ -59,6 +59,8 @@ export interface StageContext {
   serialize<T>(key: string, fn: () => Promise<T>): Promise<T>;
   /** Enqueues a task job of this request (DEVELOP dispatcher). */
   enqueueTask(taskId: string, extra?: { feedback?: string }): void;
+  /** DEVELOP dispatcher re-entered after a task job (failed/needs-human tasks are not reset then). */
+  reentry?: boolean;
   /** Task ids with a queued, parked or running task job. */
   liveTasks(): Set<string>;
   /** Git for another directory (a task worktree) with the same identity and push rules as `git`. */
@@ -1182,6 +1184,7 @@ export class Pipeline {
       seatUserId: live.seat,
       actor,
       part: payload.part,
+      reentry: !!payload.dispatch,
       taskId: isTask ? payload.taskId : undefined,
       requestGit: isTask ? this.gitFor(req, ws, ws.repoDir, actor, gitlab) : undefined,
       claude: (prompt, extra) => claudeAs(live.seat, prompt, extra, live.role),

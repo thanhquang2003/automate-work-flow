@@ -85,6 +85,11 @@ export class Workspace {
     return `devflow/${this.key}-${taskId}`;
   }
 
+  /** Same request, Claude/git working in another checkout (a task worktree): docs paths follow `repoDir`. */
+  withRepoDir(repoDir: string): Workspace {
+    return new Workspace(this.root, { key: this.key, repoDir, docsRel: this.docsRel, projectDir: this.projectDir });
+  }
+
   /** Creates the request folders. The repo dir is created by `git worktree add` (v3) or INTAKE (legacy), not here. */
   ensure(): this {
     const dirs = [this.root, this.inputsDir, this.artifactsDir, this.evidenceDir, this.logsDir];
