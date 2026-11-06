@@ -1,4 +1,3 @@
-import { prepareWrite } from '../safe-fs.js';
 import { safeRemove } from '../safe-fs.js';
 import { extname, join } from 'node:path';
 import { TestResultsOut, type SoftwareType, type TestCaseRow } from '../../domain/types.js';
@@ -347,8 +346,7 @@ export async function test(ctx: StageContext): Promise<StageOutcome> {
     p = plan(ctx, active, state);
   }
   const tcOut = join(ws.artifactsDir, artifactName('TestCase', ctx.ws.key, ctx.baseline));
-  prepareWrite(tcOut);
-  await writeTestCases(templatePath(ctx.cfg, 'testcase'), sortedTestCases(repo, req.id).map(tcSheetRow), tcOut);
+  await writeTestCases(templatePath(ctx.cfg, 'testcase'), sortedTestCases(repo, req.id).map(tcSheetRow), tcOut, ws.trustRoot);
 
   if (p.kind === 'bugfix') {
     ctx.log(`Còn ${p.failing.length} test case F: ${p.failing.join(', ')} → sửa lỗi`, 'warn');

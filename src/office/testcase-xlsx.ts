@@ -2,6 +2,7 @@ import type ExcelJS from 'exceljs';
 import { loadWorkbook } from './xlsx-load.js';
 import { loadMapping, clearRow, colNo } from './mapping.js';
 import { cancelNote } from './ulnl-xlsx.js';
+import { safeWriteFile } from '../engine/safe-fs.js';
 
 export interface TcSheetRow {
   id: string;
@@ -18,7 +19,8 @@ export interface TcSheetRow {
   cancelledBy?: string;
 }
 
-export async function writeTestCases(templatePath: string, rows: TcSheetRow[], outPath: string): Promise<void> {
+/** Builds the workbook in memory and writes it only through safe-fs (see renderDocx). */
+export async function writeTestCases(templatePath: string, rows: TcSheetRow[], outPath: string, root?: string): Promise<void> {
   const map = (await loadMapping(templatePath)).testcase;
   const wb = await loadWorkbook(templatePath);
   const ws = wb.getWorksheet(map.sheet);
@@ -77,5 +79,5 @@ export async function writeTestCases(templatePath: string, rows: TcSheetRow[], o
 
 
   wb.calcProperties.fullCalcOnLoad = true;
-  await wb.xlsx.writeFile(outPath);
+  safeWriteFile(outPath, Buffer.from(await wb.xlsx.writeBuffer()), root);
 }

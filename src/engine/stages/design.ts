@@ -1,4 +1,3 @@
-import { prepareWrite } from '../safe-fs.js';
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Repo } from '../../db/repo.js';
@@ -136,10 +135,8 @@ export async function design(ctx: StageContext): Promise<StageOutcome> {
   const tkctOut = join(ws.artifactsDir, artifactName('TKCT', ctx.ws.key, ctx.baseline));
   const tkdbOut = join(ws.artifactsDir, artifactName('TKDB', ctx.ws.key, ctx.baseline));
   const history = changeHistoryMarkdown(repo, req.id);
-  prepareWrite(tkctOut);
-  prepareWrite(tkdbOut);
-  await renderDocx(templatePath(ctx.cfg, 'tkct'), history ? withChangeHistory(r.value.tkct, history) : r.value.tkct, tkctOut);
-  await renderDocx(templatePath(ctx.cfg, 'tkdb'), r.value.tkdb, tkdbOut);
+  await renderDocx(templatePath(ctx.cfg, 'tkct'), history ? withChangeHistory(r.value.tkct, history) : r.value.tkct, tkctOut, ws.trustRoot);
+  await renderDocx(templatePath(ctx.cfg, 'tkdb'), r.value.tkdb, tkdbOut, ws.trustRoot);
   ctx.log(`Đã xuất ${tkctOut} và ${tkdbOut}`);
 
   if (existsSync(join(ws.repoDir, '.git'))) {

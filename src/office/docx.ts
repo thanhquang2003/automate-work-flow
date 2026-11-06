@@ -1,5 +1,6 @@
 import JSZip from 'jszip';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
+import { safeWriteFile } from '../engine/safe-fs.js';
 import { parseInlines, parseMarkdown, type Block, type Inline } from './markdown.js';
 
 const esc = (s: string) =>
@@ -151,7 +152,15 @@ function renderBlock(b: Block, styles: Styles): string {
   }
 }
 
-export async function renderDocx(templatePath: string, markdown: string, outPath: string): Promise<void> {
+/**
+ * Renders the docx to a buffer, then writes it only through safe-fs (fresh temp name + rename under `root`): the
+ * output folder is seat-writable, a library write by name could follow a link planted while rendering.
+ */
+export async function renderDocx(templatePath: string, markdown: string, outPath: string, root?: string): Promise<void> {
+  safeWriteFile(outPath, await renderDocxBuffer(templatePath, markdown), root);
+}
+
+export async function renderDocxBuffer(templatePath: string, markdown: string): Promise<Buffer> {
   const zip = await JSZip.loadAsync(await readFile(templatePath));
   const docFile = zip.file('word/document.xml');
   const stylesFile = zip.file('word/styles.xml');
@@ -179,5 +188,5 @@ export async function renderDocx(templatePath: string, markdown: string, outPath
     .join('');
 
   zip.file('word/document.xml', doc.slice(0, bodyStart) + kept + generated + sect + doc.slice(bodyEnd));
-  await writeFile(outPath, await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }));
+  return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
 }

@@ -1,6 +1,7 @@
 import type ExcelJS from 'exceljs';
 import { loadWorkbook } from './xlsx-load.js';
 import { loadMapping, plain, clearRow, colNo, type UlnlNonFunctionMapping } from './mapping.js';
+import { safeWriteFile } from '../engine/safe-fs.js';
 
 export interface UlnlFeature {
   code: string;
@@ -38,7 +39,8 @@ function formulaOf(cell: ExcelJS.Cell): string | undefined {
   return v && typeof v === 'object' && typeof v.formula === 'string' ? v.formula : undefined;
 }
 
-export async function writeUlnl(templatePath: string, features: UlnlFeature[], nonFunc: UlnlNonFunc[], reqTitle: string, outPath: string): Promise<void> {
+/** Builds the workbook in memory and writes it only through safe-fs (see renderDocx). */
+export async function writeUlnl(templatePath: string, features: UlnlFeature[], nonFunc: UlnlNonFunc[], reqTitle: string, outPath: string, root?: string): Promise<void> {
   const map = (await loadMapping(templatePath)).ulnl;
   const wb = await loadWorkbook(templatePath);
   const fn = map.function;
@@ -150,7 +152,7 @@ export async function writeUlnl(templatePath: string, features: UlnlFeature[], n
   if (nws) writeNonFunc(wb, nws, map.nonFunction, nonFunc, sums.total, `${fn.sheet}!${fn.columns.total}${fn.totalsRow}`);
 
   wb.calcProperties.fullCalcOnLoad = true;
-  await wb.xlsx.writeFile(outPath);
+  safeWriteFile(outPath, Buffer.from(await wb.xlsx.writeBuffer()), root);
 }
 
 function writeNonFunc(wb: ExcelJS.Workbook, ws: ExcelJS.Worksheet, m: UlnlNonFunctionMapping, items: UlnlNonFunc[], functionTotal: number, functionTotalRef: string): void {

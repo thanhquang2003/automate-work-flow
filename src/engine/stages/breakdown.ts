@@ -1,4 +1,3 @@
-import { prepareWrite } from '../safe-fs.js';
 import { join } from 'node:path';
 import { FeaturesOut, type FeatureOut, type FeatureRow } from '../../domain/types.js';
 import { templatePath } from '../../office/templates.js';
@@ -119,13 +118,13 @@ export async function breakdown(ctx: StageContext): Promise<StageOutcome> {
   const fns = features.filter(f => f.kind === 'function');
   const nfs = features.filter(f => f.kind === 'nonfunction');
   const xlsx = join(ws.artifactsDir, artifactName('ULNL', ctx.ws.key, ctx.baseline));
-  prepareWrite(xlsx);
   await writeUlnl(
     tpl,
     fns.map(f => ({ code: f.code, name: f.name, description: f.description, type_code: f.typeCode, unit_test: f.unitTest, note: f.note, ...cancelledBy(f) })),
     nfs.map(f => ({ code: f.code, name: f.name, description: f.description, ...cancelledBy(f) })),
     req.title,
     xlsx,
+    ws.trustRoot,
   );
   const cancelled = features.filter(f => f.scopeStatus === 'cancelled').length;
   ctx.log(`Đã bóc tách ${fns.length} chức năng và ${nfs.length} hạng mục phi chức năng${cancelled ? ` (${cancelled} mục đã hủy, không tính nỗ lực)` : ''}; ULNL: ${xlsx}`);
