@@ -40,3 +40,4 @@
 ## 7. Tiến độ v3 (cập nhật theo từng task)
 Kế hoạch: `docs/superpowers/plans/2026-11-07-v3-implementation.md` (Task N = FEAT-00N trong `lah status`). Không push/PR; chủ dự án push.
 - FEAT-002 (Task 2: quyền hạn và Google SSO) xong — commit 79a82c3, 6aba3ed.
+- FEAT-003 (Task 3: dự án, thành viên, workspace theo thư mục) xong — commit 5cd4e67.

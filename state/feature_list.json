@@ -52,13 +52,13 @@
         "PM:create project and assign members per role"
       ],
       "complexity": "large",
-      "status": "in-progress",
+      "status": "done",
       "layer": "Full-stack",
       "dependencies": [
         "FEAT-001",
         "FEAT-002"
       ],
-      "evidence": null,
+      "evidence": "commits 5cd4e67 on feat/v3-multiuser; gate green (360 tests); task review clean, no fix round needed",
       "created": "2026-11-05",
       "updated": "2026-11-06"
     },
