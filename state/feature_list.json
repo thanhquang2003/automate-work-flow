@@ -20,10 +20,10 @@
         "admin:store users departments projects roles"
       ],
       "complexity": "large",
-      "status": "in-progress",
+      "status": "done",
       "layer": "Full-stack",
       "dependencies": [],
-      "evidence": null,
+      "evidence": "commits d7252ec,0da8080 on feat/v3-multiuser; tsc clean; 309/310 tests (1 e2e timeout passes alone); task review + scoped re-review clean",
       "created": "2026-11-05",
       "updated": "2026-11-05"
     },

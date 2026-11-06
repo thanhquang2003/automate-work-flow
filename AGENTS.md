@@ -9,6 +9,7 @@ DevFlow is a web application that automates the company's software-development p
 
 - **Node 24 required:** `export PATH=$HOME/.nvm/versions/node/v24.22.0/bin:$PATH` before any npm/npx/node command.
 - **Base branch is `feat/v3-multiuser`, not `main`.** Branch each work item as `feat/FEAT-XXX` / `fix/BUG-XXX` / `task/TASK-XXX` off `feat/v3-multiuser`; after the gate passes merge with `git merge --ff-only` into `feat/v3-multiuser`. Ignore rules 12-16 where they mention PRs, `origin/main`, `gh`, or pushing: **never `git push`, never open PRs** — the project owner pushes. Local commits are the deliverable.
+- **Evidence for done/resolved is a commit list, not a PR URL** (e.g. `commits abc1234,def5678 ...`); the project owner adjusted `.claude/hooks/validate-state-commit.cjs` to accept it. A state-only commit is also blocked off `main`, so commit state changes together with code or docs changes.
 - **Gate:** `bash init.sh --verify` (tsc + build + vitest). Tests can time out under load; before calling a failure real, re-run that file alone with `npx vitest run <file> --maxWorkers=1 --testTimeout=60000`.
 - Execute work items with `superpowers:subagent-driven-development` following the plan; the plan's Global Constraints bind every item.
 

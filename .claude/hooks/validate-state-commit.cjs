@@ -18,7 +18,8 @@ const root = gitRoot();
 
 const DONE_STATUSES = new Set(['done', 'resolved', 'completed']);
 // Accepts GitHub PR URLs: https://github.com/owner/repo/pull/123
-const PR_URL_RE = /https:\/\/github\.com\/[^\s/"]+\/[^\s/"]+\/pull\/\d+/;
+//const PR_URL_RE = /https:\/\/github\.com\/[^\s/"]+\/[^\s/"]+\/pull\/\d+/;
+const PR_URL_RE = /https:\/\/github\.com\/[^\s/"]+\/[^\s/"]+\/pull\/\d+|\bcommits?\s+[0-9a-f]{7,40}\b/i;
 
 function getAllStagedFiles() {
   const r = spawnSync('git', ['diff', '--cached', '--name-only'], { cwd: root, encoding: 'utf-8' });
