@@ -54,7 +54,7 @@ export function fakeGitLab(bare: string, project = { id: 7, path: 'grp/app', def
       if (o.state_event === 'reopen') is.state = 'opened';
       if (o.add_labels) is.addLabels.push(o.add_labels);
     },
-    uploadFile: async (_pid: number, p: string) => { uploads.push(p); return { markdown: `![${basename(p)}](/uploads/abc/${basename(p)})` }; },
+    uploadFile: async (_pid: number, f: { name: string; data: Uint8Array }) => { uploads.push(f.name); return { markdown: `![${basename(f.name)}](/uploads/abc/${basename(f.name)})` }; },
   };
   return { client: client as unknown as GitLabClient, bare, branches, mrs, issues, uploads, fail, seedIssue: (iid: number) => { issues.set(iid, { title: 'x', description: '', labels: [], state: 'opened', notes: [], addLabels: [] }); issueN = Math.max(issueN, iid); } };
 }

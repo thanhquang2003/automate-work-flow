@@ -92,7 +92,7 @@ describe('GitLabClient', () => {
     respond = () => ({ status: 201, json: { markdown: '![f](/uploads/x/f.png)' } });
     const f = join(mkdtempSync(join(tmpdir(), 'gl-')), 'f.png');
     writeFileSync(f, 'PNGDATA');
-    const r = await new GitLabClient(base, 't').uploadFile(1, f);
+    const r = await new GitLabClient(base, 't').uploadFile(1, { name: f, data: Buffer.from('PNGDATA') });
     expect(r.markdown).toContain('/uploads/');
     expect(recs[0].headers['content-type']).toMatch(/multipart\/form-data/);
     expect(recs[0].body).toContain('filename="f.png"');

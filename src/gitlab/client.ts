@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 
 export class GitLabError extends Error {
@@ -96,10 +95,13 @@ export class GitLabClient {
     await this.req('PUT', `/projects/${this.enc(pid)}/issues/${iid}`, o);
   }
 
-  async uploadFile(pid: Id, filePath: string): Promise<{ markdown: string }> {
-    const buf = await readFile(filePath);
+  /**
+   * Uploads file content to the project. The caller reads it (through safe-fs: evidence lives in folders a seat can
+   * write); this client never opens a path itself.
+   */
+  async uploadFile(pid: Id, file: { name: string; data: Uint8Array }): Promise<{ markdown: string }> {
     const fd = new FormData();
-    fd.append('file', new Blob([buf]), basename(filePath));
+    fd.append('file', new Blob([new Uint8Array(file.data)]), basename(file.name));
     return this.req('POST', `/projects/${this.enc(pid)}/uploads`, fd);
   }
 }

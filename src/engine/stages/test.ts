@@ -1,5 +1,6 @@
-import { safeRemove } from '../safe-fs.js';
-import { extname, join } from 'node:path';
+import { safeReadFile, safeRemove, UnsafePathError } from '../safe-fs.js';
+import type { Workspace } from '../workspace.js';
+import { basename, extname, join } from 'node:path';
 import { TestResultsOut, type SoftwareType, type TestCaseRow } from '../../domain/types.js';
 import { writeTestCases } from '../../office/testcase-xlsx.js';
 import { templatePath } from '../../office/templates.js';
@@ -139,11 +140,33 @@ function issueDescription(ctx: StageContext, gl: ProjectGitLab, tc: TestCaseRow,
   ].join('\n');
 }
 
+/** Largest evidence file uploaded to a GitLab issue. */
+export const MAX_EVIDENCE_UPLOAD = 20 * 1024 * 1024;
+
+/**
+ * Reads an evidence file (path relative to artifacts/) for upload. artifacts/evidence is seat-writable: the read goes
+ * through safe-fs (no symlink at any component, regular file only, size cap), so a swapped-in link is never uploaded.
+ */
+export function readEvidenceForUpload(ws: Workspace, rel: string): { name: string; data: Buffer } {
+  const parts = rel.split('/');
+  if (parts.some(p => !p || p === '.' || p === '..')) throw new UnsafePathError(`invalid evidence path ${rel}`);
+  const path = join(ws.artifactsDir, ...parts);
+  return { name: basename(path), data: safeReadFile(path, ws.trustRoot, { maxBytes: MAX_EVIDENCE_UPLOAD }) };
+}
+
 /** Uploads the first evidence image (or the first file) and returns its markdown. */
 async function uploadEvidence(ctx: StageContext, gl: ProjectGitLab, run: TestRun): Promise<string> {
   const file = run.evidence.find(e => IMAGE_EXT.has(extname(e).toLowerCase())) ?? run.evidence[0];
   if (!file) return '';
-  const up = await gl.client.uploadFile(gl.pid, join(ctx.ws.artifactsDir, ...file.split('/')));
+  let content: { name: string; data: Buffer };
+  try {
+    content = readEvidenceForUpload(ctx.ws, file);
+  } catch (e) {
+    if (!(e instanceof UnsafePathError)) throw e;
+    ctx.log(`Không tải evidence ${file} lên GitLab: ${e.message}`, 'warn');
+    return '';
+  }
+  const up = await gl.client.uploadFile(gl.pid, content);
   return up.markdown;
 }
 
