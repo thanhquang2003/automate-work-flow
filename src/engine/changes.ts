@@ -53,6 +53,9 @@ export interface RestorePlan { stage: Stage; status: RequestStatus; enqueue: boo
 export function restorePrevious(stage: Stage, status: RequestStatus): RestorePlan {
   switch (status) {
     case 'running':
+    // Waiting for a seat: run again; the new job parks itself again if the seat is still unusable (its parked
+    // job was superseded by the change request, so something must be enqueued).
+    case 'awaiting_seat':
       return { stage, status: 'running', enqueue: true };
     case 'failed':
       // A failed stage stays failed (needs a human retry); nothing is enqueued.

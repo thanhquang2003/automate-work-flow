@@ -200,4 +200,30 @@ describe('v3 seats', () => {
     expect(t.repo.listEvents(a.id).some(e => /dfctl sweep/.test(e.message))).toBe(true);
     expect(t.repo.web.listAudit({ projectId: t.p.id }).some(x => x.action === 'project.sweep_failed')).toBe(true);
   });
+
+  it('a change request during awaiting_seat, all rejected: the stage parks again and resumes after reconnect', async () => {
+    let now = 1_000_000;
+    const t = await v3Env({ now: () => now });
+    const r = await t.request('ERP-001');
+    t.seats.state.set(t.se.id, 'expired');
+    t.pipeline.start(r.id);
+    await t.worker.drain();
+    expect(t.repo.getRequest(r.id)!.status).toBe('awaiting_seat');
+    const cr = t.pipeline.submitChange(r.id, { title: 'cr', description: 'd', kind: 'add', createdBy: t.pm.id });
+    expect(cr.interruptedStatus).toBe('awaiting_seat');
+    // The parked seat job was superseded; skip the CHANGE analysis and go straight to the PM decision.
+    for (const j of t.repo.listJobs(r.id)) if (j.status === 'queued' || j.status === 'paused') t.repo.failJob(j.id, 'test');
+    t.repo.updateChangeRequest(r.id, cr.id, { status: 'awaiting_decision' });
+    t.repo.updateRequest(r.id, { stage: 'CHANGE', status: 'awaiting_approval' });
+    t.pipeline.decideChange(r.id, cr.id, 'reject', 'không', t.pm.id);
+    expect(t.repo.getRequest(r.id)!.stage).toBe('CODEBASE_SCAN');
+    expect(t.repo.listJobs(r.id).some(j => j.status === 'queued' || j.status === 'paused')).toBe(true);
+    await t.worker.drain();
+    // Seat still expired: the new job parks again (findable by the re-check and by seatReconnected).
+    expect(t.repo.getRequest(r.id)).toMatchObject({ stage: 'CODEBASE_SCAN', status: 'awaiting_seat' });
+    t.seats.state.set(t.se.id, 'connected');
+    expect(t.pipeline.seatReconnected(t.se.id)).toBe(1);
+    await t.worker.drain();
+    expect(t.repo.getRequest(r.id)).toMatchObject({ stage: 'CODEBASE_SCAN', status: 'awaiting_approval' });
+  });
 });
