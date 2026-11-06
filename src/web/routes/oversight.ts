@@ -13,6 +13,9 @@ import { render, type LayoutData } from '../view.js';
  * /oversight accepts a write. Department scope is applied in listForActor and again on every :id route (404, not
  * 403, for a project outside the actor's scope so its existence is not leaked).
  */
+const SEAT_CONCURRENCY = 3;
+const SEAT_TTL_MS = 30_000;
+
 export function oversightRoutes(app: FastifyInstance, cfg: Config, { repo, seatRunner }: WebDeps): void {
   const layout = (req: FastifyRequest, title: string): LayoutData => ({ user: req.user, mode: cfg.mode, title });
   const html = (reply: FastifyReply, s: string, code = 200) =>
@@ -38,9 +41,14 @@ export function oversightRoutes(app: FastifyInstance, cfg: Config, { repo, seatR
     if (!project || (content && !can(actor, 'oversight.content', { project: { departmentId: project.departmentId } }))) { await notFound(req, reply); return undefined; }
     return { actor, project };
   };
+  const seatCache = new Map<number, { at: number; connected: boolean }>();
   const str = (v: unknown): string => (typeof v === 'string' ? v : '');
   const contentFail = (req: FastifyRequest, reply: FastifyReply, e: unknown) => {
-    if (!(e instanceof ContentError)) throw e;
+    if (!(e instanceof ContentError)) {
+      // git stderr and paths stay in the server log; the page only says that reading failed
+      console.error('oversight content error:', e);
+      return html(reply, render('error', layout(req, 'Lỗi'), { code: 500, message: 'Không đọc được nội dung. Vui lòng thử lại sau hoặc báo quản trị viên.' }), 500);
+    }
     if (e.code === 'bad_path' || e.code === 'bad_ref') return html(reply, render('error', layout(req, 'Yêu cầu không hợp lệ'), { code: 400, message: e.message }), 400);
     return notFound(req, reply); // not_found and forbidden look the same: a secret file is not even confirmed to exist
   };
@@ -61,9 +69,21 @@ export function oversightRoutes(app: FastifyInstance, cfg: Config, { repo, seatR
     if (!actor) return;
     const { users, projects } = listForActor(repo, actor);
     const seat: Record<number, boolean | undefined> = {};
-    // connected yes/no only; credentials and account details never leave the seat runner
+    // connected yes/no only; credentials and account details never leave the seat runner. Disabled users are
+    // skipped, at most 3 status calls run at once, results are kept for 30 s, a failing call never fails the page.
     if (seatRunner && seatRunner.kind !== 'local') {
-      await Promise.all(users.map(async u => { seat[u.id] = await seatRunner.status(u.id).then(s => s.state === 'connected', () => false); }));
+      const now = Date.now();
+      const todo = users.filter(u => !u.disabled);
+      for (const u of todo) { const c = seatCache.get(u.id); if (c && now - c.at < SEAT_TTL_MS) seat[u.id] = c.connected; }
+      const pending = todo.filter(u => seat[u.id] === undefined);
+      const worker = async (): Promise<void> => {
+        for (let u = pending.shift(); u; u = pending.shift()) {
+          const connected = await seatRunner.status(u.id).then(s => s.state === 'connected', () => false);
+          seatCache.set(u.id, { at: Date.now(), connected });
+          seat[u.id] = connected;
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(SEAT_CONCURRENCY, pending.length) }, worker));
     }
     const people = listPeopleWork(repo, users, projects.map(p => repo.getProject(p.id)!));
     return html(reply, render('oversight-users', layout(req, 'Giám sát: người dùng'), { people, seat }));
@@ -93,7 +113,7 @@ export function oversightRoutes(app: FastifyInstance, cfg: Config, { repo, seatR
     const ref = str(q.ref) || r.project.defaultBranch;
     const path = str(q.path);
     try {
-      const result = await readProjectFile(r.project, ref, path, { repo, userId: r.actor.userId });
+      const result = await readProjectFile(r.project, ref, path, { repo, userId: r.actor.userId, audit: req.method !== 'HEAD' });
       const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
       return html(reply, render('oversight-content', layout(req, 'Mã nguồn'), { mode: 'files', project: r.project, heading: 'mã nguồn', ref, path, parent, result }));
     } catch (e) { return contentFail(req, reply, e); }
@@ -110,7 +130,7 @@ export function oversightRoutes(app: FastifyInstance, cfg: Config, { repo, seatR
     const r = await projectOf(req, reply, true);
     if (!r) return;
     const q = req.query as Record<string, unknown>;
-    const ctx = { repo, userId: r.actor.userId };
+    const ctx = { repo, userId: r.actor.userId, audit: req.method !== 'HEAD' };
     try {
       if (str(q.code) && str(q.file)) {
         const log = await readRequestLog(r.project, str(q.code), str(q.file), ctx);

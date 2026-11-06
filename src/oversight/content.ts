@@ -20,7 +20,8 @@ export class ContentError extends Error {
 export const MAX_CONTENT_BYTES = 1024 * 1024;
 const MAX_LINK_TARGET = 4096;
 
-export interface ContentCtx { repo: Repo; userId: number | null }
+/** `audit: false` (HEAD requests) writes no audit rows. */
+export interface ContentCtx { repo: Repo; userId: number | null; audit?: boolean }
 export interface DirEntry { name: string; path: string; kind: 'dir' | 'file' | 'symlink' | 'gitlink'; size: number | null }
 export type ContentResult =
   | { kind: 'dir'; entries: DirEntry[] }
@@ -33,12 +34,19 @@ export type ContentResult =
 // ---- secret paths ----
 
 const SECRET_NAME = [
-  /^\.env/, /\.pem$/, /\.key$/, /\.p12$/, /\.pfx$/, /\.jks$/, /\.keystore$/, /^id_(rsa|dsa|ecdsa|ed25519)/, /^credentials/,
-  /^\.npmrc$/, /^\.netrc$/, /^\.pgpass$/, /^\.claude$/, /^\.git$/, /^\.ssh$/, /^\.aws$/, /^\.gnupg$/,
+  /^\.env/, /\.(?:pem|key|p12|pfx|jks|keystore)(?:\.|$)/, /^id_(rsa|dsa|ecdsa|ed25519)/, /^credentials/, /^secrets?\.(?:ya?ml|json)$/,
+  /^\.npmrc$/, /^\.netrc$/, /^\.pgpass$/, /^\.pypirc$/, /^\.htpasswd$/, /^\.git-credentials/,
+  /^\.claude$/, /^\.git$/, /^\.ssh$/, /^\.aws$/, /^\.gnupg$/, /^\.docker$/, /^\.kube$/,
 ];
-/** True when any component of `path` names a secret (matched case-insensitively): such paths are never shown. */
+/**
+ * True when any component of `path` names a secret (matched case-insensitively, after trimming trailing dots and
+ * spaces that some file systems ignore): such paths are never shown.
+ */
 export function isSecretPath(path: string): boolean {
-  return path.split('/').some(c => c !== '' && SECRET_NAME.some(re => re.test(c.toLowerCase())));
+  return path.split('/').some(c => {
+    const n = c.toLowerCase().replace(/[. ]+$/, '');
+    return n !== '' && SECRET_NAME.some(re => re.test(n));
+  });
 }
 
 /** Validated path components; '' (the root) gives []. A trailing slash is allowed. */
@@ -61,6 +69,7 @@ export function isAllowedRef(project: ProjectRow, ref: string): boolean {
 }
 
 const audit = (ctx: ContentCtx, project: ProjectRow, action: string, detail: Record<string, unknown>): void => {
+  if (ctx.audit === false) return;
   ctx.repo.web.addAudit({ projectId: project.id, userId: ctx.userId, action, detail: JSON.stringify(detail) });
 };
 const clip = (s: string, n = 300): string => (s.length > n ? s.slice(0, n) : s);
@@ -102,7 +111,8 @@ export async function readProjectFile(project: ProjectRow, ref: string | undefin
   const refName = ref || project.defaultBranch;
   try {
     const r = await readInner(project, refName, path);
-    audit(ctx, project, 'oversight.content', { ref: clip(refName), path: clip(path), kind: r.kind });
+    // Directory listings are index pages: only file views (and refused attempts) are audited.
+    if (r.kind !== 'dir') audit(ctx, project, 'oversight.content', { ref: clip(refName), path: clip(path), kind: r.kind });
     return r;
   } catch (e) {
     audit(ctx, project, 'oversight.content.denied', { ref: clip(refName), path: clip(path), reason: e instanceof ContentError ? e.code : 'error' });
@@ -116,18 +126,24 @@ const CODE_RE = /^[A-Za-z0-9._-]{1,40}$/;
 const LOG_RE = /^[A-Za-z0-9._-]{1,120}\.log$/;
 
 /**
- * Credential-looking lines are replaced as a whole, other secrets (known token prefixes, long hex or base64 runs)
- * are masked inside the line.
+ * Values of credential-looking keys (`GITLAB_TOKEN=`, `"accessToken":`, `password:`, `pwd=`, `Authorization:` ...)
+ * are masked and the key name stays visible; basic-auth URLs, Bearer values, known token prefixes and long
+ * hex/base64 runs are masked wherever they appear. Every quantifier is bounded so a hostile 1 MB line cannot
+ * make the matching quadratic.
  */
+const MASK = '[đã ẩn]';
+const KEY_VALUE = /((?:token|passw(?:or)?d|pwd|secret|api[_-]?key|private[_-]?key|credential|cookie)[\w.-]{0,40}["']?[ \t]{0,20}[:=][ \t]{0,20})("[^"\n]{0,2000}"|'[^'\n]{0,2000}'|[^\s,;&"']{1,2000})/gi;
+const AUTH_HEADER = /\b((?:proxy-)?authorization|auth)[ \t]{0,5}[:=][ \t]{0,5}[^\n]{0,2000}/gi;
+const INLINE: RegExp[] = [
+  /\bbearer[ \t]{1,5}[^\s"']{1,2000}/gi, /\bsk-[A-Za-z0-9_-]{10,}/g, /\bgh[pousr]_[A-Za-z0-9]{10,}/g, /\bglpat-[A-Za-z0-9_-]{10,}/g,
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}/g, /\b[0-9a-fA-F]{32,}\b/g, /[A-Za-z0-9+/_=-]{40,}/g,
+];
 export function redactLog(text: string): string {
-  const line = /authorization\s*:|bearer\s+\S|passw(?:or)?d|secret|api[_-]?key|\btoken\s*[=:]|private key|cookie\s*:/i;
-  const inline: RegExp[] = [
-    /\bsk-[A-Za-z0-9_-]{10,}/g, /\bgh[pousr]_[A-Za-z0-9]{10,}/g, /\bglpat-[A-Za-z0-9_-]{10,}/g, /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
-    /\b[0-9a-fA-F]{32,}\b/g, /[A-Za-z0-9+/_=-]{40,}/g,
-  ];
   return text.split('\n').map(l => {
-    if (line.test(l)) return '[đã ẩn: dòng có thông tin xác thực]';
-    return inline.reduce((s, re) => s.replace(re, '[đã ẩn]'), l);
+    let o = l.replace(AUTH_HEADER, (_m, k: string) => `${k}: ${MASK}`);
+    o = o.replace(/(\/\/[^/\s:@]{1,100}:)[^@\s]{1,200}@/g, `$1${MASK}@`);
+    o = o.replace(KEY_VALUE, `$1${MASK}`);
+    return INLINE.reduce((x, re) => x.replace(re, MASK), o);
   }).join('\n');
 }
 
@@ -146,9 +162,7 @@ const mapFs = (e: unknown): never => {
 export async function listRequestLogs(project: ProjectRow, code: string, ctx: ContentCtx): Promise<{ name: string; size: number; mtimeMs: number }[]> {
   try {
     const dir = logDir(project, code, ctx);
-    const files = safeListFiles(dir, project.path).filter(f => LOG_RE.test(f.name) && !f.name.includes('..'));
-    audit(ctx, project, 'oversight.log', { code, list: true });
-    return files;
+    return safeListFiles(dir, project.path).filter(f => LOG_RE.test(f.name) && !f.name.includes('..'));
   } catch (e) {
     audit(ctx, project, 'oversight.log.denied', { code: clip(code), list: true });
     return mapFs(e);

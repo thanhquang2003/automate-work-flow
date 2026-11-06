@@ -427,13 +427,21 @@ export class Git {
   // ---- read-only content access (oversight views): git plumbing only, nothing is checked out or followed ----
 
   /**
+   * Read-only calls are pinned to `<cwd>/.git`: a project folder without its own repository must not make git
+   * walk up and read a parent directory's repository.
+   */
+  private readEnv(): Record<string, string> {
+    return { ...READ_ENV, GIT_DIR: join(resolve(this.cwd), '.git'), GIT_CEILING_DIRECTORIES: dirname(resolve(this.cwd)) };
+  }
+
+  /**
    * Commit id of local branch `branch`, or undefined. The name is validated (plain ref characters, no `..`,
    * `check-ref-format`) and resolved as `refs/heads/<name>` only: no sha, no revision syntax, no `@{...}`.
    */
   async branchCommit(branch: string): Promise<string | undefined> {
     if (!/^[A-Za-z0-9._\/-]{1,200}$/.test(branch) || branch.startsWith('-') || branch.startsWith('/') || branch.includes('..')) return undefined;
     if ((await this.exec(['check-ref-format', `refs/heads/${branch}`], { allowFail: true })).code !== 0) return undefined;
-    const r = await this.exec(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`], { allowFail: true });
+    const r = await this.exec(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`], { allowFail: true, env: this.readEnv() });
     const sha = r.stdout.trim();
     return r.code === 0 && /^[0-9a-f]{40,64}$/.test(sha) ? sha : undefined;
   }
@@ -452,20 +460,20 @@ export class Git {
   async treeEntry(commit: string, path: string): Promise<TreeEntry | undefined> {
     if (!/^[0-9a-f]{40,64}$/.test(commit)) throw new Error('Invalid commit id');
     if (!path) return { mode: '040000', type: 'tree', sha: commit, size: null, path: '', name: '' };
-    return Git.parseTree((await this.exec(['ls-tree', '-z', '-l', commit, '--', path], { env: READ_ENV })).stdout)[0];
+    return Git.parseTree((await this.exec(['ls-tree', '-z', '-l', commit, '--', path], { env: this.readEnv() })).stdout)[0];
   }
 
   /** Entries directly inside the directory `path` ('' = root) of `commit`. Gitlinks and symlinks are only listed. */
   async listTree(commit: string, path: string): Promise<TreeEntry[]> {
     if (!/^[0-9a-f]{40,64}$/.test(commit)) throw new Error('Invalid commit id');
     const args = ['ls-tree', '-z', '-l', commit, ...(path ? ['--', `${path}/`] : [])];
-    return Git.parseTree((await this.exec(args, { env: READ_ENV })).stdout);
+    return Git.parseTree((await this.exec(args, { env: this.readEnv() })).stdout);
   }
 
   /** Text of a blob (the caller checked its size). For a symlink entry this is the link target text. */
   async blobText(sha: string): Promise<string> {
     if (!/^[0-9a-f]{40,64}$/.test(sha)) throw new Error('Invalid object id');
-    return (await this.exec(['cat-file', 'blob', sha], { env: READ_ENV })).stdout;
+    return (await this.exec(['cat-file', 'blob', sha], { env: this.readEnv() })).stdout;
   }
 
   async hasRemote(): Promise<boolean> {

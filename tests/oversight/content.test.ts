@@ -47,7 +47,7 @@ describe('readProjectFile', () => {
 
   it('secret files hidden (.env, *.pem, *.key, .claude/, .git/config)', async () => {
     const e = await env();
-    for (const p of ['.env', '.env.production', 'server.pem', 'server.KEY', '.claude/settings.json', '.claude', '.git/config', '.git', 'conf/.ssh/id_rsa', 'conf/.ssh', 'CREDENTIALS.json', '.npmrc', '.netrc', 'x/id_rsa.pub', 'a.p12', 'a.pfx']) {
+    for (const p of ['.env', '.env.production', 'server.pem', 'server.KEY', '.claude/settings.json', '.claude', '.git/config', '.git', 'conf/.ssh/id_rsa', 'conf/.ssh', 'CREDENTIALS.json', '.npmrc', '.netrc', 'x/id_rsa.pub', 'a.p12', 'a.pfx', '.env.', '.env ', 'key.pem.bak', 'x.KEY.old', '.git-credentials', '.pypirc', '.htpasswd', '.docker/config.json', '.kube/config', 'secrets.yaml', 'Secrets.JSON', 'config/secrets.yml', 'a/.Git/config.']) {
       expect(await code(readProjectFile(e.p, undefined, p, e.ctx)), p).toBe('forbidden');
     }
     const root = await readProjectFile(e.p, undefined, '', e.ctx);
@@ -57,15 +57,17 @@ describe('readProjectFile', () => {
     expect(conf.kind === 'dir' && conf.entries.map(x => x.name)).toEqual([]);
     expect(isSecretPath('a/.Env.local')).toBe(true);
     expect(isSecretPath('src/environment.ts')).toBe(false);
+    expect(isSecretPath('docs/keyboard.md')).toBe(false);
+    expect(isSecretPath('src/secrets-manager.ts')).toBe(false);
   });
 
   it('symlink and .. rejected', async () => {
     const e = await env();
-    for (const p of ['../x', 'src/../../x', '/etc/passwd', 'src//a.ts', './src', 'src/.', 'a\\b', 'src/a.ts\0', ':(top)a.txt']) {
-      expect(['bad_path', 'not_found'], p).toContain(await code(readProjectFile(e.p, undefined, p, e.ctx)));
+    for (const p of ['../x', 'src/../../x', '/etc/passwd', 'src//a.ts', './src', 'src/.', 'a\\b', 'src/a.ts\0']) {
+      expect(await code(readProjectFile(e.p, undefined, p, e.ctx)), JSON.stringify(p)).toBe('bad_path');
     }
-    expect(await code(readProjectFile(e.p, undefined, '../x', e.ctx))).toBe('bad_path');
-    expect(await code(readProjectFile(e.p, undefined, 'link/x', e.ctx))).toBe('not_found');
+    expect(await code(readProjectFile(e.p, undefined, ':(top)a.txt', e.ctx))).toBe('not_found'); // literal pathspec, simply absent
+    expect(await code(readProjectFile(e.p, undefined, 'link/x', e.ctx))).toBe('not_found'); // never resolved through the symlink
   });
 
   it('symlink and gitlink entries are listed, never followed', async () => {
@@ -90,17 +92,34 @@ describe('readProjectFile', () => {
   it('ref name injection rejected', async () => {
     const e = await env();
     const sha = git(e.p.path, 'rev-parse', 'HEAD');
-    for (const r of ['--output=/tmp/x', '-p', 'HEAD', sha, 'main:src/a.ts', 'main..devflow/REQ-1', 'feature/other', 'devflow/../main', '@{-1}', 'refs/heads/main', 'devflow/REQ 1', 'devflow/REQ-1;id', 'devflow/nope']) {
-      expect(['bad_ref', 'not_found'], r).toContain(await code(readProjectFile(e.p, r, 'src/a.ts', e.ctx)));
+    for (const r of ['--output=/tmp/x', '-p', 'HEAD', sha, 'main:src/a.ts', 'main..devflow/REQ-1', 'feature/other', 'devflow/../main', 'devflow/..', '@{-1}', 'refs/heads/main', 'devflow/REQ 1', 'devflow/REQ-1;id', 'devflow/REQ-1:src']) {
+      expect(await code(readProjectFile(e.p, r, 'src/a.ts', e.ctx)), r).toBe('bad_ref');
     }
-    expect(await code(readProjectFile(e.p, '--output=/tmp/x', 'src/a.ts', e.ctx))).toBe('bad_ref');
+    expect(await code(readProjectFile(e.p, 'devflow/nope', 'src/a.ts', e.ctx))).toBe('not_found'); // well-formed but absent
+  });
+
+  it('a project folder without its own .git never reads a parent repository', async () => {
+    const e = await env();
+    const parent = join(e.base, 'parentrepo');
+    mkdirSync(join(parent, 'sub'), { recursive: true });
+    git(parent, 'init', '-q', '-b', 'main');
+    writeFileSync(join(parent, 'sub', 'leak.txt'), 'parent secret');
+    git(parent, 'add', '-A');
+    git(parent, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'x');
+    const p = e.repo.createProject({ key: 'NOGIT', name: 'n', path: join(parent, 'sub'), departmentId: e.p.departmentId, createdBy: e.pm.id });
+    expect(await code(readProjectFile(p, undefined, 'leak.txt', e.ctx))).toBe('not_found');
+    expect(await code(readProjectFile(p, undefined, '', e.ctx))).toBe('not_found');
   });
 
   it('content view writes audit_log (also for refused views)', async () => {
     const e = await env();
     await readProjectFile(e.p, undefined, 'src/a.ts', e.ctx);
+    await readProjectFile(e.p, undefined, '', e.ctx); // index page: not audited
+    await readProjectFile(e.p, undefined, 'src/a.ts', { ...e.ctx, audit: false }); // HEAD: not audited
     await code(readProjectFile(e.p, undefined, '.env', e.ctx));
     const rows = e.repo.web.listAudit({ projectId: e.p.id });
+    expect(rows.filter(r => r.action === 'oversight.content')).toHaveLength(1);
+    expect(rows.filter(r => r.action === 'oversight.content.denied')).toHaveLength(1);
     const ok = rows.find(r => r.action === 'oversight.content');
     expect(ok).toMatchObject({ userId: e.dev.id, projectId: e.p.id });
     expect(JSON.parse(ok!.detail)).toMatchObject({ path: 'src/a.ts' });
@@ -135,6 +154,55 @@ describe('request logs', () => {
     }
     expect(req.id).toBeTruthy();
     expect(e.repo.web.listAudit({ projectId: e.p.id }).some(r => r.action === 'oversight.log')).toBe(true);
-    expect(redactLog('Authorization: x\nok')).toBe('[đã ẩn: dòng có thông tin xác thực]\nok');
+    expect(e.repo.web.listAudit({ projectId: e.p.id }).filter(r => r.action === 'oversight.log' && r.detail.includes('"list"'))).toHaveLength(0);
+    expect(redactLog('Authorization: x\nok')).toBe('Authorization: [đã ẩn]\nok');
+  });
+});
+
+describe('redactLog', () => {
+  it('masks the value of credential keys and keeps the key name', () => {
+    const cases: [string, string, string][] = [
+      ['GITLAB_TOKEN=glpat-abc', 'GITLAB_TOKEN=', 'abc'],
+      ['export CLAUDE_CODE_OAUTH_TOKEN=abcd1234', 'CLAUDE_CODE_OAUTH_TOKEN=', 'abcd1234'],
+      ['access_token=abc123', 'access_token=', 'abc123'],
+      ['refresh_token: r3fr3sh', 'refresh_token:', 'r3fr3sh'],
+      ['{"token": "t0k3n-x"}', '"token"', 't0k3n-x'],
+      ['{"accessToken":"shortval"}', '"accessToken"', 'shortval'],
+      ['clone https://oauth2:abcd1234efgh@gitlab.x/r.git', 'https://oauth2:', 'abcd1234efgh'],
+      ['pwd=hunter2', 'pwd=', 'hunter2'],
+      ['passwd: hunter3', 'passwd:', 'hunter3'],
+      ['db password = "my pass"', 'password', 'my pass'],
+      ['client_secret=s3cr3t', 'client_secret=', 's3cr3t'],
+      ['X-Api-Key: k3y-val', 'X-Api-Key:', 'k3y-val'],
+      ['apikey=abc', 'apikey=', 'abc'],
+      ['Authorization: Bearer abc.def', 'Authorization:', 'abc.def'],
+      ['auth: basic dXNlcjpw', 'auth:', 'dXNlcjpw'],
+      ['curl -H "Authorization: Bearer zzz"', 'Authorization:', 'zzz'],
+    ];
+    for (const [input, key, secret] of cases) {
+      const out = redactLog(input);
+      expect(out, input).not.toContain(secret);
+      expect(out, input).toContain(key);
+      expect(out, input).toContain('[đã ẩn]');
+    }
+  });
+
+  it('keeps ordinary text readable', () => {
+    const log = ['the tokenizer splits words', 'tokens used 1234 of 5000', 'Reading src/auth/login.ts', 'author: Bob', 'secretary meeting at 9', 'build ok'].join('\n');
+    expect(redactLog(log)).toBe(log);
+    expect(redactLog('line1\npassword=x\nline3')).toBe('line1\npassword=[đã ẩn]\nline3');
+  });
+
+  it('is linear on hostile 1 MB lines', () => {
+    const MB = 1024 * 1024;
+    const lines = [
+      'a'.repeat(MB), 'token'.repeat(MB / 5), 'token '.repeat(MB / 6), `token${' '.repeat(MB)}x`, '//a:'.repeat(MB / 4), `//u:${'p'.repeat(MB)}`,
+      'Bearer '.repeat(MB / 7), `bearer${' '.repeat(MB)}`, 'auth='.repeat(MB / 5), 'a1'.repeat(MB / 2), `${'f'.repeat(MB)}g`, 'password='.repeat(MB / 9),
+    ];
+    for (const l of lines) {
+      const t = Date.now();
+      redactLog(l);
+      expect(Date.now() - t, l.slice(0, 12)).toBeLessThan(2500);
+    }
   });
 });

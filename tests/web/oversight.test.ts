@@ -26,6 +26,7 @@ async function oenv() {
   const loner = mkUser(w.repo, 'loner@x.com', { dept: 'SGLOBAL' });
   return { ...w, sg, pmS, headDev, headSg, deputyDev, cto, admin, loner };
 }
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 const newReq = (w: W, code: string) => w.svc.createRequest({ projectId: w.p.id, code, title: code, description: 'd', perfReq: '', nonfuncReq: '', softwareTypes: ['web'], runMode: 'review', by: w.pm.id });
 
 describe('oversight scoping', () => {
@@ -116,16 +117,36 @@ describe('oversight data', () => {
     const d = await newReq(w, 'REQ-D'); w.repo.updateRequest(d.id, { stage: 'BUGFIX', status: 'running' });
     w.repo.upsertBug(d.id, { tcId: 'TC-77', gitlabIid: null, fixAttempts: 3, status: 'open' });
     const e = await newReq(w, 'REQ-E'); w.repo.updateRequest(e.id, { stage: 'CLARIFY', status: 'awaiting_customer' });
-    const f = await newReq(w, 'REQ-F'); w.repo.updateRequest(f.id, { stage: 'DESIGN', status: 'running' });
+    // rejected, rerun not started yet (the pipeline keeps this state only while the job waits, e.g. for a seat)
+    const f = await newReq(w, 'REQ-F'); w.repo.updateRequest(f.id, { stage: 'DESIGN', status: 'awaiting_seat' });
+    w.repo.createStageRun(f.id, 'DESIGN'); await sleep(5);
     w.repo.addApproval({ requestId: f.id, stage: 'DESIGN', userId: w.se.id, decision: 'reject' });
+    // lingering DEVELOP task-part reject while other tasks run
+    const g = await newReq(w, 'REQ-G'); w.repo.updateRequest(g.id, { stage: 'DEVELOP', status: 'running' });
+    w.repo.createStageRun(g.id, 'DEVELOP'); await sleep(5);
+    w.repo.addApproval({ requestId: g.id, stage: 'DEVELOP', part: 'T-01', userId: w.rev.id, decision: 'reject' });
+    // answered rejects are not blockers: rerun started after it / approved afterwards
+    const h = await newReq(w, 'REQ-H'); w.repo.updateRequest(h.id, { stage: 'DESIGN', status: 'running' });
+    w.repo.addApproval({ requestId: h.id, stage: 'DESIGN', userId: w.se.id, decision: 'reject' }); await sleep(5);
+    w.repo.createStageRun(h.id, 'DESIGN');
+    const i = await newReq(w, 'REQ-I'); w.repo.updateRequest(i.id, { stage: 'DEVELOP', status: 'running' });
+    w.repo.createStageRun(i.id, 'DEVELOP'); await sleep(5);
+    w.repo.addApproval({ requestId: i.id, stage: 'DEVELOP', part: 'T-01', userId: w.rev.id, decision: 'reject' });
+    w.repo.addApproval({ requestId: i.id, stage: 'DEVELOP', part: 'T-01', userId: w.rev.id, decision: 'approve' });
+    // bug at the cap through needs_human, and a customer-proposed CR
+    const j = await newReq(w, 'REQ-J'); w.repo.updateRequest(j.id, { stage: 'BUGFIX', status: 'running' });
+    w.repo.upsertBug(j.id, { tcId: 'TC-88', gitlabIid: null, fixAttempts: 1, status: 'needs_human' });
+    const k = await newReq(w, 'REQ-K'); w.repo.updateRequest(k.id, { stage: 'DEVELOP', status: 'running' });
+    w.repo.createChangeRequest(k.id, { title: 'p', description: 'd', kind: 'add', source: 'customer', status: 'proposed' });
     const ok = await newReq(w, 'REQ-OK'); w.repo.updateRequest(ok.id, { stage: 'ANALYSIS', status: 'running' });
     const body = (await w.get(w.cto.id, '/oversight/blockers')).body;
-    for (const [code, label] of [['REQ-A', 'Chờ người phụ trách kết nối Claude'], ['REQ-B', 'Lỗi'], ['REQ-C', 'Thay đổi yêu cầu chờ PM quyết định'], ['REQ-D', 'Bug đã sửa quá số lần cho phép'], ['REQ-E', 'Chờ khách hàng trả lời'], ['REQ-F', 'Bị từ chối, đang chờ sửa']] as const) {
-      const row = body.split('<tr>').find(r => r.includes(`<td>${code}</td>`));
-      expect(row, code).toBeTruthy();
-      expect(row).toContain(label);
+    for (const [code, label] of [['REQ-A', 'Chờ người phụ trách kết nối Claude'], ['REQ-B', 'Lỗi'], ['REQ-C', 'Thay đổi yêu cầu chờ PM quyết định'], ['REQ-D', 'Bug đã sửa quá số lần cho phép'], ['REQ-E', 'Chờ khách hàng trả lời'], ['REQ-F', 'Bị từ chối, đang chờ sửa'], ['REQ-G', 'Bị từ chối, đang chờ sửa'], ['REQ-J', 'Bug đã sửa quá số lần cho phép'], ['REQ-K', 'Thay đổi yêu cầu chờ PM quyết định']] as const) {
+      const rows = body.split('<tr>').filter(r => r.includes(`<td>${code}</td>`));
+      expect(rows.some(r => r.includes(label)), `${code}: ${label}`).toBe(true);
     }
     expect(body).toContain('TC-77');
+    expect(body).toContain('TC-88');
+    for (const c of ['REQ-H', 'REQ-I']) expect(body.split('<tr>').some(r => r.includes(`<td>${c}</td>`)), c).toBe(false);
     expect(body).not.toContain('<td>REQ-OK</td>');
     // scoped: head of the other department sees none of them
     expect((await w.get(w.headSg.id, '/oversight/blockers')).body).not.toContain('REQ-A');
@@ -194,7 +215,7 @@ describe('oversight content over HTTP', () => {
     expect((await get('?ref=--output%3D%2Ftmp%2Fx')).statusCode).toBe(400);
     expect((await get('?path=d.bin')).body).toContain('nhị phân');
     const audit = w.repo.web.listAudit({ projectId: w.p.id, limit: 50 });
-    expect(audit.filter(a => a.action === 'oversight.content').length).toBe(3);
+    expect(audit.filter(a => a.action === 'oversight.content').length).toBe(2); // x.html and d.bin; the directory index is not audited
     expect(audit.filter(a => a.action === 'oversight.content.denied').length).toBe(5);
     expect(audit.filter(a => a.action.startsWith('oversight.')).every(a => a.userId === w.headDev.id)).toBe(true);
   });
@@ -214,6 +235,84 @@ describe('oversight content over HTTP', () => {
     expect((await w.get(w.cto.id, `/oversight/projects/${w.p.id}/logs?code=NOPE&file=a.log`)).statusCode).toBe(404);
     const docs = await w.get(w.cto.id, `/oversight/projects/${w.p.id}/docs`);
     expect(docs.body).toContain('docs%2Fdevflow%2FREQ-L');
+  });
+});
+
+describe('oversight hardening', () => {
+  it('per-person work is scoped to the actor projects (running jobs, tasks, approvals)', async () => {
+    const w = await oenv();
+    const sgReq = w.repo.createRequest({ title: 's', description: '', perfReq: '', nonfuncReq: '', projectKind: 'existing', gitlabProject: null, softwareTypes: ['web'], runMode: 'review', createdBy: null, projectId: w.sg.id, code: 'SG-1' });
+    w.repo.enqueueJob(sgReq.id, 'run_stage', {}, 0, w.dev.id);
+    expect(w.repo.claimNextJob(Date.now())?.status).toBe('running');
+    const row = (body: string, email: string) => body.split('<tr>').find(x => x.includes(`muted">${email}<`))!;
+    const running = (r: string) => r.split('</td>')[5]!.replace(/<[^>]*>/g, '').trim();
+    // cto sees 1 running job of dev, the head of DEV 0 (that job belongs to a SGLOBAL request)
+    expect(running(row((await w.get(w.cto.id, '/oversight/users')).body, 'dev@x.com'))).toBe('1');
+    expect(running(row((await w.get(w.headDev.id, '/oversight/users')).body, 'dev@x.com'))).toBe('0');
+    const r = await newReq(w, 'REQ-P');
+    w.repo.upsertTask(r.id, { id: 'T-01', title: 'Task của head', featureId: null, dependsOn: [], status: 'todo', reviewRounds: 0, branch: null, mrIid: null, scopeStatus: 'active', changedByCr: null, assigneeId: w.dev.id });
+    expect((await w.get(w.headDev.id, '/oversight/users')).body).toContain('Task của head');
+    expect((await w.get(w.headSg.id, '/oversight/users')).body).not.toContain('dev@x.com');
+  });
+
+  it('seat status calls are bounded, cached and never fail the page', async () => {
+    const w = await oenv();
+    w.repo.web.setUserDisabled(w.tester.id, true);
+    let inflight = 0; let max = 0; const calls: number[] = [];
+    const runner = {
+      kind: 'sudo' as const, run: async () => ({ ok: true, resultText: '' }), login: () => { throw new Error('no'); }, logout: async () => {}, sweepProject: async () => {},
+      status: async (id: number) => {
+        calls.push(id); inflight++; max = Math.max(max, inflight); await sleep(15); inflight--;
+        if (id === w.ba.id) throw new Error('dfctl exploded at /root/secret');
+        return { state: 'connected' as const };
+      },
+    };
+    const app = await buildServer(w.cfg, { repo: w.repo, pipeline: w.pipeline, seatRunner: runner as never, projects: w.svc });
+    try {
+      const get = () => app.inject({ method: 'GET', url: '/oversight/users', headers: { cookie: w.cookie(w.cto.id), host: 'localhost:3000' } });
+      const res = await get();
+      expect(res.statusCode).toBe(200);
+      expect(max).toBeLessThanOrEqual(3);
+      expect(calls).not.toContain(w.tester.id); // disabled
+      expect(res.body).not.toContain('exploded');
+      expect(res.body.split('<tr>').find(x => x.includes('ba@x.com'))).toContain('Chưa kết nối');
+      const n = calls.length;
+      await get();
+      expect(calls.length).toBe(n); // served from the 30 s cache
+    } finally { await app.close(); }
+  });
+
+  it('HEAD requests and index pages write no audit rows; a failing git read is a generic 500', async () => {
+    const w = await oenv();
+    const base = `/oversight/projects/${w.p.id}`;
+    const count = () => w.repo.web.listAudit({ projectId: w.p.id, limit: 500 }).filter(a => a.action.startsWith('oversight.')).length;
+    const h = (url: string) => w.app.inject({ method: 'HEAD', url, headers: { cookie: w.cookie(w.cto.id), host: 'localhost:3000' } });
+    expect((await h(`${base}/files?path=README.md`)).statusCode).toBe(200);
+    expect((await h(`${base}/files?path=.env`)).statusCode).toBe(404);
+    expect(count()).toBe(0);
+    await w.get(w.cto.id, `${base}/files`);
+    await w.get(w.cto.id, `${base}/docs`);
+    await w.get(w.cto.id, `${base}/logs`);
+    expect(count()).toBe(0);
+    await w.get(w.cto.id, `${base}/files?path=README.md`);
+    expect(count()).toBe(1);
+    // the project repository vanishes: no git stderr or path in the page
+    const { rmSync } = await import('node:fs');
+    rmSync(join(w.p.path, '.git'), { recursive: true, force: true });
+    const res = await w.get(w.cto.id, `${base}/files?path=README.md`);
+    expect([404, 500]).toContain(res.statusCode);
+    expect(res.body).not.toContain(w.p.path);
+    expect(res.body).not.toMatch(/fatal|git /i);
+  });
+
+  it('menu entry hidden for head/deputy without a department', async () => {
+    const w = await oenv();
+    const noDept = withRole(w, 'head-nodept', 'head', null);
+    const noDeptDeputy = withRole(w, 'dep-nodept', 'deputy', null);
+    expect((await w.get(noDept.id, '/projects')).body).not.toContain('/oversight/projects');
+    expect((await w.get(noDeptDeputy.id, '/projects')).body).not.toContain('/oversight/projects');
+    expect((await w.get(w.deputyDev.id, '/projects')).body).toContain('/oversight/projects');
+    expect((await w.get(w.admin.id, '/projects')).body).toContain('/oversight/projects');
   });
 });
 void origin;

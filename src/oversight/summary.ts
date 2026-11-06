@@ -78,8 +78,7 @@ export function listBlockers(repo: Repo, projects: ProjectRow[]): Blocker[] {
       if (r.status === 'awaiting_customer') add('awaiting_customer');
       if (r.status === 'failed') add('failed');
       if (r.status === 'needs_human') add('needs_human');
-      const rejected = repo.listApprovals(r.id, r.stage).some(a => a.decision === 'reject');
-      if (rejected && r.status !== 'awaiting_approval') add('rejected_awaiting_fix');
+      if (r.status !== 'awaiting_approval' && hasPendingReject(repo, r)) add('rejected_awaiting_fix');
       const crs = repo.listChangeRequests(r.id).filter(c => c.status === 'proposed' || c.status === 'awaiting_decision');
       if (crs.length) add('cr_awaiting_pm', crs.map(c => c.id).join(', '));
       const bugs = repo.listBugs(r.id).filter(b => b.status === 'needs_human' || (b.status === 'open' && b.fixAttempts >= MAX_FIX_ATTEMPTS));
@@ -89,14 +88,27 @@ export function listBlockers(repo: Repo, projects: ProjectRow[]): Blocker[] {
   return out;
 }
 
+/**
+ * A reject approval exists for the current stage (any part, DEVELOP task parts included) and nothing has answered it:
+ * no later approve for the same part and no stage run started after it (a rerun clears the stage's approvals).
+ */
+function hasPendingReject(repo: Repo, r: RequestRow): boolean {
+  const last = new Map<string, { id: number; decision: string; at: number }>();
+  for (const a of repo.listApprovals(r.id, r.stage)) last.set(a.part, a);
+  const rerunAt = repo.latestStageRun(r.id, r.stage)?.startedAt ?? 0;
+  return [...last.values()].some(a => a.decision === 'reject' && rerunAt <= a.at);
+}
+
 export interface PersonWork { user: OversightUser; tasks: { requestCode: string; projectKey: string; taskId: string; title: string; status: string }[]; running: number; waitingApproval: number }
 
 /** Per-person work: open tasks assigned, jobs running on their seat, gates and CR decisions waiting for them. */
 export function listPeopleWork(repo: Repo, users: OversightUser[], projects: ProjectRow[]): PersonWork[] {
   const ids = new Set(projects.map(p => p.id));
   const running = new Map<number, number>();
+  // only jobs of requests in the actor's projects count, like tasks and approvals
+  const scopedReqs = new Set(projects.flatMap(p => repo.listRequestsByProject(p.id).map(r => r.id)));
   for (const j of repo.listJobs()) {
-    if (j.status === 'running' && j.seatUserId != null) running.set(j.seatUserId, (running.get(j.seatUserId) ?? 0) + 1);
+    if (j.status === 'running' && j.seatUserId != null && j.requestId != null && scopedReqs.has(j.requestId)) running.set(j.seatUserId, (running.get(j.seatUserId) ?? 0) + 1);
   }
   return users.map(user => {
     const inbox = buildInbox(repo, user.id);
