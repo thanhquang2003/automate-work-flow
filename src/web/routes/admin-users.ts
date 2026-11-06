@@ -9,7 +9,7 @@ import { render, type LayoutData } from '../view.js';
 type Body = Record<string, string | undefined>;
 
 /** Admin users page and the "PM của phòng" page of head/deputy. Every write: can(...) then audit_log. */
-export function adminUserRoutes(app: FastifyInstance, cfg: Config, { repo }: WebDeps): void {
+export function adminUserRoutes(app: FastifyInstance, cfg: Config, { repo, pipeline, projects }: WebDeps): void {
   const layout = (req: FastifyRequest, title: string, extra: Partial<LayoutData> = {}): LayoutData => ({ user: req.user, mode: cfg.mode, title, ...extra });
   const html = (reply: FastifyReply, s: string, code = 200) => reply.code(code).type('text/html; charset=utf-8').send(s);
   const flashOf = (req: FastifyRequest): Partial<LayoutData> => {
@@ -36,13 +36,13 @@ export function adminUserRoutes(app: FastifyInstance, cfg: Config, { repo }: Web
   });
 
   /** Runs one admin write: permission via can(), then the change and an audit row. */
-  const adminWrite = (name: string, action: Action, fn: (u: UserRow, b: Body, req: FastifyRequest) => string) => {
+  const adminWrite = (name: string, action: Action, fn: (u: UserRow, b: Body, req: FastifyRequest) => string | Promise<string>) => {
     app.post(`/admin/users/:id/${name}`, async (req, reply) => {
       const a = actorOf(repo, req.user);
       const u = targetOf(req);
       if (!a || !u || !can(a, action, ctxOf(u))) return forbidPage(cfg, req, reply);
       let msg: string;
-      try { msg = fn(u, (req.body ?? {}) as Body, req); } catch (e) { return go(reply, '/admin/users', 'err', (e as Error).message); }
+      try { msg = await fn(u, (req.body ?? {}) as Body, req); } catch (e) { return go(reply, '/admin/users', 'err', (e as Error).message); }
       return go(reply, '/admin/users', 'ok', msg);
     });
   };
@@ -84,13 +84,22 @@ export function adminUserRoutes(app: FastifyInstance, cfg: Config, { repo }: Web
     auditWeb(repo, req, 'user.setCanBePm', { detail: { userId: u.id, canBePm: on } });
     return `Đã cập nhật quyền PM của ${u.email ?? u.username}.`;
   });
-  adminWrite('disable', 'user.setSysRole', (u, b, req) => {
+  adminWrite('disable', 'user.setSysRole', async (u, b, req) => {
     const off = b.value === '1';
     if (off && req.user?.id === u.id) throw new Error('Không thể tự khóa tài khoản đang đăng nhập.');
     if (off && u.sysRole === 'admin' && repo.web.listUsers().filter(x => x.sysRole === 'admin' && !x.disabled).length <= 1) throw new Error('Không thể khóa quản trị viên cuối cùng.');
     repo.web.setUserDisabled(u.id, off);
     auditWeb(repo, req, 'user.setDisabled', { detail: { userId: u.id, disabled: off } });
-    return `${off ? 'Đã khóa' : 'Đã mở khóa'} ${u.email ?? u.username}.`;
+    let warn = '';
+    if (cfg.mode === 'server') {
+      // Like removing a member: the user's running jobs stop and move to the next person of each role (awaited)
+      // BEFORE the Linux groups change; then the groups hold only enabled members (re-enabling adds them back).
+      if (off) await pipeline.userDisabled(u.id);
+      const failed = projects ? await projects.syncUserGroups(u.id) : [];
+      for (const f of failed) console.error(`Không đồng bộ được nhóm Linux của dự án #${f.projectId}: ${f.error}`);
+      if (failed.length) warn = ` Chưa cập nhật được nhóm Linux của ${failed.length} dự án (sẽ thử lại khi khởi động lại).`;
+    }
+    return `${off ? 'Đã khóa' : 'Đã mở khóa'} ${u.email ?? u.username}.${warn}`;
   });
 
   // ---- head/deputy: PM of own department ----

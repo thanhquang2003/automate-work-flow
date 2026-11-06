@@ -523,6 +523,19 @@ export class Pipeline {
     await Promise.allSettled(stopped);
   }
 
+  /**
+   * Admin disabled a user (already saved in the DB, so seat resolution skips them): their running jobs in every
+   * project they belong to are stopped and moved to the next person of the role, queued/parked jobs switch seats.
+   * Resolves once every stopped run has ended, so the caller may change OS groups afterwards.
+   */
+  async userDisabled(userId: number): Promise<void> {
+    if (!this.multiUser) return;
+    const projects = this.repo.listProjects({ includeArchived: true }).filter(p => this.repo.getProjectMember(p.id, userId));
+    const reqs = projects.flatMap(p => this.repo.listRequestsByProject(p.id).map(r => r.id));
+    const stopped = (await Promise.all(reqs.map(id => this.reseatRequest(id)))).flat();
+    await Promise.allSettled(stopped);
+  }
+
   /** Hook for ProjectService.setAssignees: running/queued jobs follow the new order of assignees. */
   async assigneesChanged(reqId: string): Promise<void> {
     await Promise.allSettled(this.reseatRequest(reqId));

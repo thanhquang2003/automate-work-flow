@@ -1,5 +1,5 @@
 import type { Repo } from '../db/repo.js';
-import type { ProjectSystemOps } from './service.js';
+import { enabledMemberIds, type ProjectSystemOps } from './service.js';
 
 export interface ReconcileResult {
   ok: number[];
@@ -18,7 +18,7 @@ export async function reconcileProjects(repo: Repo, systemOps: ProjectSystemOps)
     if (p.archived) continue;
     try {
       await systemOps.ensureProjectGroup(p.id, p.path);
-      await systemOps.setMembers(p.id, repo.listProjectMembers(p.id).map(m => m.userId));
+      await systemOps.setMembers(p.id, enabledMemberIds(repo, p.id));
       out.ok.push(p.id);
     } catch (e) {
       out.failed.push({ projectId: p.id, error: (e as Error).message });

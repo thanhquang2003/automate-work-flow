@@ -272,6 +272,23 @@ export class ProjectService {
     await this.systemOps.setMembers(projectId, clean.map(m => m.userId));
   }
 
+  /**
+   * After an admin disabled (or re-enabled) a user: the Linux group of every project they belong to is set to the
+   * project's enabled members, so a disabled seat loses (or regains) file access. Errors are collected per project.
+   */
+  async syncUserGroups(userId: number): Promise<{ projectId: number; error: string }[]> {
+    const failed: { projectId: number; error: string }[] = [];
+    for (const p of this.repo.listProjects()) {
+      if (!this.repo.getProjectMember(p.id, userId)) continue;
+      try {
+        await this.systemOps.setMembers(p.id, enabledMemberIds(this.repo, p.id));
+      } catch (e) {
+        failed.push({ projectId: p.id, error: (e as Error).message });
+      }
+    }
+    return failed;
+  }
+
   /** Attaches the engine (Pipeline) after construction. */
   attachEngine(hooks: MemberChangeHooks): void { this.hooks = hooks; }
 
@@ -380,4 +397,9 @@ export class ProjectService {
       return row;
     });
   }
+}
+
+/** Members of a project whose account is enabled: the Linux group holds exactly these (disabled users are left out). */
+export function enabledMemberIds(repo: Repo, projectId: number): number[] {
+  return repo.listProjectMembers(projectId).map(m => m.userId).filter(id => !repo.web.getUser(id)?.disabled);
 }
