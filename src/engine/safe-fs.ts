@@ -170,22 +170,43 @@ export function safeOpenAppend(path: string, root?: string): number {
   return openChecked(p, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND, r, true);
 }
 
-/** Reads a whole file; refuses symlinks anywhere below the root and non-regular files. */
-export function safeReadFile(path: string, root?: string): Buffer {
+/** A file is larger than the caller allows reading whole; nothing was allocated for it. */
+export class FileTooLargeError extends UnsafePathError {
+  constructor(readonly path: string, readonly size: number, readonly maxBytes: number) {
+    super(`${path} is ${size} bytes, over the ${maxBytes}-byte limit; refusing to read it`);
+    this.name = 'FileTooLargeError';
+  }
+}
+
+/** Default cap for whole-file reads (a seat can make a sparse multi-GB file in a folder it writes). */
+export const DEFAULT_MAX_READ = 64 * 1024 * 1024;
+
+export interface ReadOpts { maxBytes?: number }
+
+/**
+ * Reads a whole file; refuses symlinks anywhere below the root, non-regular files and files over `maxBytes`
+ * (default DEFAULT_MAX_READ): the size is checked on the opened descriptor before anything is allocated, and a file
+ * growing while being read is refused too.
+ */
+export function safeReadFile(path: string, root?: string, o: ReadOpts = {}): Buffer {
+  const max = o.maxBytes ?? DEFAULT_MAX_READ;
   const p = resolve(path);
   const r = rootFor(p, root);
   checkParents(p, r, false);
   const fd = openChecked(p, constants.O_RDONLY, r, false);
   try {
     const size = fstatSync(fd).size;
+    if (size > max) throw new FileTooLargeError(p, size, max);
     const chunks: Buffer[] = [];
     let total = 0;
     for (;;) {
-      const b = Buffer.alloc(Math.max(65536, size - total));
+      const b = Buffer.alloc(Math.min(Math.max(65536, size - total), max + 1 - total));
+      if (b.length === 0) throw new FileTooLargeError(p, total, max);
       const n = readSync(fd, b, 0, b.length, null);
       if (n <= 0) break;
       chunks.push(b.subarray(0, n));
       total += n;
+      if (total > max) throw new FileTooLargeError(p, total, max);
     }
     return Buffer.concat(chunks, total);
   } finally {
@@ -193,7 +214,15 @@ export function safeReadFile(path: string, root?: string): Buffer {
   }
 }
 
-export const safeReadText = (path: string, root?: string): string => safeReadFile(path, root).toString('utf8');
+export const safeReadText = (path: string, root?: string, o: ReadOpts = {}): string => safeReadFile(path, root, o).toString('utf8');
+
+/** lstat of `path` when it is a regular file reached without any symlinked folder below the root; else undefined. */
+export function safeStatFile(path: string, root?: string): { size: number; mtimeMs: number } | undefined {
+  const p = resolve(path);
+  try { checkParents(p, rootFor(p, root), false); } catch (e) { if (e instanceof UnsafePathError) return undefined; throw e; }
+  const st = lstatSync(p, { throwIfNoEntry: false });
+  return st && st.isFile() ? { size: st.size, mtimeMs: st.mtimeMs } : undefined;
+}
 
 /**
  * Last `maxBytes` of a regular file (read-only views of logs a seat may have grown very large). Same checks as
@@ -286,7 +315,8 @@ export function safeOpenRead(path: string, root?: string): { fd: number; size: n
 export class SafeFileStream extends Readable {
   private pos = 0;
   skipped = false;
-  constructor(private readonly path: string, private readonly root: string | undefined, private fd?: number) {
+  /** `limit`: never read past this many bytes (a zip entry stops at the size it was listed with). */
+  constructor(private readonly path: string, private readonly root: string | undefined, private fd?: number, private readonly limit = Number.POSITIVE_INFINITY) {
     super({ highWaterMark: 64 * 1024 });
   }
 
@@ -304,7 +334,9 @@ export class SafeFileStream extends Readable {
         return;
       }
     }
-    const b = Buffer.allocUnsafe(Math.max(n, 16 * 1024));
+    const want = Math.min(Math.max(n, 16 * 1024), this.limit - this.pos);
+    if (want <= 0) { this.push(null); return; }
+    const b = Buffer.allocUnsafe(want);
     fsRead(this.fd, b, 0, b.length, this.pos, (err, bytes) => {
       if (err) { this.destroy(err); return; }
       if (bytes === 0) { this.push(null); return; }

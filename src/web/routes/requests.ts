@@ -9,7 +9,7 @@ import type { BugRow, ProjectKind, RequestRow, RunMode, SoftwareType } from '../
 import { STAGES } from '../../domain/types.js';
 import { loadImpact } from '../../engine/changes.js';
 import { changeDir, readFlowState, readProjectInfo } from '../../engine/stages/common.js';
-import { SafeFileStream, safeListTree, safeOpenRead, safeReadText, safeWriteFile, UnsafePathError } from '../../engine/safe-fs.js';
+import { FileTooLargeError, SafeFileStream, safeListTree, safeOpenRead, safeReadText, safeStatFile, safeWriteFile, UnsafePathError } from '../../engine/safe-fs.js';
 import { Workspace } from '../../engine/workspace.js';
 import { StaleActionError } from '../../engine/pipeline.js';
 import { PermissionError } from '../../projects/service.js';
@@ -69,10 +69,16 @@ function listFiles(ws: Workspace, dir: string): FileEntry[] {
  * Text of a file in a seat-writable request folder (analysis.md, impact.md) through safe-fs; '' when it is missing or
  * unsafe (symlink anywhere on the way, FIFO, device...). Never follows a planted link.
  */
-export function readRequestText(ws: Workspace, path: string): string {
+/** Largest markdown/JSON file the request pages render (a seat could plant a sparse multi-GB file). */
+export const MAX_PAGE_TEXT = 2 * 1024 * 1024;
+/** Largest total of artifacts + evidence put into bundle.zip. */
+export const MAX_BUNDLE_BYTES = 200 * 1024 * 1024;
+
+export function readRequestText(ws: Workspace, path: string, maxBytes = MAX_PAGE_TEXT): string {
   try {
-    return safeReadText(path, ws.trustRoot);
+    return safeReadText(path, ws.trustRoot, { maxBytes });
   } catch (e) {
+    if (e instanceof FileTooLargeError) return `> Tệp quá lớn để hiển thị (${(e.size / 1048576).toFixed(1)} MB, tối đa ${(maxBytes / 1048576).toFixed(0)} MB).`;
     if (e instanceof UnsafePathError) { console.warn(`refused to read ${path}: ${e.message}`); return ''; }
     const code = (e as NodeJS.ErrnoException).code;
     if (code === 'ENOENT' || code === 'ENOTDIR') return '';
@@ -248,7 +254,7 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
     data.stepIdx = at === null ? -1 : steps.indexOf(at as (typeof steps)[number]);
     if (tab === 'changes') {
       const feats = new Map(repo.listFeatures(id).map(f => [f.id, f]));
-      data.crRows = crs.map(c => ({ ...c, attachments: repo.listCrAttachments(id, c.id), hasImpact: readRequestText(ws, join(changeDir(ws, c.id), 'impact.md')) !== '' }));
+      data.crRows = crs.map(c => ({ ...c, attachments: repo.listCrAttachments(id, c.id), hasImpact: safeStatFile(join(changeDir(ws, c.id), 'impact.md'), ws.trustRoot) !== undefined }));
       const pm = /^(remove|modify):(F-[\w-]+)$/.exec((q as { prefill?: string }).prefill ?? '');
       const pf = pm && feats.get(pm[2]!);
       data.prefill = pf
@@ -435,14 +441,19 @@ export function requestRoutes(app: FastifyInstance, cfg: Config, { repo, pipelin
     const ws = Workspace.forRequest(cfg, repo, getReq(id)!);
     const zip = new ZipArchive({ zlib: { level: 6 } });
     zip.on('error', () => zip.abort());
-    // Built from a safe-fs listing, each entry read through safe-fs (never zip.directory, which follows links).
+    // Built from a safe-fs listing, each entry read through safe-fs (never zip.directory, which follows links) and
+    // never past the size it was listed with; the whole bundle has a size cap.
     const arts = listFiles(ws, ws.artifactsDir);
-    for (const f of arts) zip.append(new SafeFileStream(join(ws.artifactsDir, ...f.rel.split('/')), ws.trustRoot), { name: f.rel });
+    const entries = arts.map(f => ({ path: join(ws.artifactsDir, ...f.rel.split('/')), name: f.rel, size: f.size }));
     if (!arts.some(f => f.rel.startsWith('evidence/'))) {
-      for (const f of listFiles(ws, ws.evidenceDir)) {
-        zip.append(new SafeFileStream(join(ws.evidenceDir, ...f.rel.split('/')), ws.trustRoot), { name: `evidence/${f.rel}` });
-      }
+      for (const f of listFiles(ws, ws.evidenceDir)) entries.push({ path: join(ws.evidenceDir, ...f.rel.split('/')), name: `evidence/${f.rel}`, size: f.size });
     }
+    const total = entries.reduce((n, e) => n + e.size, 0);
+    if (total > MAX_BUNDLE_BYTES) {
+      zip.abort();
+      return html(reply, render('error', layout(req, 'Gói kết quả quá lớn'), { code: 413, message: `Gói kết quả quá lớn (${(total / 1048576).toFixed(0)} MB, tối đa ${MAX_BUNDLE_BYTES / 1048576} MB). Hãy tải từng tệp ở tab Tài liệu.` }), 413);
+    }
+    for (const e of entries) zip.append(new SafeFileStream(e.path, ws.trustRoot, undefined, e.size), { name: e.name });
     void zip.finalize();
     reply.header('Content-Disposition', `attachment; filename="${id}-ketqua.zip"`);
     return reply.type('application/zip').send(zip);

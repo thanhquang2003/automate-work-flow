@@ -21,7 +21,7 @@ export function loadImpact(ws: Workspace, crId: string): ImpactOutT | undefined 
   const p = impactJsonPath(ws, crId);
   if (!existsSync(p)) return undefined;
   try {
-    const r = ImpactOut.safeParse(JSON.parse(safeReadText(p, ws.trustRoot)));
+    const r = ImpactOut.safeParse(JSON.parse(safeReadText(p, ws.trustRoot, { maxBytes: 2 * 1024 * 1024 })));
     return r.success ? r.data : undefined;
   } catch { return undefined; }
 }
