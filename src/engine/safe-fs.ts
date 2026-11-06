@@ -165,6 +165,47 @@ export function safeReadFile(path: string, root?: string): Buffer {
 
 export const safeReadText = (path: string, root?: string): string => safeReadFile(path, root).toString('utf8');
 
+/**
+ * Last `maxBytes` of a regular file (read-only views of logs a seat may have grown very large). Same checks as
+ * safeReadFile; `size` is the whole file's size, `truncated` tells the caller the head was left out.
+ */
+export function safeReadTail(path: string, maxBytes: number, root?: string): { data: Buffer; size: number; truncated: boolean } {
+  const p = resolve(path);
+  const r = rootFor(p, root);
+  checkParents(p, r, false);
+  const fd = openChecked(p, constants.O_RDONLY, r, false);
+  try {
+    const size = fstatSync(fd).size;
+    const start = Math.max(0, size - maxBytes);
+    const b = Buffer.alloc(Math.min(size, maxBytes));
+    let got = 0;
+    while (got < b.length) {
+      const n = readSync(fd, b, got, b.length - got, start + got);
+      if (n <= 0) break;
+      got += n;
+    }
+    return { data: b.subarray(0, got), size, truncated: start > 0 };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Regular files directly inside `dir` (symlinks and special entries are left out, never followed). Missing dir: []. */
+export function safeListFiles(dir: string, root?: string): { name: string; size: number; mtimeMs: number }[] {
+  const d = resolve(dir);
+  const r = rootFor(d, root);
+  checkParents(join(d, 'x'), r, false);
+  const st = lstatSync(d, { throwIfNoEntry: false });
+  if (!st) return [];
+  if (!st.isDirectory()) throw new UnsafePathError(`${d} is not a directory; refusing`);
+  const out: { name: string; size: number; mtimeMs: number }[] = [];
+  for (const name of readdirSync(d)) {
+    const e = lstatSync(join(d, name), { throwIfNoEntry: false });
+    if (e?.isFile()) out.push({ name, size: e.size, mtimeMs: e.mtimeMs });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /** True when `path` is an existing regular file (a symlink counts as missing). */
 export function safeIsFile(path: string): boolean {
   const st = lstatSync(path, { throwIfNoEntry: false });

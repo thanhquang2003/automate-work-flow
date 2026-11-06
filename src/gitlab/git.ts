@@ -34,7 +34,12 @@ export const GIT_SERVER_ARGS: readonly string[] = ['-c', 'core.hooksPath=/dev/nu
  */
 export const GIT_SERVER_ENV: Readonly<Record<string, string>> = { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
 
+/** Read-only content access: pathspecs are literal (no `:(magic)`/globs from user input), replace refs are ignored. */
+const READ_ENV: Record<string, string> = { GIT_LITERAL_PATHSPECS: '1', GIT_NO_REPLACE_OBJECTS: '1' };
+
 export type GitMode = 'local' | 'server';
+
+export interface TreeEntry { mode: string; type: 'blob' | 'tree' | 'commit'; sha: string; size: number | null; path: string; name: string }
 
 /** Full argv for one git invocation in `mode`. */
 export function gitArgv(args: string[], mode: GitMode): string[] {
@@ -417,6 +422,50 @@ export class Git {
     await mkdir(dirname(file), { recursive: true });
     await appendFile(file, `${cur && !cur.endsWith('\n') ? '\n' : ''}${entry}\n`, 'utf8');
     if (this.mode === 'server') await Git.hardenConfig(dirname(dirname(file)));
+  }
+
+  // ---- read-only content access (oversight views): git plumbing only, nothing is checked out or followed ----
+
+  /**
+   * Commit id of local branch `branch`, or undefined. The name is validated (plain ref characters, no `..`,
+   * `check-ref-format`) and resolved as `refs/heads/<name>` only: no sha, no revision syntax, no `@{...}`.
+   */
+  async branchCommit(branch: string): Promise<string | undefined> {
+    if (!/^[A-Za-z0-9._\/-]{1,200}$/.test(branch) || branch.startsWith('-') || branch.startsWith('/') || branch.includes('..')) return undefined;
+    if ((await this.exec(['check-ref-format', `refs/heads/${branch}`], { allowFail: true })).code !== 0) return undefined;
+    const r = await this.exec(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`], { allowFail: true });
+    const sha = r.stdout.trim();
+    return r.code === 0 && /^[0-9a-f]{40,64}$/.test(sha) ? sha : undefined;
+  }
+
+  private static parseTree(out: string): TreeEntry[] {
+    const res: TreeEntry[] = [];
+    for (const rec of out.split('\0')) {
+      const m = /^(\d{6}) (blob|tree|commit) ([0-9a-f]{40,64}) +(\d+|-)\t([\s\S]+)$/.exec(rec);
+      if (!m) continue;
+      res.push({ mode: m[1]!, type: m[2] as TreeEntry['type'], sha: m[3]!, size: m[4] === '-' ? null : Number(m[4]), path: m[5]!, name: m[5]!.slice(m[5]!.lastIndexOf('/') + 1) });
+    }
+    return res;
+  }
+
+  /** The tree entry at `path` (components already validated by the caller) in `commit`, or undefined. */
+  async treeEntry(commit: string, path: string): Promise<TreeEntry | undefined> {
+    if (!/^[0-9a-f]{40,64}$/.test(commit)) throw new Error('Invalid commit id');
+    if (!path) return { mode: '040000', type: 'tree', sha: commit, size: null, path: '', name: '' };
+    return Git.parseTree((await this.exec(['ls-tree', '-z', '-l', commit, '--', path], { env: READ_ENV })).stdout)[0];
+  }
+
+  /** Entries directly inside the directory `path` ('' = root) of `commit`. Gitlinks and symlinks are only listed. */
+  async listTree(commit: string, path: string): Promise<TreeEntry[]> {
+    if (!/^[0-9a-f]{40,64}$/.test(commit)) throw new Error('Invalid commit id');
+    const args = ['ls-tree', '-z', '-l', commit, ...(path ? ['--', `${path}/`] : [])];
+    return Git.parseTree((await this.exec(args, { env: READ_ENV })).stdout);
+  }
+
+  /** Text of a blob (the caller checked its size). For a symlink entry this is the link target text. */
+  async blobText(sha: string): Promise<string> {
+    if (!/^[0-9a-f]{40,64}$/.test(sha)) throw new Error('Invalid object id');
+    return (await this.exec(['cat-file', 'blob', sha], { env: READ_ENV })).stdout;
   }
 
   async hasRemote(): Promise<boolean> {

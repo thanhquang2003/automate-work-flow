@@ -123,7 +123,7 @@
         "CTO:see progress blockers and project content read-only"
       ],
       "complexity": "large",
-      "status": "planned",
+      "status": "in-progress",
       "layer": "Full-stack",
       "dependencies": [
         "FEAT-003",
@@ -131,7 +131,7 @@
       ],
       "evidence": null,
       "created": "2026-11-05",
-      "updated": "2026-11-05"
+      "updated": "2026-11-06"
     },
     {
       "id": "FEAT-008",
