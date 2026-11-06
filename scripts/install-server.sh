@@ -29,7 +29,7 @@ step() { printf '\n== %s\n' "$*"; }
 
 [ "$(id -u)" -eq 0 ] || die "run as root"
 [ "$(uname -s)" = Linux ] || die "Linux only"
-for t in useradd groupadd gpasswd runuser script setsid timeout visudo install realpath systemctl; do
+for t in useradd groupadd gpasswd setpriv script setsid timeout visudo install realpath systemctl; do
   command -v "$t" >/dev/null || die "missing tool: $t"
 done
 

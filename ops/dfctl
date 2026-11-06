@@ -13,12 +13,16 @@
 #                                                    stdin/stdout/stderr pass through (prompt via stdin)
 #   claude-auth <userId> status|logout
 #   claude-auth <userId> login --run-id <runId>      `claude auth login` inside a pty (util-linux script)
-#   stop-claude <userId> <runId>                     kill a run started with that run id (DevFlow cannot
-#                                                    signal processes of other users itself)
-#   --self-test                                      validation checks only; touches nothing on the system
+#   stop-claude <userId> <runId>                     stop a run started with that run id (TERM, then KILL);
+#                                                    leaves a stop marker so a run that has not started yet
+#                                                    never starts (DevFlow cannot signal other users itself)
+#   --self-test                                      pure checks plus temp-dir runs as the calling user; never
+#                                                    touches system state
 #
 # Design rules: root never writes inside a path that a non-root user controls (homes and project folders
-# are changed through `runuser` as their owner); no value from the caller reaches a shell; the claude
+# are changed through `setpriv` as their owner); programs run as other users through `setpriv`, which
+# execs in place so stop-claude and the time limits reach the whole run; no value from the caller reaches
+# a shell; project .git config/hooks/info stay owner-only (see HARDEN_SCRIPT); the claude
 # binary and project roots come only from the root-owned /etc/devflow/dfctl.conf; DevFlow never sees,
 # reads or stores Claude credentials (they stay in /var/lib/devflow/users/<id>/.claude, mode 0700).
 set -euo pipefail
@@ -125,6 +129,80 @@ validate_args() {
   return 0
 }
 
+# ---------------------------------------------------------------- command builders (pure, covered by --self-test)
+
+EXTRA_ENV=()
+USER_CMD=()
+# Sets USER_CMD: run "$@" as <uid>:<gid> (supplementary groups from /etc/group) with a clean environment,
+# starting in <cwd>. setpriv sets the ids and execs in place: no fork, no new session, no PAM. So the program
+# stays in the process group dfctl tracks and stop-claude / the hard time limit reach it (runuser would
+# fork and setsid the program away from that group).
+build_user_cmd() {
+  local uid=$1 gid=$2 home=$3 cwd=$4; shift 4
+  [ "${1-}" = -- ] && shift
+  USER_CMD=(setpriv "--reuid=$uid" "--regid=$gid" --init-groups --no-new-privs --
+    env -i -C "$cwd" "HOME=$home" "CLAUDE_CONFIG_DIR=$home/.claude" "PATH=$USER_PATH" LANG=C.UTF-8
+    SHELL=/bin/sh TERM=dumb DISABLE_AUTOUPDATER=1 "${EXTRA_ENV[@]}" "$@")
+}
+
+# The seat's git trusts only this worktree and its project (command-scope safe.directory through
+# GIT_CONFIG_*; replaces the old global safe.directory=*). Then USER_CMD runs <claude> <args...> in <cwd>.
+build_run_claude_cmd() {
+  local uid=$1 gid=$2 home=$3 cwd=$4 project=$5 claude=$6; shift 6
+  [ "${1-}" = -- ] && shift
+  local rest=${cwd#"$project/.devflow/worktrees/"}
+  local wt="$project/.devflow/worktrees/${rest%%/*}"
+  EXTRA_ENV=(GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.directory "GIT_CONFIG_VALUE_0=$wt"
+    GIT_CONFIG_KEY_1=safe.directory "GIT_CONFIG_VALUE_1=$project")
+  build_user_cmd "$uid" "$gid" "$home" "$cwd" -- "$claude" "$@"
+  EXTRA_ENV=()
+}
+
+# Run as the folder owner (devflow), never as root. Args: <dir> <owner> <full 0|1> <group or ->.
+# Makes the project folder group-shared for seats, but keeps everything git executes or reads as
+# configuration (.git itself, .git/config, .git/hooks, .git/info, submodule equivalents) owner-only, so a seat
+# cannot make DevFlow's git run code. Sticky bits stop seats from renaming DevFlow's .git, .devflow and
+# worktree folders out of the way.
+readonly HARDEN_SCRIPT='
+set -u
+umask 022
+dir=$1 owner=$2 full=$3 grp=$4
+fail() { printf "project hardening: %s\n" "$*" >&2; exit 1; }
+cd -- "$dir" || fail "cannot enter $dir"
+[ "$(stat -c %U .)" = "$owner" ] || fail "project folder not owned by $owner"
+if [ "$grp" != - ]; then chgrp -- "$grp" . || fail "chgrp $grp"; fi
+if [ "$full" = 1 ]; then
+  chgrp -R -h -P -f -- "$grp" . || true
+  chmod -R -f g+rwX,o-rwx . || true
+  find . -xdev -type d ! -perm -2000 -exec chmod -f g+s {} + 2>/dev/null || true
+fi
+chmod 3770 . || fail "chmod project folder"
+for d in .devflow .devflow/worktrees; do
+  [ -e "$d" ] || [ -L "$d" ] || continue
+  [ -d "$d" ] && [ ! -L "$d" ] && [ "$(stat -c %U -- "$d")" = "$owner" ] || fail "$d is not a directory owned by $owner"
+  chmod 3770 -- "$d" || fail "chmod $d"
+done
+if [ -e .git ] || [ -L .git ]; then
+  [ -d .git ] && [ ! -L .git ] && [ "$(stat -c %U .git)" = "$owner" ] || fail ".git is not a directory owned by $owner"
+  chmod 2750 .git || fail "chmod .git"
+  for p in .git/config .git/hooks .git/info; do
+    [ -e "$p" ] || [ -L "$p" ] || continue
+    [ ! -L "$p" ] || fail "$p is a symlink"
+    [ -z "$(find "$p" ! -user "$owner" -print -quit)" ] || fail "$p contains entries not owned by $owner"
+    chmod -R g-w,o-rwx -- "$p" || fail "chmod $p"
+  done
+  if [ -e .git/worktrees ] || [ -L .git/worktrees ]; then
+    [ -d .git/worktrees ] && [ ! -L .git/worktrees ] || fail ".git/worktrees is not a directory"
+    chmod 3770 .git/worktrees || fail "chmod .git/worktrees"
+  fi
+  if [ -d .git/modules ]; then
+    [ -z "$(find .git/modules \( -name config -o -name hooks -o -name info \) ! -user "$owner" -print -quit)" ] || fail "submodule git files not owned by $owner"
+    find .git/modules \( -name config -o -name hooks -o -name info \) -prune -exec chmod -R g-w,o-rwx {} + || fail "chmod .git/modules"
+  fi
+fi
+exit 0
+'
+
 # ---------------------------------------------------------------- system helpers (root only)
 
 need_root() { [ "$(id -u)" -eq 0 ] || die "must run as root (through sudo)"; }
@@ -159,8 +237,9 @@ load_conf() {
       *) die "unknown key in $CONF_FILE: $key" ;;
     esac
   done < "$CONF_FILE"
-  local IFS=,
-  for r in $raw_roots; do
+  local -a roots=()
+  IFS=, read -r -a roots <<< "$raw_roots"   # no pathname expansion of entries
+  for r in "${roots[@]}"; do
     is_canonical "$r" && [ "$r" != / ] && [ -d "$r" ] || die "bad PROJECT_ROOTS entry in $CONF_FILE"
     [ "$(realpath -e -- "$r")" = "$r" ] || die "PROJECT_ROOTS entry is not canonical (symlink?)"
     CONF_ROOTS+=("$r")
@@ -181,46 +260,100 @@ in_roots() {
 user_home() { getent passwd "$1" | cut -d: -f6; }
 in_group() { local u=$1 g=$2 x; for x in $(id -nG -- "$u"); do [ "$x" = "$g" ] && return 0; done; return 1; }
 
-# Existing dfu account checked against what provision-user creates; returns its home.
+# Checks an existing dfu account against what provision-user creates; sets SEAT_UID, SEAT_GID, SEAT_HOME.
+SEAT_UID="" SEAT_GID="" SEAT_HOME=""
 seat_user() {
-  local id=$1 u=${USER_PREFIX}$1 home
+  local id=$1 u=${USER_PREFIX}$1
   getent passwd "$u" >/dev/null || die "user $u not provisioned"
-  home=$(user_home "$u")
-  [ "$home" = "$USERS_HOME/$id" ] || die "user $u has an unexpected home"
-  [ -d "$home" ] && [ ! -L "$home" ] || die "home of $u missing"
-  printf '%s\n' "$home"
+  SEAT_UID=$(id -u -- "$u"); SEAT_GID=$(id -g -- "$u"); SEAT_HOME=$(user_home "$u")
+  [ "$SEAT_UID" != 0 ] || die "user $u has uid 0"
+  [ "$SEAT_HOME" = "$USERS_HOME/$id" ] || die "user $u has an unexpected home"
+  [ -d "$SEAT_HOME" ] && [ ! -L "$SEAT_HOME" ] || die "home of $u missing"
+  [ "$(stat -c %u -- "$SEAT_HOME")" = "$SEAT_UID" ] || die "home of $u is not owned by $u"
 }
 
-# Clean environment for the seat user (nothing from DevFlow's environment crosses over).
-user_env() {
-  local home=$1
-  USER_ENV=(env -i HOME="$home" CLAUDE_CONFIG_DIR="$home/.claude" PATH="$USER_PATH" LANG=C.UTF-8
-    SHELL=/bin/sh TERM=dumb DISABLE_AUTOUPDATER=1)
+# Runs HARDEN_SCRIPT as the service user on <dir>.
+harden_project() {
+  local dir=$1 full=$2 grp=$3
+  setpriv "--reuid=$SERVICE_USER" "--regid=$SERVICE_USER" --init-groups --no-new-privs -- \
+    env -i "PATH=$USER_PATH" LANG=C.UTF-8 HOME=/nonexistent /bin/bash -c "$HARDEN_SCRIPT" harden "$dir" "$SERVICE_USER" "$full" "$grp"
 }
 
 registry_path() { cat -- "$REG_DIR/$1" 2>/dev/null || true; }
 
 prepare_run_dir() {
-  if [ -e "$RUN_DIR" ]; then root_dir_ok "$RUN_DIR" || die "$RUN_DIR is not a root-owned directory"
+  if [ -e "$RUN_DIR" ] || [ -L "$RUN_DIR" ]; then root_dir_ok "$RUN_DIR" || die "$RUN_DIR is not a root-owned directory"
   else install -d -m 0700 -o root -g root "$RUN_DIR"; fi
 }
 
-# Runs "$@" in its own session under a hard time limit, tracked by <uid>-<runId> so stop-claude can kill
-# the whole process group. stdin is passed through explicitly (a background job would get /dev/null).
-run_tracked() {
-  local uid=$1 rid=$2 max=$3; shift 3
-  prepare_run_dir
-  local pidf="$RUN_DIR/$uid-$rid"
-  ( set -o noclobber; : > "$pidf" ) 2>/dev/null || die "run id already in use"
-  # shellcheck disable=SC2064  # expand now: the path is fixed for this process
-  trap "rm -f -- '$pidf'" EXIT
-  setsid timeout -s KILL "$max" "$@" <&0 &
-  local child=$!
-  printf '%s\n' "$child" > "$pidf"
+# ---------------------------------------------------------------- tracked runs (directory passed in, so --self-test can use a temp dir)
+
+STOP_GRACE=5
+
+# Field 22 of /proc/<pid>/stat (start time in clock ticks); the comm field may contain spaces.
+proc_starttime() {
+  local s
+  s=$(cat -- "/proc/$1/stat" 2>/dev/null) || return 1
+  s=${s##*) }
+  local -a f
+  read -r -a f <<< "$s"
+  printf '%s\n' "${f[19]-}"
+}
+
+# TERM to the whole process group, KILL after STOP_GRACE seconds.
+kill_group() {
+  local pg=$1 i
+  kill -TERM -- "-$pg" 2>/dev/null || return 0
+  for ((i = 0; i < STOP_GRACE * 10; i++)); do
+    kill -0 -- "-$pg" 2>/dev/null || return 0
+    sleep 0.1
+  done
+  kill -KILL -- "-$pg" 2>/dev/null || true
+}
+
+TRACK_PIDF="" TRACK_STOPF=""
+# Runs "$@" as the leader of a new session under a hard limit (TERM, then KILL after STOP_GRACE), tracked in
+# <dir>/<uid>-<runId> as "<pid> <starttime>". A stop marker <dir>/<uid>-<runId>.stop (written by stop-claude,
+# possibly before this run got going) is honoured before launch and right after the pid is recorded.
+# Exits with the command's status. stdin is passed through explicitly (a background job would get /dev/null).
+run_tracked_in() {
+  local dir=$1 uid=$2 rid=$3 max=$4; shift 4
+  TRACK_PIDF="$dir/$uid-$rid"; TRACK_STOPF="$dir/$uid-$rid.stop"
+  ( set -o noclobber; : > "$TRACK_PIDF" ) 2>/dev/null || die "run id already in use"
+  trap 'rm -f -- "$TRACK_PIDF" "$TRACK_PIDF.tmp" "$TRACK_STOPF"' EXIT
+  [ -e "$TRACK_STOPF" ] && exit 143
+  setsid timeout -s TERM -k "$STOP_GRACE" "$max" "$@" <&0 &
+  local child=$! st
+  st=$(proc_starttime "$child" || true)
+  printf '%s %s\n' "$child" "${st:-0}" > "$TRACK_PIDF.tmp"
+  mv -f -- "$TRACK_PIDF.tmp" "$TRACK_PIDF"
+  [ -e "$TRACK_STOPF" ] && kill_group "$child"
   local rc=0
   wait "$child" || rc=$?
   exit "$rc"
 }
+
+# Leaves a stop marker, then kills the tracked group if it is running. Only kills a session that dfctl
+# itself started: /proc/<pid> owned by <owner uid>, comm `timeout`, same start time as recorded, pgid == pid.
+stop_in() {
+  local dir=$1 uid=$2 rid=$3 owner=$4
+  local pidf="$dir/$uid-$rid" stopf="$dir/$uid-$rid.stop"
+  ( set -o noclobber; : > "$stopf" ) 2>/dev/null || true
+  [ -f "$pidf" ] || { echo "not running"; return 0; }
+  local pid="" st=""
+  read -r pid st < "$pidf" || true
+  [ -n "$pid" ] || { echo "stop requested"; return 0; }
+  [[ $pid =~ ^[1-9][0-9]*$ && $st =~ ^[0-9]+$ ]] || die "bad pid file"
+  [ -d "/proc/$pid" ] || { echo "not running"; return 0; }
+  [ "$(stat -c %u -- "/proc/$pid")" = "$owner" ] || { echo "not running"; return 0; }
+  [ "$(cat -- "/proc/$pid/comm" 2>/dev/null || true)" = timeout ] || { echo "not running"; return 0; }
+  [ "$(proc_starttime "$pid" || true)" = "$st" ] || { echo "not running"; return 0; }
+  [ "$(ps -o pgid= -p "$pid" | tr -d ' ')" = "$pid" ] || { echo "not running"; return 0; }
+  kill_group "$pid"
+  echo "stopped"
+}
+
+run_tracked() { prepare_run_dir; run_tracked_in "$RUN_DIR" "$@"; }
 
 # ---------------------------------------------------------------- subcommands
 
@@ -233,16 +366,21 @@ cmd_provision_user() {
     useradd --system --user-group --no-create-home --home-dir "$home" --shell /usr/sbin/nologin \
       --comment "DevFlow seat $id" "$u"
   fi
-  if [ ! -e "$home" ]; then
-    install -d -m 0700 -o "$u" -g "$u" "$home"   # parent is root-owned: safe to create as root
+  local uid gid; uid=$(id -u -- "$u"); gid=$(id -g -- "$u")
+  [ "$uid" != 0 ] || die "$u has uid 0"
+  if [ ! -e "$home" ] && [ ! -L "$home" ]; then
+    install -d -m 0700 -o "$uid" -g "$gid" "$home"   # parent is root-owned: safe to create as root
   fi
   [ -d "$home" ] && [ ! -L "$home" ] || die "home of $u is not a directory"
-  # Everything inside the home is done as the user (it may contain links the user planted).
-  runuser -u "$u" -- env -i HOME="$home" PATH="$USER_PATH" /bin/sh -c '
+  [ "$(stat -c %u -- "$home")" = "$uid" ] || die "home of $u is not owned by $u"
+  # Everything inside the home is done as the user (it may contain links the user planted). A global
+  # safe.directory=* from earlier versions is removed: run-claude trusts only the current worktree.
+  build_user_cmd "$uid" "$gid" "$home" "$home" -- /bin/sh -c '
     umask 077
     mkdir -p "$HOME/.claude"
-    if command -v git >/dev/null 2>&1; then git config --global --replace-all safe.directory "*"; fi
+    if command -v git >/dev/null 2>&1; then git config --global --unset-all safe.directory "^[*]$" 2>/dev/null || true; fi
   '
+  "${USER_CMD[@]}"
   echo "provisioned $u"
 }
 
@@ -272,24 +410,14 @@ cmd_ensure_project_group() {
 
   getent group "$g" >/dev/null || groupadd --system "$g"
   gpasswd -a "$SERVICE_USER" "$g" >/dev/null
+  # Full tree walk only at registration; every call re-applies the .git protections.
+  harden_project "$real" "$first" "$g" || die "could not prepare project folder $real"
   if [ $first -eq 1 ]; then
     local tmp="$REG_DIR/.$pid.$$"
     printf '%s\n' "$real" > "$tmp"
     chmod 0600 "$tmp"
     mv -f -- "$tmp" "$REG_DIR/$pid"
   fi
-  # Permission changes happen as the folder owner, never as root (no symlink games can reach root).
-  # The full tree walk is done once, at registration; later calls only fix the top folder.
-  runuser -u "$SERVICE_USER" -- /bin/sh -c '
-    cd -- "$1" || exit 1
-    chgrp -- "$2" . && chmod 2770 .
-    if [ "$3" = 1 ]; then
-      chgrp -R -h -P -f -- "$2" . || true
-      chmod -R -f g+rwX,o-rwx . || true
-      find . -xdev -type d ! -perm -2000 -exec chmod -f g+s {} + 2>/dev/null || true
-    fi
-    if [ -d .git ]; then git config core.sharedRepository group || true; fi
-  ' sh "$real" "$g" "$first"
   echo "ensured $g for $real"
 }
 
@@ -313,61 +441,44 @@ cmd_set_members() {
 cmd_run_claude() {
   local uid=$1 cwd=$2 rid=$4; shift 5
   load_conf
-  local home; home=$(seat_user "$uid")
+  seat_user "$uid"
   local u=${USER_PREFIX}$uid
   local real; real=$(realpath -e -- "$cwd") || die "cwd does not exist"
   [ -d "$real" ] || die "cwd is not a directory"
-  local f p pid=""
+  local f p pid="" project=""
   for f in "$REG_DIR"/*; do
     [ -f "$f" ] || continue
     p=$(cat -- "$f")
-    if cwd_allowed "$real" "$p" && in_roots "$p"; then pid=${f##*/}; break; fi
+    if cwd_allowed "$real" "$p" && in_roots "$p"; then pid=${f##*/}; project=$p; break; fi
   done
   [ -n "$pid" ] || die "cwd is not inside a project worktree"
   in_group "$u" "${GROUP_PREFIX}$pid" || die "user $u is not a member of project $pid"
-  user_env "$home"
+  # Fail closed if the project's .git protections cannot be (re)applied.
+  harden_project "$project" 0 - || die "project $pid failed its .git safety check; ask an admin"
+  build_run_claude_cmd "$SEAT_UID" "$SEAT_GID" "$SEAT_HOME" "$real" "$project" "$CONF_CLAUDE" -- "$@"
   umask 002
-  # env -C changes directory as the seat user, so the kernel checks that user's access too.
-  run_tracked "$uid" "$rid" "$RUN_MAX_SEC" runuser -u "$u" -- "${USER_ENV[@]:0:2}" -C "$real" "${USER_ENV[@]:2}" \
-    "$CONF_CLAUDE" "$@"
+  run_tracked "$uid" "$rid" "$RUN_MAX_SEC" "${USER_CMD[@]}"
 }
 
 cmd_claude_auth() {
   local uid=$1 action=$2
   load_conf
-  local home; home=$(seat_user "$uid")
-  local u=${USER_PREFIX}$uid
-  user_env "$home"
+  seat_user "$uid"
   case "$action" in
     status|logout)
-      exec timeout -s KILL "$SHORT_MAX_SEC" runuser -u "$u" -- "${USER_ENV[@]:0:2}" -C "$home" "${USER_ENV[@]:2}" \
-        "$CONF_CLAUDE" auth "$action" ;;
+      build_user_cmd "$SEAT_UID" "$SEAT_GID" "$SEAT_HOME" "$SEAT_HOME" -- "$CONF_CLAUDE" auth "$action"
+      exec timeout -s KILL "$SHORT_MAX_SEC" "${USER_CMD[@]}" ;;
     login)
       # A wide pty so the login URL is printed on one line. CONF_CLAUDE passed is_safe_bin.
-      run_tracked "$uid" "$4" "$LOGIN_MAX_SEC" runuser -u "$u" -- "${USER_ENV[@]:0:2}" -C "$home" "${USER_ENV[@]:2}" \
-        script -qfec "stty cols 500 rows 50 2>/dev/null; exec $CONF_CLAUDE auth login" /dev/null ;;
+      build_user_cmd "$SEAT_UID" "$SEAT_GID" "$SEAT_HOME" "$SEAT_HOME" -- \
+        script -qfec "stty cols 500 rows 50 2>/dev/null; exec $CONF_CLAUDE auth login" /dev/null
+      run_tracked "$uid" "$4" "$LOGIN_MAX_SEC" "${USER_CMD[@]}" ;;
   esac
 }
 
 cmd_stop_claude() {
-  local uid=$1 rid=$2
-  local pidf="$RUN_DIR/$uid-$rid"
-  [ -e "$RUN_DIR" ] || exit 0
-  root_dir_ok "$RUN_DIR" || die "$RUN_DIR is not root-owned"
-  [ -f "$pidf" ] || { echo "not running"; exit 0; }
-  local pid="" i
-  for i in $(seq 1 50); do
-    pid=$(cat -- "$pidf" 2>/dev/null || true)
-    [ -n "$pid" ] && break
-    [ -f "$pidf" ] || exit 0
-    sleep 0.1
-  done
-  [[ $pid =~ ^[1-9][0-9]*$ ]] || die "bad pid file"
-  # Only ever kill the session dfctl itself started: leader is `timeout`, pgid == pid.
-  [ "$(cat "/proc/$pid/comm" 2>/dev/null || true)" = timeout ] || { echo "not running"; exit 0; }
-  [ "$(ps -o pgid= -p "$pid" | tr -d ' ')" = "$pid" ] || { echo "not running"; exit 0; }
-  kill -KILL -- "-$pid" 2>/dev/null || true
-  echo "stopped"
+  prepare_run_dir
+  stop_in "$RUN_DIR" "$1" "$2" 0
 }
 
 # ---------------------------------------------------------------- self-test
@@ -464,6 +575,97 @@ self_test() {
   no "space" is_safe_bin '/opt/my claude/claude'
   no "dot-dot" is_safe_bin /usr/local/../bin/claude
   no "command substitution" is_safe_bin '/usr/bin/$(id)'
+
+  echo "# user command (setpriv, no runuser)"
+  build_run_claude_cmd 1001 1002 /var/lib/devflow/users/7 /srv/p/.devflow/worktrees/R1/src /srv/p /usr/local/bin/claude -- -p '; rm -rf /' '$(id)'
+  local -a C=("${USER_CMD[@]}")
+  has() { local x; for x in "${C[@]}"; do [ "$x" = "$1" ] && return 0; done; return 1; }
+  ok "starts with setpriv" test "${C[0]}" = setpriv
+  no "never uses runuser" has runuser
+  ok "sets real+effective uid" has --reuid=1001
+  ok "sets real+effective gid" has --regid=1002
+  ok "initialises supplementary groups" has --init-groups
+  ok "no new privileges" has --no-new-privs
+  ok "clean environment" test "${C[5]} ${C[6]} ${C[7]} ${C[8]}" = "-- env -i -C"
+  ok "chdir to cwd as the user" test "${C[9]}" = /srv/p/.devflow/worktrees/R1/src
+  ok "CLAUDE_CONFIG_DIR in the seat home" has CLAUDE_CONFIG_DIR=/var/lib/devflow/users/7/.claude
+  ok "git trusts the worktree root" has GIT_CONFIG_VALUE_0=/srv/p/.devflow/worktrees/R1
+  ok "git trusts the project" has GIT_CONFIG_VALUE_1=/srv/p
+  no "no global safe.directory=*" has 'GIT_CONFIG_VALUE_0=*'
+  local n_c=${#C[@]}
+  ok "claude binary then args verbatim" test "${C[n_c-4]}|${C[n_c-3]}|${C[n_c-2]}|${C[n_c-1]}" = "/usr/local/bin/claude|-p|; rm -rf /|\$(id)"
+  ok "EXTRA_ENV reset after building" test ${#EXTRA_ENV[@]} -eq 0
+
+  echo "# tracked runs and stop marker"
+  local tdir me rc pid="" st="" i t0 bg mode
+  tdir=$(mktemp -d); me=$(id -u)
+  STOP_GRACE=1
+  ( stop_in "$tdir" 5 abcdefgh "$me" ) >/dev/null 2>&1
+  rc=0; ( run_tracked_in "$tdir" 5 abcdefgh 30 /bin/sh -c ": > '$tdir/ran'" ) </dev/null >/dev/null 2>&1 || rc=$?
+  ok "stop before launch: command never runs" test ! -e "$tdir/ran"
+  ok "stop before launch: exit 143" test "$rc" = 143
+  ok "stop before launch: files cleaned" test ! -e "$tdir/5-abcdefgh" -a ! -e "$tdir/5-abcdefgh.stop"
+  for mode in term kill; do
+    local cmd='sleep 60 & sleep 60; wait'
+    [ $mode = kill ] && cmd='trap "" TERM; sleep 60 & sleep 60; wait'
+    ( run_tracked_in "$tdir" 5 "run${mode}xyz" 60 /bin/sh -c "$cmd" ) </dev/null >/dev/null 2>&1 &
+    bg=$!
+    pid=""
+    for i in $(seq 1 50); do
+      read -r pid st < "$tdir/5-run${mode}xyz" 2>/dev/null || true
+      [ -n "$pid" ] && break
+      sleep 0.1
+    done
+    t0=$SECONDS
+    ( stop_in "$tdir" 5 "run${mode}xyz" "$me" ) >/dev/null 2>&1
+    wait "$bg" 2>/dev/null || true
+    sleep 0.3
+    ok "stop ($mode): tracked run recorded its pid" test -n "$pid"
+    no "stop ($mode): whole process group gone" quiet kill -0 -- "-${pid:-999999999}"
+    ok "stop ($mode): finished promptly" test $((SECONDS - t0)) -le 8
+    ok "stop ($mode): pid file and marker cleaned" test ! -e "$tdir/5-run${mode}xyz" -a ! -e "$tdir/5-run${mode}xyz.stop"
+  done
+  printf '99999999 1\n' > "$tdir/5-stalepid"
+  ok "stale pid file (no such process) is ignored" quiet stop_in "$tdir" 5 stalepid "$me"
+  printf '%s 1\n' "$$" > "$tdir/5-wrongstart"
+  ok "pid of an unrelated process is never killed" quiet stop_in "$tdir" 5 wrongstart "$me"
+  ok "the unrelated process is still alive" kill -0 "$$"
+  STOP_GRACE=5
+  rm -rf -- "$tdir"
+
+  echo "# .git hardening"
+  if command -v git >/dev/null 2>&1; then
+    local hp; hp=$(mktemp -d)
+    git -c core.hooksPath=/dev/null -c init.defaultBranch=main init -q "$hp/proj"
+    mkdir -p "$hp/proj/.devflow/worktrees" "$hp/proj/.git/worktrees/R1" "$hp/proj/.git/info"
+    : > "$hp/proj/.git/info/exclude"
+    chmod -R g+w "$hp/proj"
+    perm() { stat -c %a -- "$1"; }
+    gw() { (( (8#$(perm "$1") & 8#020) != 0 )); }
+    sticky() { (( (8#$(perm "$1") & 8#1000) != 0 )); }
+    ok "hardening succeeds" quiet bash -c "$HARDEN_SCRIPT" harden "$hp/proj" "$(id -un)" 1 "$(id -gn)"
+    no ".git not group-writable" gw "$hp/proj/.git"
+    no ".git/config not group-writable" gw "$hp/proj/.git/config"
+    no ".git/hooks not group-writable" gw "$hp/proj/.git/hooks"
+    no ".git/info not group-writable" gw "$hp/proj/.git/info"
+    no ".git/info/exclude not group-writable" gw "$hp/proj/.git/info/exclude"
+    ok ".git/objects stays group-writable" gw "$hp/proj/.git/objects"
+    ok ".git/refs stays group-writable" gw "$hp/proj/.git/refs"
+    ok ".git/worktrees group-writable and sticky" eval 'gw "$hp/proj/.git/worktrees" && sticky "$hp/proj/.git/worktrees"'
+    ok "project folder sticky" sticky "$hp/proj"
+    ok ".devflow/worktrees sticky" sticky "$hp/proj/.devflow/worktrees"
+    chmod g+w "$hp/proj/.git/config"
+    ok "a later (non-full) pass strips g+w again" quiet bash -c "$HARDEN_SCRIPT" harden "$hp/proj" "$(id -un)" 0 -
+    no "config fixed by the later pass" gw "$hp/proj/.git/config"
+    mv "$hp/proj/.git/config" "$hp/config.real"
+    ln -s "$hp/config.real" "$hp/proj/.git/config"
+    no "symlinked .git/config is refused" quiet bash -c "$HARDEN_SCRIPT" harden "$hp/proj" "$(id -un)" 0 -
+    no "project not owned by the given owner is refused" quiet bash -c "$HARDEN_SCRIPT" harden "$hp/proj" nobody-such-user 0 -
+    chmod -R u+w "$hp"
+    rm -rf -- "$hp"
+  else
+    echo "ok - skipped (git not installed)"
+  fi
 
   if [ $failed -eq 0 ]; then echo "# all $n checks passed"; return 0; fi
   echo "# $failed of $n checks FAILED"; return 1

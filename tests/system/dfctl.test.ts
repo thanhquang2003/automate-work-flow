@@ -9,7 +9,7 @@ const hasBash = spawnSync('bash', ['--version']).status === 0;
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
 
 function dfctl(...args: string[]) {
-  return spawnSync('bash', [DFCTL, ...args], { encoding: 'utf8', timeout: 30_000 });
+  return spawnSync('bash', [DFCTL, ...args], { encoding: 'utf8', timeout: 50_000 });
 }
 
 describe.skipIf(!hasBash)('dfctl', () => {
@@ -17,11 +17,12 @@ describe.skipIf(!hasBash)('dfctl', () => {
     const r = dfctl('--self-test');
     expect(r.stdout).not.toMatch(/^not ok/m);
     expect(r.status, r.stdout + r.stderr).toBe(0);
-    for (const group of ['bad user id', 'cwd outside project', 'arg injection', 'empty args', 'symlink escape', 'claude bin']) {
+    for (const group of ['bad user id', 'cwd outside project', 'arg injection', 'empty args', 'symlink escape', 'claude bin',
+      'user command (setpriv, no runuser)', 'tracked runs and stop marker', '.git hardening']) {
       expect(r.stdout).toContain(group);
     }
     expect(r.stdout).toMatch(/# all \d+ checks passed/);
-  });
+  }, 60_000);
 
   it('bash -n: dfctl and the install/spike scripts parse', () => {
     for (const f of ['../../ops/dfctl', '../../scripts/install-server.sh', '../../scripts/spike-claude-login.sh']) {

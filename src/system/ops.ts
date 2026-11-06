@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { accessSync, constants, statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import type { Config } from '../config.js';
@@ -74,11 +74,19 @@ export class SudoSystemOps implements SystemOps {
 
 /**
  * Server mode must not start without a usable dfctl (spec §6b.7): Linux, absolute path, executable,
- * owned by root and not writable by group/others (otherwise the service user could rewrite it).
+ * owned by root and not writable by group/others (otherwise the service user could rewrite it), and
+ * `sudo -n <dfctl> --self-test` succeeding (sudoers rule in place, no password prompt).
  */
+export type PrereqExec = (bin: string, args: string[]) => { status: number | null; stderr?: string };
+
+const defaultPrereqExec: PrereqExec = (bin, args) => {
+  const r = spawnSync(bin, args, { encoding: 'utf8', timeout: 120_000, env: claudeEnv() });
+  return { status: r.status, stderr: String(r.stderr ?? '') + (r.error ? r.error.message : '') };
+};
+
 export function checkServerPrereqs(
   cfg: Pick<Config, 'mode' | 'dfctlPath'>,
-  o: { platform?: NodeJS.Platform; requireRootOwned?: boolean } = {},
+  o: { platform?: NodeJS.Platform; requireRootOwned?: boolean; sudoBin?: string; exec?: PrereqExec } = {},
 ): void {
   if (cfg.mode !== 'server') return;
   const platform = o.platform ?? process.platform;
@@ -93,4 +101,11 @@ export function checkServerPrereqs(
   try { accessSync(p, constants.X_OK); } catch { throw new Error(`dfctl tại ${p} không có quyền thực thi (not executable).`); }
   if ((st.mode & 0o022) !== 0) throw new Error(`dfctl tại ${p} cho phép nhóm/người khác ghi (writable); cần chmod 0755.`);
   if ((o.requireRootOwned ?? true) && st.uid !== 0) throw new Error(`dfctl tại ${p} phải thuộc sở hữu root.`);
+  // The sudoers rule must let this user run dfctl without a password; the self-test also proves dfctl works.
+  const sudo = o.sudoBin ?? 'sudo';
+  const r = (o.exec ?? defaultPrereqExec)(sudo, ['-n', p, '--self-test']);
+  if (r.status !== 0) {
+    const why = (r.stderr ?? '').trim().split('\n').slice(-3).join(' ').slice(0, 300);
+    throw new Error(`Không chạy được "sudo -n ${p} --self-test" (exit ${r.status}): ${why || 'không rõ lỗi'}. Kiểm tra quy tắc sudoers cho dfctl (chạy lại scripts/install-server.sh).`);
+  }
 }

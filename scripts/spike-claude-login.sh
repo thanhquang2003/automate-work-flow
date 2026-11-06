@@ -16,8 +16,15 @@
 #   5. optional short `claude -p` run (skip with --skip-run)
 #   6. `claude auth logout` and a final `claude auth status` (expect logged out)
 #   7. with --cleanup: deletes the throw-away user and its home
+#   8. with --seat <userId> (after install-server.sh and `dfctl provision-user <userId>`): starts a tracked
+#      `dfctl claude-auth <id> login`, runs `dfctl stop-claude`, and FAILS if any claude/script process of
+#      dfu-<id> survives (ps -o pid,pgid,sid,cmd is printed before and after). With --worktree <path> (a
+#      worktree of a registered project the seat is a member of) it repeats the check for `dfctl run-claude`
+#      and checks, as the seat with dfctl's environment, that git status / object+ref writes work in the
+#      worktree while the project's .git/config, .git/hooks and .git/info are NOT writable by the seat.
 #
 # Usage:  sudo scripts/spike-claude-login.sh [--user NAME] [--claude /abs/path/to/claude] [--skip-run] [--cleanup]
+#                                            [--seat <userId> [--worktree /abs/worktree/path]]
 #
 # This script was written on a development machine without root and has NOT been run there.
 # Never paste the output of step 3 anywhere public: it contains the one-time login URL.
@@ -30,6 +37,9 @@ CLAUDE_BIN=""
 SKIP_RUN=0
 CLEANUP=0
 LOGIN_TIMEOUT=600
+SEAT=""
+WORKTREE=""
+DFCTL=/usr/local/lib/devflow/dfctl
 
 die() { printf 'spike: %s\n' "$*" >&2; exit 2; }
 pass() { printf '[PASS] %s\n' "$*"; }
@@ -42,7 +52,9 @@ while [ $# -gt 0 ]; do
     --claude) [ $# -ge 2 ] || die "--claude needs a value"; CLAUDE_BIN="$2"; shift 2 ;;
     --skip-run) SKIP_RUN=1; shift ;;
     --cleanup) CLEANUP=1; shift ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    --seat) [ $# -ge 2 ] || die "--seat needs a value"; SEAT="$2"; shift 2 ;;
+    --worktree) [ $# -ge 2 ] || die "--worktree needs a value"; WORKTREE="$2"; shift 2 ;;
+    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -50,7 +62,9 @@ done
 [ "$(id -u)" -eq 0 ] || die "run as root (sudo)"
 [ "$(uname -s)" = Linux ] || die "Linux only"
 [[ "$SPIKE_USER" =~ ^[a-z][a-z0-9-]{1,30}$ ]] || die "bad user name: $SPIKE_USER"
-for t in script runuser useradd mkfifo timeout; do command -v "$t" >/dev/null || die "missing tool: $t"; done
+[ -z "$SEAT" ] || [[ "$SEAT" =~ ^[1-9][0-9]{0,8}$ ]] || die "bad --seat user id"
+[ -z "$WORKTREE" ] || [ -n "$SEAT" ] || die "--worktree needs --seat"
+for t in script setpriv useradd mkfifo timeout; do command -v "$t" >/dev/null || die "missing tool: $t"; done
 
 if [ -z "$CLAUDE_BIN" ]; then CLAUDE_BIN="$(command -v claude || true)"; fi
 [ -n "$CLAUDE_BIN" ] || die "claude not found; pass --claude /abs/path"
@@ -76,11 +90,11 @@ else
   pass "created user $SPIKE_USER (no login shell, home $HOME_DIR)"
 fi
 CFG_DIR="$HOME_DIR/.claude"
-runuser -u "$SPIKE_USER" -- mkdir -p -m 0700 "$CFG_DIR"
+setpriv --reuid="$SPIKE_USER" --regid="$SPIKE_USER" --init-groups -- mkdir -p -m 0700 "$CFG_DIR"
 
-# Same clean environment dfctl uses.
+# Same way and clean environment dfctl uses (setpriv execs in place, like dfctl).
 as_user() {
-  runuser -u "$SPIKE_USER" -- env -i HOME="$HOME_DIR" CLAUDE_CONFIG_DIR="$CFG_DIR" \
+  setpriv --reuid="$SPIKE_USER" --regid="$SPIKE_USER" --init-groups --no-new-privs -- env -i HOME="$HOME_DIR" CLAUDE_CONFIG_DIR="$CFG_DIR" \
     PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 SHELL=/bin/sh TERM=dumb DISABLE_AUTOUPDATER=1 "$@"
 }
 
@@ -172,6 +186,60 @@ set -e
 echo "auth logout exit=$rc"; printf '%s\n' "$lo" | sed 's/^/  | /'
 echo "auth status exit=$src"; printf '%s\n' "$st" | sed 's/^/  | /'
 [ $rc -eq 0 ] && pass "claude auth logout exited 0" || fail "claude auth logout exited $rc"
+
+if [ -n "$SEAT" ]; then
+  echo; echo "== 8. dfctl stop-claude kills the whole run (seat $SEAT)"
+  [ -x "$DFCTL" ] || die "$DFCTL not installed (run install-server.sh first)"
+  SU="dfu-$SEAT"
+  id -u "$SU" >/dev/null 2>&1 || die "$SU not provisioned (sudo $DFCTL provision-user $SEAT)"
+  survivors() { ps -o pid=,cmd= -u "$SU" 2>/dev/null | grep -E 'claude|script' | grep -v grep || true; }
+  [ -z "$(survivors)" ] || die "$SU already has claude processes; stop them first"
+  check_stop() {  # <label> <runId> <command...>: start it with stdin held open, stop it, look for survivors
+    local label=$1 rid=$2; shift 2
+    local fifo; fifo="$(mktemp -u)"; mkfifo -m 0600 "$fifo"
+    "$@" < "$fifo" > /dev/null 2>&1 &
+    local bgp=$!
+    exec 7> "$fifo"
+    sleep 5
+    echo "processes of $SU before stop-claude ($label):"; ps -o pid,pgid,sid,cmd -u "$SU" | sed 's/^/  | /'
+    "$DFCTL" stop-claude "$SEAT" "$rid" | sed 's/^/  stop-claude: /'
+    sleep 7
+    echo "processes of $SU after stop-claude ($label):"; ps -o pid,pgid,sid,cmd -u "$SU" | sed 's/^/  | /'
+    if [ -z "$(survivors)" ]; then pass "$label: nothing of the run survives stop-claude"; else fail "$label: claude/script processes survived stop-claude"; fi
+    exec 7>&-
+    wait "$bgp" 2>/dev/null || true
+    rm -f -- "$fifo"
+  }
+  rid="spike$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+  check_stop "claude-auth login" "$rid" "$DFCTL" claude-auth "$SEAT" login --run-id "$rid"
+
+  if [ -n "$WORKTREE" ]; then
+    WT="$(realpath -e -- "$WORKTREE")" || die "worktree not found"
+    PROJ="${WT%/.devflow/worktrees/*}"
+    [ "$PROJ" != "$WT" ] || die "--worktree must be <project>/.devflow/worktrees/<name>"
+    rid="spike$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+    # `claude -p` waits for the prompt on stdin, which stays open until after the stop.
+    check_stop "run-claude" "$rid" "$DFCTL" run-claude "$SEAT" "$WT" --run-id "$rid" -- -p --output-format stream-json --verbose
+
+    echo; echo "== 9. seat git inside the worktree, and .git protections"
+    SH="$(getent passwd "$SU" | cut -d: -f6)"
+    seat_git() {
+      setpriv --reuid="$SU" --regid="$SU" --init-groups --no-new-privs -- env -i -C "$WT" HOME="$SH" \
+        PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.directory \
+        GIT_CONFIG_VALUE_0="$WT" GIT_CONFIG_KEY_1=safe.directory GIT_CONFIG_VALUE_1="$PROJ" git "$@"
+    }
+    seat_test() { setpriv --reuid="$SU" --regid="$SU" --init-groups --no-new-privs -- test "$@"; }
+    if seat_git status --short >/dev/null; then pass "seat: git status in the worktree"; else fail "seat: git status in the worktree"; fi
+    if seat_git update-index --refresh >/dev/null 2>&1 || [ $? -eq 1 ]; then pass "seat: index of the worktree writable"; else fail "seat: index not writable"; fi
+    if obj="$(printf 'devflow spike %s\n' "$rid" | seat_git hash-object -w --stdin)"; then pass "seat: object written"; else fail "seat: cannot write objects"; obj=""; fi
+    if [ -n "$obj" ] && seat_git update-ref "refs/devflow-spike/$rid" "$obj" && seat_git update-ref -d "refs/devflow-spike/$rid"; then
+      pass "seat: refs writable (create + delete of a scratch ref)"
+    else fail "seat: cannot update refs (a seat commit would fail)"; fi
+    for p in "$PROJ/.git/config" "$PROJ/.git/hooks" "$PROJ/.git/info" "$PROJ/.git"; do
+      if seat_test -w "$p"; then fail "seat can write $p"; else pass "seat cannot write $p"; fi
+    done
+  fi
+fi
 
 if [ $CLEANUP -eq 1 ]; then
   echo; echo "== 7. cleanup"

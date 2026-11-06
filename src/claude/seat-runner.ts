@@ -103,6 +103,8 @@ export class SudoSeatRunner implements SeatRunner {
   async run(userId: number | null, opts: RunOpts): Promise<RunResult> {
     assertUserId(userId);
     if (!isAbsolute(opts.cwd)) throw new Error('Seat run cwd must be an absolute path');
+    // Already aborted: do not start sudo at all (dfctl could not be asked to stop a run it has not tracked yet).
+    if (opts.signal?.aborted) return { ok: false, aborted: true, resultText: '', error: 'aborted' };
     const runId = newRunId();
     // Prompt always via stdin; CLAUDE_BIN_ARGS (a test hook) never reaches the seat binary.
     const args = this.dfctl('run-claude', String(userId), opts.cwd, '--run-id', runId, '--', '-p', ...claudeRunArgs(opts));

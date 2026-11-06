@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
-import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 export interface GitOpts {
   protectedBranch?: string;
@@ -9,6 +9,21 @@ export interface GitOpts {
   authorName?: string;
   authorEmail?: string;
 }
+
+/**
+ * Prepended to every git command DevFlow runs: repository hooks and fsmonitor never execute. Project folders
+ * are shared with seat users (v3), so nothing in a repository may make DevFlow's git run code.
+ */
+export const GIT_SAFETY_ARGS: readonly string[] = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
+
+/** Full argv for one git invocation. */
+export function gitArgv(args: string[]): string[] { return [...GIT_SAFETY_ARGS, ...args]; }
+
+/** A v3 request/task worktree: `<project>/.devflow/worktrees/<name>`. */
+const WORKTREE_RE = /^(.*)[\\/]\.devflow[\\/]worktrees[\\/]([^\\/]+)$/;
+
+/** Files git reads as configuration; kept owner-only even though DevFlow runs with umask 002. */
+const CONFIG_FILES = ['config', join('info', 'exclude'), join('info', 'attributes')];
 
 const DEFAULT_NAME = 'DevFlow Bot';
 const DEFAULT_EMAIL = 'devflow@localhost';
@@ -36,11 +51,67 @@ export class Git {
     }
   }
 
-  private exec(args: string[], o: { cwd?: string; env?: Record<string, string>; allowFail?: boolean } = {}): Promise<{ code: number; stdout: string }> {
-    return new Promise((resolve, reject) => {
-      execFile('git', args, {
-        cwd: o.cwd ?? this.cwd, windowsHide: true, maxBuffer: 64 * 1024 * 1024,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...o.env },
+  /**
+   * For a v3 worktree, git's location is pinned to the project's own repository: GIT_COMMON_DIR is
+   * `<project>/.git` (owner-only config), and the worktree's `.git` file must point into
+   * `<project>/.git/worktrees/`, whose `commondir` must lead back to `<project>/.git`. Seats can write inside
+   * worktrees and `.git/worktrees/<n>/`, so a redirected `.git` file or `commondir` is refused, and config is
+   * always read from GIT_COMMON_DIR (git 2.43 still reads refs through `commondir`, hence the check).
+   */
+  private async worktreePin(cwd: string): Promise<{ env: Record<string, string>; commonDir: string } | undefined> {
+    const m = WORKTREE_RE.exec(resolve(cwd));
+    if (!m) return undefined;
+    const project = m[1]!;
+    const commonDir = join(project, '.git');
+    let text: string;
+    try { text = await readFile(join(cwd, '.git'), 'utf8'); } catch {
+      throw new Error(`DevFlow worktree ${cwd} has no readable .git file; refusing to run git there`);
+    }
+    const g = /^gitdir:\s*(.+?)\s*$/m.exec(text)?.[1];
+    const gitDir = g ? resolve(cwd, g) : '';
+    const allowed = [join(commonDir, 'worktrees')];
+    try { allowed.push(join(await realpath(commonDir), 'worktrees')); } catch { /* checked below */ }
+    if (!gitDir || !allowed.includes(dirname(gitDir)) || !basename(gitDir) || basename(gitDir).startsWith('.')) {
+      throw new Error(`DevFlow worktree ${cwd}: .git file does not point into the project repository; refusing to run git there`);
+    }
+    const st = await lstat(commonDir).catch(() => undefined);
+    if (!st?.isDirectory()) throw new Error(`DevFlow worktree ${cwd}: project repository ${commonDir} missing`);
+    const gst = await lstat(gitDir).catch(() => undefined);
+    if (!gst?.isDirectory()) throw new Error(`DevFlow worktree ${cwd}: ${gitDir} is not a directory; refusing to run git there`);
+    // git still reads refs through <gitDir>/commondir, so it must lead back to the project repository.
+    const cd = (await readFile(join(gitDir, 'commondir'), 'utf8').catch(() => '')).trim();
+    const cdReal = cd ? await realpath(resolve(gitDir, cd)).catch(() => '') : '';
+    if (!cdReal || cdReal !== await realpath(commonDir)) {
+      throw new Error(`DevFlow worktree ${cwd}: ${join(gitDir, 'commondir')} does not lead to the project repository; refusing to run git there`);
+    }
+    return { env: { GIT_DIR: gitDir, GIT_COMMON_DIR: commonDir, GIT_WORK_TREE: resolve(cwd) }, commonDir };
+  }
+
+  /** Removes group/other write from git's config files (a rewrite under umask 002 would make them 0664). */
+  private static async hardenConfig(commonDir: string | undefined): Promise<void> {
+    if (!commonDir || process.platform === 'win32') return;
+    const uid = process.getuid?.();
+    for (const f of CONFIG_FILES) {
+      const p = join(commonDir, f);
+      try {
+        const st = await lstat(p);
+        if (st.isFile() && st.uid === uid && (st.mode & 0o022) !== 0) await chmod(p, st.mode & 0o7755);
+      } catch { /* missing or not ours */ }
+    }
+  }
+
+  private async commonDirOf(cwd: string): Promise<string | undefined> {
+    const st = await lstat(join(cwd, '.git')).catch(() => undefined);
+    return st?.isDirectory() ? join(cwd, '.git') : undefined;
+  }
+
+  private async exec(args: string[], o: { cwd?: string; env?: Record<string, string>; allowFail?: boolean } = {}): Promise<{ code: number; stdout: string }> {
+    const cwd = o.cwd ?? this.cwd;
+    const pin = o.cwd ? undefined : await this.worktreePin(cwd);
+    const res = await new Promise<{ code: number; stdout: string }>((resolve, reject) => {
+      execFile('git', gitArgv(args), {
+        cwd, windowsHide: true, maxBuffer: 64 * 1024 * 1024,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...pin?.env, ...o.env },
       }, (err, stdout, stderr) => {
         if (!err) return resolve({ code: 0, stdout: String(stdout) });
         if (o.allowFail) return resolve({ code: typeof (err as any).code === 'number' ? (err as any).code : 1, stdout: String(stdout) });
@@ -48,7 +119,10 @@ export class Git {
         const safe = (s: string) => s.replace(/Basic [A-Za-z0-9+/=]+/g, 'Basic ***');
         reject(new Error(`git ${safe(args.join(' '))} failed: ${safe(String(stderr || err.message)).trim()}`));
       });
+    }).finally(async () => {
+      await Git.hardenConfig(pin?.commonDir ?? (o.cwd ? undefined : await this.commonDirOf(cwd)));
     });
+    return res;
   }
 
   private async run(args: string[], token?: string): Promise<string> {
@@ -57,6 +131,7 @@ export class Git {
 
   async clone(url: string, token: string, dir: string): Promise<void> {
     await this.exec(['clone', '--', url, dir], { cwd: process.cwd(), env: this.authEnv(token || undefined) });
+    await Git.hardenConfig(await this.commonDirOf(resolve(process.cwd(), dir)));
   }
 
   /** `git init` in the working directory with the given initial branch. */
@@ -281,6 +356,7 @@ export class Git {
     if (cur.split(/\r?\n/).some(l => l.trim() === entry)) return;
     await mkdir(dirname(file), { recursive: true });
     await appendFile(file, `${cur && !cur.endsWith('\n') ? '\n' : ''}${entry}\n`, 'utf8');
+    await Git.hardenConfig(dirname(dirname(file)));
   }
 
   async hasRemote(): Promise<boolean> {

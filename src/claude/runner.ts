@@ -51,14 +51,26 @@ export function detectRateLimit(text: string, now: Date, defaultPauseMin: number
   return new Date(now.getTime() + defaultPauseMin * 60000);
 }
 
-const EXPIRED_RE = /(login expired|session expired|token (?:has )?expired|expired (?:oauth )?token|login has expired)/i;
-const DISCONNECTED_RE = /(not logged in|invalid api key|please run \/login|run `?claude (?:auth )?login|authentication_error|no (?:valid )?credentials|invalid bearer token|unauthori[sz]ed)/i;
+// Claude Code's own wording for a missing/expired login. Generic words such as "unauthorized" or
+// "authentication_error" count only in the shape of Claude's API error line, so a run whose output talks
+// about the project's own 401s is never mistaken for a seat problem.
+const EXPIRED_RES = [
+  /oauth token (?:has )?expired/i,
+  /(?:^|\n)\s*(?:error:\s*)?login (?:has )?expired\b/i,
+  /expired[^\n]{0,80}(?:please run \/login|claude (?:auth )?login)/i,
+];
+const DISCONNECTED_RES = [
+  /please run \/login/i,
+  /(?:not logged in|invalid api key)[^\n]{0,40}(?:\/login|claude (?:auth )?login)/i,
+  /API Error: 401\b/,
+  /API Error:[^\n]{0,40}"type"\s*:\s*"authentication_error"/,
+];
 
 /** Classifies text of a FAILED run: the seat's login expired, or there is no usable login. */
 export function detectSeatError(text: string): SeatError | undefined {
   if (!text) return undefined;
-  if (EXPIRED_RE.test(text)) return 'expired';
-  if (DISCONNECTED_RE.test(text)) return 'disconnected';
+  if (EXPIRED_RES.some(r => r.test(text))) return 'expired';
+  if (DISCONNECTED_RES.some(r => r.test(text))) return 'disconnected';
   return undefined;
 }
 
@@ -165,6 +177,8 @@ export async function runClaude(cfg: Config, opts: RunOpts): Promise<RunResult> 
 
 /** Spawns `cmd`, parses Claude's stream-json output and classifies the outcome (shared by all runners). */
 export function runClaudeCommand(cfg: Pick<Config, 'rateLimitPauseMin'>, opts: RunOpts, cmd: ClaudeCommand): Promise<RunResult> {
+  // Aborted before anything started: never spawn (a seat run could not be stopped before dfctl tracks it).
+  if (opts.signal?.aborted) return Promise.resolve({ ok: false, aborted: true, resultText: '', error: 'aborted' });
   return new Promise<RunResult>(resolve => {
     let child: ChildProcess;
     const env = claudeEnv();

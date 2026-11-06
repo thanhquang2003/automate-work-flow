@@ -27,6 +27,11 @@ describe('detectSeatError', () => {
     expect(detectSeatError('Not logged in · Please run /login')).toBe('disconnected');
     expect(detectSeatError('API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}')).toBe('disconnected');
     expect(detectSeatError('Error: ENOENT no such file')).toBeUndefined();
+    // Output about the project's own API or auth code is not a seat problem.
+    expect(detectSeatError('Tests failed: GET /api/users returned 401 Unauthorized')).toBeUndefined();
+    expect(detectSeatError('{"error":"unauthorized","type":"auth"}')).toBeUndefined();
+    expect(detectSeatError('Refactored the authentication_error handler; the not logged in redirect works')).toBeUndefined();
+    expect(detectSeatError('The session token has expired check in auth.ts was fixed')).toBeUndefined();
     expect(detectSeatError('')).toBeUndefined();
   });
 });
@@ -68,6 +73,14 @@ describe.skipIf(!hasBash)('SudoSeatRunner', () => {
     expect(b.seatError).toBe('disconnected');
   });
 
+  it('a failed run whose output mentions a 401 from the project API is not a seat error', async () => {
+    const { f, runner, cwd } = setup();
+    f.set('mode', 'project-401');
+    const r = await runner.run(3, { cwd, prompt: 'p' });
+    expect(r.ok).toBe(false);
+    expect(r.seatError).toBeUndefined();
+  });
+
   it('a successful run that merely mentions login is not a seat error', async () => {
     const { f, runner, cwd } = setup();
     f.set('mode', 'ok-mentions-login');
@@ -93,12 +106,15 @@ describe.skipIf(!hasBash)('SudoSeatRunner', () => {
     await vi.waitFor(() => expect(f.calls()).toContainEqual(['stop-claude', '9', runId]), { timeout: 10_000 });
   });
 
-  it('an already-aborted signal does not start anything useful and reports aborted', async () => {
-    const { runner, cwd } = setup();
+  it('an already-aborted signal reports aborted without spawning sudo', async () => {
+    const { f, runner, cwd } = setup();
     const ac = new AbortController();
     ac.abort();
     const r = await runner.run(9, { cwd, prompt: 'p', signal: ac.signal });
     expect(r.aborted).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.seatError).toBeUndefined();
+    expect(f.sudoCalls()).toEqual([]);
   });
 
   it('timeout is a failure, not an abort', async () => {

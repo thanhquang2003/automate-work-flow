@@ -26,6 +26,10 @@ else if (mode === 'expired') {
   process.exit(1);
 }
 else if (mode === 'notloggedin') { console.log('Invalid API key · Please run /login'); process.exit(1); }
+else if (mode === 'project-401') {
+  out({ type: 'result', is_error: true, result: 'Integration test failed: POST /api/login returned 401 Unauthorized ({"error":"unauthorized"}). authentication_error in our handler.' });
+  process.exit(1);
+}
 else if (mode === 'ok-mentions-login') {
   out({ type: 'result', is_error: false, result: 'Fixed the "Login expired" banner and the not logged in redirect.' });
 }

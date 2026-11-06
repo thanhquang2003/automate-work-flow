@@ -16,6 +16,8 @@ describe('config', () => {
   });
 });
 
+const selfTestOk = () => ({ status: 0, stderr: '' });
+
 describe('checkServerPrereqs', () => {
   const dir = mkdtempSync(join(tmpdir(), 'df-ops-'));
   const good = join(dir, 'dfctl');
@@ -39,12 +41,19 @@ describe('checkServerPrereqs', () => {
     chmodSync(loose, 0o777);
     expect(() => checkServerPrereqs({ mode: 'server', dfctlPath: loose }, { platform: 'linux', requireRootOwned: false })).toThrow(/ghi|writable/);
   });
+  it('runs sudo -n <dfctl> --self-test and fails clearly when sudo is not set up', () => {
+    const seen: string[][] = [];
+    const exec = (bin: string, args: string[]) => { seen.push([bin, ...args]); return { status: 1, stderr: 'sudo: a password is required' }; };
+    expect(() => checkServerPrereqs({ mode: 'server', dfctlPath: good }, { platform: 'linux', requireRootOwned: false, exec }))
+      .toThrow(/sudo.*dfctl|install-server/);
+    expect(seen).toEqual([['sudo', '-n', good, '--self-test']]);
+  });
   it('by default requires dfctl owned by root', () => {
     if (process.getuid?.() === 0) return;
     expect(() => checkServerPrereqs({ mode: 'server', dfctlPath: good }, { platform: 'linux' })).toThrow(/root/);
   });
   it('accepts a proper dfctl; local mode needs nothing', () => {
-    expect(() => checkServerPrereqs({ mode: 'server', dfctlPath: good }, { platform: 'linux', requireRootOwned: false })).not.toThrow();
+    expect(() => checkServerPrereqs({ mode: 'server', dfctlPath: good }, { platform: 'linux', requireRootOwned: false, exec: selfTestOk })).not.toThrow();
     expect(() => checkServerPrereqs({ mode: 'local', dfctlPath: join(dir, 'missing') })).not.toThrow();
   });
 });
