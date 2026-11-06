@@ -37,7 +37,7 @@ export interface Config {
   projectRoots: string[];
   /** Concurrent Claude jobs per user seat (SEAT_CONCURRENCY, default 1). */
   seatConcurrency: number;
-  /** Path to the privileged dfctl helper (DFCTL_PATH). */
+  /** Path to the privileged dfctl helper (DFCTL_PATH, default /usr/local/lib/devflow/dfctl). */
   dfctlPath: string;
   /** Break-glass local admin username (BREAKGLASS_ADMIN); empty = disabled. */
   breakglassAdmin: string;
@@ -132,7 +132,7 @@ export function loadConfig(env: Env = process.env): Config {
     deputyEmails: parseDeptEmails(env.DEPUTY_EMAILS),
     projectRoots: (env.PROJECT_ROOTS ?? '').split(',').map(x => x.trim()).filter(Boolean),
     seatConcurrency,
-    dfctlPath: (env.DFCTL_PATH ?? '').trim(),
+    dfctlPath: (env.DFCTL_PATH ?? '').trim() || '/usr/local/lib/devflow/dfctl',
     breakglassAdmin: (env.BREAKGLASS_ADMIN ?? '').trim(),
   };
 }

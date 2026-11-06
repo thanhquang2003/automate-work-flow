@@ -3,6 +3,7 @@ import cookie from '@fastify/cookie';
 import formbody from '@fastify/formbody';
 import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
+import type { SeatRunner } from '../claude/seat-runner.js';
 import type { Config } from '../config.js';
 import type { Repo } from '../db/repo.js';
 import type { Pipeline } from '../engine/pipeline.js';
@@ -17,7 +18,11 @@ import { surveyRoutes } from './routes/survey.js';
 import { ROOT, render } from './view.js';
 
 export interface SystemOpsLike { provisionUser(userId: number): Promise<void> | void }
-export interface WebDeps { repo: Repo; pipeline: Pipeline; oidc?: OidcClient; systemOps?: SystemOpsLike }
+export interface WebDeps {
+  repo: Repo; pipeline: Pipeline; oidc?: OidcClient; systemOps?: SystemOpsLike;
+  /** v3 (Task 4): seat runner for the "Claude của tôi" page (login/status/logout); used by Task 6. */
+  seatRunner?: SeatRunner;
+}
 
 const PUBLIC_PREFIXES = ['/static/', '/s/'];
 const PUBLIC_PATHS = ['/login', '/login/local', '/setup', '/auth/google', '/auth/google/callback'];

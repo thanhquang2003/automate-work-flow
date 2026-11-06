@@ -1,0 +1,490 @@
+#!/bin/bash
+# dfctl — DevFlow's only privileged helper (spec v3 §6b.2). Installed root:root 0755 at
+# /usr/local/lib/devflow/dfctl; the service user may run it through exactly one sudoers rule:
+#   devflow ALL=(root) NOPASSWD: /usr/local/lib/devflow/dfctl
+#
+# Subcommands (every argument is validated before anything else happens):
+#   provision-user <userId>                          OS account dfu-<id>, no login shell, private home
+#   ensure-project-group <projectId> <path>          group dfp-<id>, project folder group-owned, setgid
+#   set-members <projectId> [<userId>...]            exact member list of dfp-<id> (+ the service user)
+#   run-claude <userId> <cwd> --run-id <runId> -- <claude args...>
+#                                                    the configured claude binary as dfu-<id>, cwd must be a
+#                                                    worktree of a project whose group the user is in;
+#                                                    stdin/stdout/stderr pass through (prompt via stdin)
+#   claude-auth <userId> status|logout
+#   claude-auth <userId> login --run-id <runId>      `claude auth login` inside a pty (util-linux script)
+#   stop-claude <userId> <runId>                     kill a run started with that run id (DevFlow cannot
+#                                                    signal processes of other users itself)
+#   --self-test                                      validation checks only; touches nothing on the system
+#
+# Design rules: root never writes inside a path that a non-root user controls (homes and project folders
+# are changed through `runuser` as their owner); no value from the caller reaches a shell; the claude
+# binary and project roots come only from the root-owned /etc/devflow/dfctl.conf; DevFlow never sees,
+# reads or stores Claude credentials (they stay in /var/lib/devflow/users/<id>/.claude, mode 0700).
+set -euo pipefail
+umask 022
+IFS=$' \t\n'
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export LC_ALL=C
+
+readonly CONF_FILE=/etc/devflow/dfctl.conf
+readonly REG_DIR=/var/lib/dfctl/projects
+readonly RUN_DIR=/run/dfctl
+readonly USERS_HOME=/var/lib/devflow/users
+readonly SERVICE_USER=devflow
+readonly USER_PREFIX=dfu-
+readonly GROUP_PREFIX=dfp-
+readonly RUN_MAX_SEC=86400
+readonly LOGIN_MAX_SEC=600
+readonly SHORT_MAX_SEC=60
+readonly USER_PATH=/usr/local/bin:/usr/bin:/bin
+
+# Exit 2 = rejected arguments, 1 = runtime failure.
+usage_die() { printf 'dfctl: %s\n' "$*" >&2; printf 'usage: dfctl provision-user|ensure-project-group|set-members|run-claude|claude-auth|stop-claude ... | --self-test\n' >&2; exit 2; }
+die() { printf 'dfctl: %s\n' "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------- pure validators (no side effects)
+
+is_id() { [[ ${1-} =~ ^[1-9][0-9]{0,8}$ ]]; }
+is_run_id() { [[ ${1-} =~ ^[A-Za-z0-9]{8,64}$ ]]; }
+# Absolute, no control characters (newline would break the registry), sane length.
+is_abs_path() {
+  local p=${1-}
+  [[ $p == /* ]] || return 1
+  [[ $p != *[[:cntrl:]]* ]] || return 1
+  [ ${#p} -le 4096 ]
+}
+# Canonical form: no ".", ".." or empty segments, no trailing slash (except "/").
+is_canonical() {
+  local p=${1-}
+  is_abs_path "$p" || return 1
+  [[ $p == / ]] && return 0
+  [[ $p != */ && $p != *//* && $p != */./* && $p != */. && $p != */../* && $p != */.. ]]
+}
+# child strictly below parent (both canonical). The quoted parent is matched literally, never as a glob.
+is_under() {
+  local child=${1-} parent=${2-}
+  [ -n "$parent" ] && [ "$parent" != / ] || return 1
+  [[ $child == "$parent"/* ]]
+}
+# A run may only start inside <project>/.devflow/worktrees/<something>.
+cwd_allowed() {
+  local cwd=${1-} project=${2-}
+  is_canonical "$cwd" && is_canonical "$project" || return 1
+  is_under "$cwd" "$project/.devflow/worktrees"
+}
+# The claude binary path goes into `script -c "<cmd>"`, which /bin/sh parses: plain path characters only.
+is_safe_bin() {
+  local b=${1-}
+  [[ $b =~ ^/[A-Za-z0-9._/+-]+$ ]] || return 1
+  is_canonical "$b"
+}
+
+# Shape of every subcommand's arguments. Returns 0 or prints the reason and returns 2.
+validate_args() {
+  bad() { printf '%s\n' "$*"; }
+  [ $# -ge 1 ] || { bad "missing subcommand"; return 2; }
+  local cmd=$1; shift
+  case "$cmd" in
+    provision-user)
+      [ $# -eq 1 ] || { bad "provision-user takes exactly <userId>"; return 2; }
+      is_id "$1" || { bad "invalid user id"; return 2; } ;;
+    ensure-project-group)
+      [ $# -eq 2 ] || { bad "ensure-project-group takes <projectId> <path>"; return 2; }
+      is_id "$1" || { bad "invalid project id"; return 2; }
+      is_canonical "$2" && [ "$2" != / ] || { bad "project path must be absolute and canonical"; return 2; } ;;
+    set-members)
+      [ $# -ge 1 ] || { bad "set-members takes <projectId> [<userId>...]"; return 2; }
+      is_id "$1" || { bad "invalid project id"; return 2; }
+      shift
+      local u
+      for u in "$@"; do is_id "$u" || { bad "invalid user id"; return 2; }; done ;;
+    run-claude)
+      [ $# -ge 5 ] || { bad "run-claude takes <userId> <cwd> --run-id <runId> -- <args...>"; return 2; }
+      is_id "$1" || { bad "invalid user id"; return 2; }
+      is_abs_path "$2" || { bad "cwd must be an absolute path"; return 2; }
+      [ "$3" = --run-id ] || { bad "expected --run-id"; return 2; }
+      is_run_id "$4" || { bad "invalid run id"; return 2; }
+      [ "$5" = -- ] || { bad "expected -- before claude arguments"; return 2; } ;;
+    claude-auth)
+      [ $# -ge 2 ] || { bad "claude-auth takes <userId> login|status|logout"; return 2; }
+      is_id "$1" || { bad "invalid user id"; return 2; }
+      case "$2" in
+        status|logout) [ $# -eq 2 ] || { bad "claude-auth $2 takes no further arguments"; return 2; } ;;
+        login)
+          [ $# -eq 4 ] && [ "$3" = --run-id ] || { bad "claude-auth login needs --run-id <runId>"; return 2; }
+          is_run_id "$4" || { bad "invalid run id"; return 2; } ;;
+        *) bad "claude-auth action must be login, status or logout"; return 2 ;;
+      esac ;;
+    stop-claude)
+      [ $# -eq 2 ] || { bad "stop-claude takes <userId> <runId>"; return 2; }
+      is_id "$1" || { bad "invalid user id"; return 2; }
+      is_run_id "$2" || { bad "invalid run id"; return 2; } ;;
+    *) bad "unknown subcommand"; return 2 ;;
+  esac
+  return 0
+}
+
+# ---------------------------------------------------------------- system helpers (root only)
+
+need_root() { [ "$(id -u)" -eq 0 ] || die "must run as root (through sudo)"; }
+
+# A directory root controls: exists, not a symlink, owned by root, not writable by group/others.
+root_dir_ok() {
+  local d=$1
+  [ -d "$d" ] && [ ! -L "$d" ] || return 1
+  [ "$(stat -c %u -- "$d")" = 0 ] || return 1
+  local mode; mode=$(stat -c %a -- "$d")
+  (( (8#$mode & 8#022) == 0 ))
+}
+root_file_ok() {
+  local f=$1
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  [ "$(stat -c %u -- "$f")" = 0 ] || return 1
+  local mode; mode=$(stat -c %a -- "$f")
+  (( (8#$mode & 8#022) == 0 ))
+}
+
+CONF_ROOTS=()
+CONF_CLAUDE=""
+load_conf() {
+  root_file_ok "$CONF_FILE" || die "$CONF_FILE missing or not root-owned/0644"
+  local line key val raw_roots="" r
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in ''|'#'*) continue ;; esac
+    key=${line%%=*}; val=${line#*=}
+    case $key in
+      PROJECT_ROOTS) raw_roots=$val ;;
+      CLAUDE_BIN) CONF_CLAUDE=$val ;;
+      *) die "unknown key in $CONF_FILE: $key" ;;
+    esac
+  done < "$CONF_FILE"
+  local IFS=,
+  for r in $raw_roots; do
+    is_canonical "$r" && [ "$r" != / ] && [ -d "$r" ] || die "bad PROJECT_ROOTS entry in $CONF_FILE"
+    [ "$(realpath -e -- "$r")" = "$r" ] || die "PROJECT_ROOTS entry is not canonical (symlink?)"
+    CONF_ROOTS+=("$r")
+  done
+  [ ${#CONF_ROOTS[@]} -gt 0 ] || die "PROJECT_ROOTS empty in $CONF_FILE"
+  is_safe_bin "$CONF_CLAUDE" || die "bad CLAUDE_BIN in $CONF_FILE"
+  local real; real=$(realpath -e -- "$CONF_CLAUDE") || die "CLAUDE_BIN does not exist"
+  root_file_ok "$real" || die "CLAUDE_BIN must resolve to a root-owned file not writable by others"
+  [ -x "$real" ] || die "CLAUDE_BIN not executable"
+}
+
+in_roots() {
+  local p=$1 r
+  for r in "${CONF_ROOTS[@]}"; do is_under "$p" "$r" && return 0; done
+  return 1
+}
+
+user_home() { getent passwd "$1" | cut -d: -f6; }
+in_group() { local u=$1 g=$2 x; for x in $(id -nG -- "$u"); do [ "$x" = "$g" ] && return 0; done; return 1; }
+
+# Existing dfu account checked against what provision-user creates; returns its home.
+seat_user() {
+  local id=$1 u=${USER_PREFIX}$1 home
+  getent passwd "$u" >/dev/null || die "user $u not provisioned"
+  home=$(user_home "$u")
+  [ "$home" = "$USERS_HOME/$id" ] || die "user $u has an unexpected home"
+  [ -d "$home" ] && [ ! -L "$home" ] || die "home of $u missing"
+  printf '%s\n' "$home"
+}
+
+# Clean environment for the seat user (nothing from DevFlow's environment crosses over).
+user_env() {
+  local home=$1
+  USER_ENV=(env -i HOME="$home" CLAUDE_CONFIG_DIR="$home/.claude" PATH="$USER_PATH" LANG=C.UTF-8
+    SHELL=/bin/sh TERM=dumb DISABLE_AUTOUPDATER=1)
+}
+
+registry_path() { cat -- "$REG_DIR/$1" 2>/dev/null || true; }
+
+prepare_run_dir() {
+  if [ -e "$RUN_DIR" ]; then root_dir_ok "$RUN_DIR" || die "$RUN_DIR is not a root-owned directory"
+  else install -d -m 0700 -o root -g root "$RUN_DIR"; fi
+}
+
+# Runs "$@" in its own session under a hard time limit, tracked by <uid>-<runId> so stop-claude can kill
+# the whole process group. stdin is passed through explicitly (a background job would get /dev/null).
+run_tracked() {
+  local uid=$1 rid=$2 max=$3; shift 3
+  prepare_run_dir
+  local pidf="$RUN_DIR/$uid-$rid"
+  ( set -o noclobber; : > "$pidf" ) 2>/dev/null || die "run id already in use"
+  # shellcheck disable=SC2064  # expand now: the path is fixed for this process
+  trap "rm -f -- '$pidf'" EXIT
+  setsid timeout -s KILL "$max" "$@" <&0 &
+  local child=$!
+  printf '%s\n' "$child" > "$pidf"
+  local rc=0
+  wait "$child" || rc=$?
+  exit "$rc"
+}
+
+# ---------------------------------------------------------------- subcommands
+
+cmd_provision_user() {
+  local id=$1 u=${USER_PREFIX}$1 home=$USERS_HOME/$1
+  root_dir_ok "$USERS_HOME" || die "$USERS_HOME must be a root-owned directory (run install-server.sh)"
+  if getent passwd "$u" >/dev/null; then
+    [ "$(user_home "$u")" = "$home" ] || die "existing $u has an unexpected home"
+  else
+    useradd --system --user-group --no-create-home --home-dir "$home" --shell /usr/sbin/nologin \
+      --comment "DevFlow seat $id" "$u"
+  fi
+  if [ ! -e "$home" ]; then
+    install -d -m 0700 -o "$u" -g "$u" "$home"   # parent is root-owned: safe to create as root
+  fi
+  [ -d "$home" ] && [ ! -L "$home" ] || die "home of $u is not a directory"
+  # Everything inside the home is done as the user (it may contain links the user planted).
+  runuser -u "$u" -- env -i HOME="$home" PATH="$USER_PATH" /bin/sh -c '
+    umask 077
+    mkdir -p "$HOME/.claude"
+    if command -v git >/dev/null 2>&1; then git config --global --replace-all safe.directory "*"; fi
+  '
+  echo "provisioned $u"
+}
+
+cmd_ensure_project_group() {
+  local pid=$1 path=$2 g=${GROUP_PREFIX}$1
+  load_conf
+  local real; real=$(realpath -e -- "$path") || die "project path does not exist"
+  [ "$real" = "$path" ] || die "project path must not contain symlinks"
+  [ -d "$real" ] || die "project path is not a directory"
+  in_roots "$real" || die "project path is outside PROJECT_ROOTS"
+  [ "$(stat -c %U -- "$real")" = "$SERVICE_USER" ] || die "project folder must be owned by $SERVICE_USER"
+
+  install -d -m 0700 -o root -g root "$REG_DIR"
+  root_dir_ok "$REG_DIR" || die "$REG_DIR is not root-owned"
+  local f other first=0 cur
+  cur=$(registry_path "$pid")
+  if [ -n "$cur" ] && [ "$cur" != "$real" ]; then die "project $pid is registered with another path"; fi
+  [ -z "$cur" ] && first=1
+  for f in "$REG_DIR"/*; do
+    [ -f "$f" ] || continue
+    [ "${f##*/}" = "$pid" ] && continue
+    other=$(cat -- "$f")
+    if [ "$other" = "$real" ] || is_under "$real" "$other" || is_under "$other" "$real"; then
+      die "path overlaps project ${f##*/}"
+    fi
+  done
+
+  getent group "$g" >/dev/null || groupadd --system "$g"
+  gpasswd -a "$SERVICE_USER" "$g" >/dev/null
+  if [ $first -eq 1 ]; then
+    local tmp="$REG_DIR/.$pid.$$"
+    printf '%s\n' "$real" > "$tmp"
+    chmod 0600 "$tmp"
+    mv -f -- "$tmp" "$REG_DIR/$pid"
+  fi
+  # Permission changes happen as the folder owner, never as root (no symlink games can reach root).
+  # The full tree walk is done once, at registration; later calls only fix the top folder.
+  runuser -u "$SERVICE_USER" -- /bin/sh -c '
+    cd -- "$1" || exit 1
+    chgrp -- "$2" . && chmod 2770 .
+    if [ "$3" = 1 ]; then
+      chgrp -R -h -P -f -- "$2" . || true
+      chmod -R -f g+rwX,o-rwx . || true
+      find . -xdev -type d ! -perm -2000 -exec chmod -f g+s {} + 2>/dev/null || true
+    fi
+    if [ -d .git ]; then git config core.sharedRepository group || true; fi
+  ' sh "$real" "$g" "$first"
+  echo "ensured $g for $real"
+}
+
+cmd_set_members() {
+  local pid=$1 g=${GROUP_PREFIX}$1; shift
+  [ -n "$(registry_path "$pid")" ] || die "project $pid not registered (ensure-project-group first)"
+  getent group "$g" >/dev/null || die "group $g missing"
+  local -A seen=()
+  local list=$SERVICE_USER id u
+  for id in "$@"; do
+    [ -n "${seen[$id]-}" ] && continue
+    seen[$id]=1
+    u=${USER_PREFIX}$id
+    getent passwd "$u" >/dev/null || die "user $u not provisioned"
+    list+=",$u"
+  done
+  gpasswd -M "$list" "$g"
+  echo "members of $g: $list"
+}
+
+cmd_run_claude() {
+  local uid=$1 cwd=$2 rid=$4; shift 5
+  load_conf
+  local home; home=$(seat_user "$uid")
+  local u=${USER_PREFIX}$uid
+  local real; real=$(realpath -e -- "$cwd") || die "cwd does not exist"
+  [ -d "$real" ] || die "cwd is not a directory"
+  local f p pid=""
+  for f in "$REG_DIR"/*; do
+    [ -f "$f" ] || continue
+    p=$(cat -- "$f")
+    if cwd_allowed "$real" "$p" && in_roots "$p"; then pid=${f##*/}; break; fi
+  done
+  [ -n "$pid" ] || die "cwd is not inside a project worktree"
+  in_group "$u" "${GROUP_PREFIX}$pid" || die "user $u is not a member of project $pid"
+  user_env "$home"
+  umask 002
+  # env -C changes directory as the seat user, so the kernel checks that user's access too.
+  run_tracked "$uid" "$rid" "$RUN_MAX_SEC" runuser -u "$u" -- "${USER_ENV[@]:0:2}" -C "$real" "${USER_ENV[@]:2}" \
+    "$CONF_CLAUDE" "$@"
+}
+
+cmd_claude_auth() {
+  local uid=$1 action=$2
+  load_conf
+  local home; home=$(seat_user "$uid")
+  local u=${USER_PREFIX}$uid
+  user_env "$home"
+  case "$action" in
+    status|logout)
+      exec timeout -s KILL "$SHORT_MAX_SEC" runuser -u "$u" -- "${USER_ENV[@]:0:2}" -C "$home" "${USER_ENV[@]:2}" \
+        "$CONF_CLAUDE" auth "$action" ;;
+    login)
+      # A wide pty so the login URL is printed on one line. CONF_CLAUDE passed is_safe_bin.
+      run_tracked "$uid" "$4" "$LOGIN_MAX_SEC" runuser -u "$u" -- "${USER_ENV[@]:0:2}" -C "$home" "${USER_ENV[@]:2}" \
+        script -qfec "stty cols 500 rows 50 2>/dev/null; exec $CONF_CLAUDE auth login" /dev/null ;;
+  esac
+}
+
+cmd_stop_claude() {
+  local uid=$1 rid=$2
+  local pidf="$RUN_DIR/$uid-$rid"
+  [ -e "$RUN_DIR" ] || exit 0
+  root_dir_ok "$RUN_DIR" || die "$RUN_DIR is not root-owned"
+  [ -f "$pidf" ] || { echo "not running"; exit 0; }
+  local pid="" i
+  for i in $(seq 1 50); do
+    pid=$(cat -- "$pidf" 2>/dev/null || true)
+    [ -n "$pid" ] && break
+    [ -f "$pidf" ] || exit 0
+    sleep 0.1
+  done
+  [[ $pid =~ ^[1-9][0-9]*$ ]] || die "bad pid file"
+  # Only ever kill the session dfctl itself started: leader is `timeout`, pgid == pid.
+  [ "$(cat "/proc/$pid/comm" 2>/dev/null || true)" = timeout ] || { echo "not running"; exit 0; }
+  [ "$(ps -o pgid= -p "$pid" | tr -d ' ')" = "$pid" ] || { echo "not running"; exit 0; }
+  kill -KILL -- "-$pid" 2>/dev/null || true
+  echo "stopped"
+}
+
+# ---------------------------------------------------------------- self-test
+
+self_test() {
+  local n=0 failed=0
+  ok() { n=$((n + 1)); if "${@:2}"; then echo "ok - $1"; else echo "not ok - $1"; failed=$((failed + 1)); fi; }
+  no() { n=$((n + 1)); if "${@:2}"; then echo "not ok - $1"; failed=$((failed + 1)); else echo "ok - $1"; fi; }
+  quiet() { "$@" >/dev/null 2>&1; }
+
+  echo "# bad user id"
+  ok "id 1" is_id 1
+  ok "id 123456789" is_id 123456789
+  no "id 0" is_id 0
+  no "id -1" is_id -1
+  no "id 01 (leading zero)" is_id 01
+  no "id empty" is_id ""
+  no "id 1234567890 (too long)" is_id 1234567890
+  no "id 1.5" is_id 1.5
+  no "id with space" is_id "1 2"
+  no "id with newline" is_id $'1\n2'
+  no "provision-user abc" quiet validate_args provision-user abc
+  no "set-members 1 2 x" quiet validate_args set-members 1 2 x
+  no "stop-claude 0 abcdefgh" quiet validate_args stop-claude 0 abcdefgh
+
+  echo "# arg injection"
+  no "id 1;id" is_id "1;id"
+  no "id \$(id)" is_id '$(id)'
+  no "id --help" is_id --help
+  no "run id with ../" is_run_id "../../etc/passwd"
+  no "run id with ;" is_run_id "abcdefgh;rm"
+  no "run id too short" is_run_id abc
+  ok "run id hex" is_run_id 0123456789abcdef01234567
+  no "provision-user extra arg" quiet validate_args provision-user 1 2
+  no "run-claude without --run-id" quiet validate_args run-claude 1 /srv/p/.devflow/worktrees/A -- -p
+  no "run-claude without --" quiet validate_args run-claude 1 /srv/p/.devflow/worktrees/A --run-id abcdefgh -p
+  no "run-claude cwd relative" quiet validate_args run-claude 1 srv/p --run-id abcdefgh -- -p
+  no "run-claude cwd option-like" quiet validate_args run-claude 1 -rf --run-id abcdefgh -- -p
+  ok "run-claude well-formed (args after -- are opaque)" quiet validate_args run-claude 1 /srv/p/.devflow/worktrees/A --run-id abcdefgh -- -p '; rm -rf /' '$(id)'
+  no "claude-auth unknown action" quiet validate_args claude-auth 1 'status;id'
+  no "claude-auth login without run id" quiet validate_args claude-auth 1 login
+  no "claude-auth status extra arg" quiet validate_args claude-auth 1 status --debug
+  ok "claude-auth login well-formed" quiet validate_args claude-auth 1 login --run-id abcdefgh
+  no "ensure-project-group path with newline" quiet validate_args ensure-project-group 1 $'/srv/p\n/etc'
+  no "ensure-project-group path with .." quiet validate_args ensure-project-group 1 /srv/p/../../etc
+  no "ensure-project-group path /" quiet validate_args ensure-project-group 1 /
+  no "unknown subcommand" quiet validate_args frobnicate 1
+
+  echo "# empty args"
+  no "no subcommand" quiet validate_args
+  no "empty subcommand" quiet validate_args ""
+  no "provision-user without id" quiet validate_args provision-user
+  no "provision-user empty id" quiet validate_args provision-user ""
+  no "ensure-project-group without path" quiet validate_args ensure-project-group 1
+  no "ensure-project-group empty path" quiet validate_args ensure-project-group 1 ""
+  no "set-members without project" quiet validate_args set-members
+  ok "set-members with no users (only the service user stays)" quiet validate_args set-members 1
+  no "run-claude without args" quiet validate_args run-claude
+  no "claude-auth without action" quiet validate_args claude-auth 1
+  no "stop-claude without run id" quiet validate_args stop-claude 1
+
+  echo "# cwd outside project"
+  ok "worktree of project" cwd_allowed /srv/p/.devflow/worktrees/R1 /srv/p
+  ok "subfolder of a worktree" cwd_allowed /srv/p/.devflow/worktrees/R1/src /srv/p
+  no "worktrees folder itself" cwd_allowed /srv/p/.devflow/worktrees /srv/p
+  no "project root" cwd_allowed /srv/p /srv/p
+  no "project source outside worktrees" cwd_allowed /srv/p/src /srv/p
+  no "request workspace (not a worktree)" cwd_allowed /srv/p/.devflow/requests/R1 /srv/p
+  no "other project" cwd_allowed /srv/q/.devflow/worktrees/R1 /srv/p
+  no "sibling with same prefix" cwd_allowed /srv/p2/.devflow/worktrees/R1 /srv/p
+  no "non-canonical cwd with .." cwd_allowed /srv/p/.devflow/worktrees/R1/../../../../etc /srv/p
+  no "glob in project path is literal" cwd_allowed /srv/x/.devflow/worktrees/R1 '/srv/*'
+  no "is_under equal" is_under /srv/p /srv/p
+  no "is_under parent /" is_under /etc /
+  ok "is_under child" is_under /srv/p/a /srv/p
+
+  echo "# symlink escape"
+  local tmp; tmp=$(mktemp -d)
+  mkdir -p "$tmp/proj/.devflow/worktrees/R1" "$tmp/outside"
+  ln -s "$tmp/outside" "$tmp/proj/.devflow/worktrees/link"
+  local proj; proj=$(realpath -e -- "$tmp/proj")
+  local r1; r1=$(realpath -e -- "$tmp/proj/.devflow/worktrees/R1")
+  local viaLink; viaLink=$(realpath -e -- "$tmp/proj/.devflow/worktrees/link")
+  local viaDots; viaDots=$(realpath -e -- "$tmp/proj/.devflow/worktrees/R1/../../..")
+  ok "real worktree resolves inside" cwd_allowed "$r1" "$proj"
+  no "symlinked worktree resolving outside" cwd_allowed "$viaLink" "$proj"
+  no "dot-dot resolving to project root" cwd_allowed "$viaDots" "$proj"
+  rm -rf -- "$tmp"
+
+  echo "# claude bin"
+  ok "plain path" is_safe_bin /usr/local/bin/claude
+  no "relative" is_safe_bin claude
+  no "shell metachar" is_safe_bin '/usr/bin/claude;id'
+  no "space" is_safe_bin '/opt/my claude/claude'
+  no "dot-dot" is_safe_bin /usr/local/../bin/claude
+  no "command substitution" is_safe_bin '/usr/bin/$(id)'
+
+  if [ $failed -eq 0 ]; then echo "# all $n checks passed"; return 0; fi
+  echo "# $failed of $n checks FAILED"; return 1
+}
+
+# ---------------------------------------------------------------- main
+
+main() {
+  if [ "${1-}" = --self-test ]; then [ $# -eq 1 ] || usage_die "--self-test takes no arguments"; self_test; exit $?; fi
+  local why
+  if ! why=$(validate_args "$@"); then usage_die "${why:-invalid arguments}"; fi
+  need_root
+  local cmd=$1; shift
+  case "$cmd" in
+    provision-user) cmd_provision_user "$@" ;;
+    ensure-project-group) cmd_ensure_project_group "$@" ;;
+    set-members) cmd_set_members "$@" ;;
+    run-claude) cmd_run_claude "$@" ;;
+    claude-auth) cmd_claude_auth "$@" ;;
+    stop-claude) cmd_stop_claude "$@" ;;
+  esac
+}
+
+main "$@"

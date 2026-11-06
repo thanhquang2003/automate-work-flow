@@ -20,7 +20,13 @@ export interface RunResult {
   resultText: string;
   rateLimitedUntil?: Date;
   error?: string;
+  /** v3: the run failed because the seat's Claude login is missing or expired (stage → awaiting_seat). */
+  seatError?: SeatError;
+  /** The run was stopped through `opts.signal`. Not a failure: callers check this before `ok`. */
+  aborted?: boolean;
 }
+
+export type SeatError = 'expired' | 'disconnected';
 
 const LIMIT_RE = /(usage limit|rate limit|limit reached|5-hour limit)/i;
 const RESET_RE = /resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i;
@@ -43,6 +49,17 @@ export function detectRateLimit(text: string, now: Date, defaultPauseMin: number
     }
   }
   return new Date(now.getTime() + defaultPauseMin * 60000);
+}
+
+const EXPIRED_RE = /(login expired|session expired|token (?:has )?expired|expired (?:oauth )?token|login has expired)/i;
+const DISCONNECTED_RE = /(not logged in|invalid api key|please run \/login|run `?claude (?:auth )?login|authentication_error|no (?:valid )?credentials|invalid bearer token|unauthori[sz]ed)/i;
+
+/** Classifies text of a FAILED run: the seat's login expired, or there is no usable login. */
+export function detectSeatError(text: string): SeatError | undefined {
+  if (!text) return undefined;
+  if (EXPIRED_RE.test(text)) return 'expired';
+  if (DISCONNECTED_RE.test(text)) return 'disconnected';
+  return undefined;
 }
 
 // Letters/digits of any script (e.g. Vietnamese folder names), Windows path characters and a few safe marks.
@@ -83,7 +100,7 @@ function quoteCmd(a: string): string {
   return '"' + a.replace(/"/g, '\\"') + '"';
 }
 
-function killTree(child: ChildProcess): void {
+export function killTree(child: ChildProcess): void {
   const pid = child.pid;
   if (!pid) return;
   if (process.platform === 'win32') {
@@ -105,13 +122,35 @@ function summarize(ev: any): string | undefined {
   return s ? s.slice(0, 200) : undefined;
 }
 
-export async function runClaude(cfg: Config, opts: RunOpts): Promise<RunResult> {
-  if (cfg.claudeMock) return runMock(opts);
-
+/** Arguments after `-p` common to every Claude run (stream-json, bypassPermissions, add-dir, resume). */
+export function claudeRunArgs(opts: Pick<RunOpts, 'addDirs' | 'resumeSessionId'>): string[] {
   const rest = ['--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions'];
   for (const d of opts.addDirs ?? []) rest.push('--add-dir', d);
   if (opts.resumeSessionId) rest.push('--resume', opts.resumeSessionId);
+  return rest;
+}
 
+/** How to start one Claude process; built by the local runner or a seat runner. */
+export interface ClaudeCommand {
+  bin: string;
+  args: string[];
+  /** Working directory of the spawned process. */
+  cwd: string;
+  /** Write the prompt to stdin (otherwise stdin is closed empty). */
+  promptViaStdin: boolean;
+  /** Start through cmd.exe (Windows .cmd shims). */
+  shell?: boolean;
+  /** Called on abort/timeout in addition to killing the spawned process tree (e.g. ask dfctl to stop a run). */
+  onKill?: () => void;
+}
+
+/** After a forced stop, give the child this long to close before resolving anyway. */
+const SETTLE_AFTER_KILL_MS = 15_000;
+
+export async function runClaude(cfg: Config, opts: RunOpts): Promise<RunResult> {
+  if (cfg.claudeMock) return runMock(opts);
+
+  const rest = claudeRunArgs(opts);
   // On Windows the claude shim is a .cmd file and needs a shell. Quoting a prompt through cmd.exe is
   // unreliable, so in shell mode (and for long prompts) the prompt goes via stdin.
   const shell = needsShell(cfg.claudeBin);
@@ -121,14 +160,18 @@ export async function runClaude(cfg: Config, opts: RunOpts): Promise<RunResult> 
     catch (e) { return { ok: false, resultText: '', error: (e as Error).message }; }
   }
   const args = [...cfg.claudeBinArgs, '-p', ...(viaStdin ? [] : [opts.prompt]), ...rest];
+  return runClaudeCommand(cfg, opts, { bin: cfg.claudeBin, args, cwd: opts.cwd, promptViaStdin: viaStdin, shell });
+}
 
+/** Spawns `cmd`, parses Claude's stream-json output and classifies the outcome (shared by all runners). */
+export function runClaudeCommand(cfg: Pick<Config, 'rateLimitPauseMin'>, opts: RunOpts, cmd: ClaudeCommand): Promise<RunResult> {
   return new Promise<RunResult>(resolve => {
     let child: ChildProcess;
     const env = claudeEnv();
     try {
-      child = shell
-        ? spawn([cfg.claudeBin, ...args].map(quoteCmd).join(' '), { cwd: opts.cwd, env, shell: true, stdio: 'pipe', windowsHide: true })
-        : spawn(cfg.claudeBin, args, { cwd: opts.cwd, env, stdio: 'pipe', windowsHide: true, detached: process.platform !== 'win32' });
+      child = cmd.shell
+        ? spawn([cmd.bin, ...cmd.args].map(quoteCmd).join(' '), { cwd: cmd.cwd, env, shell: true, stdio: 'pipe', windowsHide: true })
+        : spawn(cmd.bin, cmd.args, { cwd: cmd.cwd, env, stdio: 'pipe', windowsHide: true, detached: process.platform !== 'win32' });
     } catch (e) {
       return resolve({ ok: false, resultText: '', error: `spawn failed: ${(e as Error).message}` });
     }
@@ -141,7 +184,9 @@ export async function runClaude(cfg: Config, opts: RunOpts): Promise<RunResult> 
     let buf = '';
     let plain = '';
     let forced: string | undefined;
+    let aborted = false;
     let settled = false;
+    let settleTimer: NodeJS.Timeout | undefined;
 
     const handleLine = (line: string) => {
       if (!line.trim()) return;
@@ -170,33 +215,45 @@ export async function runClaude(cfg: Config, opts: RunOpts): Promise<RunResult> 
     child.stderr!.setEncoding('utf8');
     child.stderr!.on('data', (d: string) => { stderr += d; if (stderr.length > 20000) stderr = stderr.slice(-20000); });
     child.stdin!.on('error', () => { /* child may exit early */ });
-    if (viaStdin) child.stdin!.end(opts.prompt); else child.stdin!.end();
+    if (cmd.promptViaStdin) child.stdin!.end(opts.prompt); else child.stdin!.end();
 
-    const fail = (reason: string) => { forced = reason; killTree(child); };
+    const fail = (reason: string) => {
+      if (forced) return;
+      forced = reason;
+      try { cmd.onKill?.(); } catch { /* best effort */ }
+      killTree(child);
+      settleTimer = setTimeout(() => finish(null), SETTLE_AFTER_KILL_MS);
+      settleTimer.unref();
+    };
     const timer = opts.timeoutMs ? setTimeout(() => fail(`timeout after ${opts.timeoutMs}ms`), opts.timeoutMs) : undefined;
-    const onAbort = () => fail('aborted');
+    const onAbort = () => { aborted = true; fail('aborted'); };
     if (opts.signal) {
       if (opts.signal.aborted) onAbort(); else opts.signal.addEventListener('abort', onAbort, { once: true });
     }
 
-    const finish = (code: number | null, spawnErr?: Error) => {
+    function finish(code: number | null, spawnErr?: Error): void {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (settleTimer) clearTimeout(settleTimer);
       opts.signal?.removeEventListener('abort', onAbort);
       if (buf.trim()) handleLine(buf);
+      if (aborted) return resolve({ ok: false, aborted: true, sessionId, resultText, error: 'aborted' });
       const failedRun = !sawResult || !!isError;
+      const failText = `${isError ? resultText : ''}\n${plain}\n${stderr}`;
       const limited = forced || !failedRun ? undefined
         : detectRateLimit(`${resultText}\n${plain}\n${stderr}`, new Date(), cfg.rateLimitPauseMin);
+      const seatError = forced || !failedRun || limited ? undefined : detectSeatError(failText);
       let ok = sawResult && !isError && !forced;
       let error: string | undefined;
       if (limited) { ok = false; error = 'rate limited'; }
       else if (forced) error = forced;
       else if (spawnErr) error = `spawn failed: ${spawnErr.message}`;
+      else if (seatError) error = seatError === 'expired' ? 'Claude login expired' : 'Claude seat not logged in';
       else if (!sawResult) error = `claude exited (code ${code}) without a result${stderr ? ': ' + stderr.trim().slice(-500) : ''}`;
       else if (isError) error = resultText || 'claude reported an error';
-      resolve({ ok, sessionId, resultText, ...(limited ? { rateLimitedUntil: limited } : {}), ...(error ? { error } : {}) });
-    };
+      resolve({ ok, sessionId, resultText, ...(limited ? { rateLimitedUntil: limited } : {}), ...(seatError ? { seatError } : {}), ...(error ? { error } : {}) });
+    }
     child.on('error', e => finish(null, e));
     child.on('close', code => finish(code));
   });

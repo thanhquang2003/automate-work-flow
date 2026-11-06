@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# spike-claude-login.sh — MANUAL check, run once by the owner on the Linux VPS (as root) before v3 seats go live.
+#
+# Question it answers (spec v3 §6b.3): does the original `claude` binary let a user WITHOUT a login shell
+# connect a Claude Team seat through `claude auth login` running inside a pseudo-terminal (util-linux
+# `script`), with stdin/stdout being plain pipes the way DevFlow drives it? And do `claude auth status` /
+# `claude auth logout` work for that user with a private CLAUDE_CONFIG_DIR?
+#
+# What it does (each step prints PASS/FAIL):
+#   1. creates a throw-away OS user (default `dfspike`, shell /usr/sbin/nologin, private home)
+#   2. `claude --version` and `claude auth status` as that user
+#   3. `claude auth login` inside `script` with stdin from a FIFO and stdout to a private file (DevFlow's
+#      way). It prints the login URL it found; you open it in YOUR browser, and if the page shows a code
+#      you paste it at the hidden prompt. The code is written to the FIFO only: never echoed, logged or saved.
+#   4. `claude auth status` again (expect logged in; check the organisation is the company Team org)
+#   5. optional short `claude -p` run (skip with --skip-run)
+#   6. `claude auth logout` and a final `claude auth status` (expect logged out)
+#   7. with --cleanup: deletes the throw-away user and its home
+#
+# Usage:  sudo scripts/spike-claude-login.sh [--user NAME] [--claude /abs/path/to/claude] [--skip-run] [--cleanup]
+#
+# This script was written on a development machine without root and has NOT been run there.
+# Never paste the output of step 3 anywhere public: it contains the one-time login URL.
+set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+umask 077
+
+SPIKE_USER=dfspike
+CLAUDE_BIN=""
+SKIP_RUN=0
+CLEANUP=0
+LOGIN_TIMEOUT=600
+
+die() { printf 'spike: %s\n' "$*" >&2; exit 2; }
+pass() { printf '[PASS] %s\n' "$*"; }
+fail() { printf '[FAIL] %s\n' "$*"; FAILED=1; }
+FAILED=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --user) [ $# -ge 2 ] || die "--user needs a value"; SPIKE_USER="$2"; shift 2 ;;
+    --claude) [ $# -ge 2 ] || die "--claude needs a value"; CLAUDE_BIN="$2"; shift 2 ;;
+    --skip-run) SKIP_RUN=1; shift ;;
+    --cleanup) CLEANUP=1; shift ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+
+[ "$(id -u)" -eq 0 ] || die "run as root (sudo)"
+[ "$(uname -s)" = Linux ] || die "Linux only"
+[[ "$SPIKE_USER" =~ ^[a-z][a-z0-9-]{1,30}$ ]] || die "bad user name: $SPIKE_USER"
+for t in script runuser useradd mkfifo timeout; do command -v "$t" >/dev/null || die "missing tool: $t"; done
+
+if [ -z "$CLAUDE_BIN" ]; then CLAUDE_BIN="$(command -v claude || true)"; fi
+[ -n "$CLAUDE_BIN" ] || die "claude not found; pass --claude /abs/path"
+CLAUDE_BIN="$(readlink -f -- "$CLAUDE_BIN")"
+[ -x "$CLAUDE_BIN" ] || die "not executable: $CLAUDE_BIN"
+# The path goes into `script -c "<cmd>"`, which a shell parses: allow only plain path characters.
+[[ "$CLAUDE_BIN" =~ ^/[A-Za-z0-9._/+-]+$ ]] || die "claude path has unusual characters: $CLAUDE_BIN"
+echo "claude binary: $CLAUDE_BIN"
+if [ -f /etc/claude-code/managed-settings.json ]; then
+  echo "managed settings present: /etc/claude-code/managed-settings.json (forceLoginMethod / forceLoginOrgUUID)"
+else
+  echo "NOTE: /etc/claude-code/managed-settings.json not found; login will not be restricted to the company org"
+fi
+
+HOME_DIR="/var/lib/devflow-spike/$SPIKE_USER"
+if id -u "$SPIKE_USER" >/dev/null 2>&1; then
+  echo "user $SPIKE_USER already exists, reusing"
+  HOME_DIR="$(getent passwd "$SPIKE_USER" | cut -d: -f6)"
+else
+  install -d -m 0755 -o root -g root /var/lib/devflow-spike
+  useradd --system --create-home --home-dir "$HOME_DIR" --shell /usr/sbin/nologin --user-group "$SPIKE_USER"
+  chmod 0700 "$HOME_DIR"
+  pass "created user $SPIKE_USER (no login shell, home $HOME_DIR)"
+fi
+CFG_DIR="$HOME_DIR/.claude"
+runuser -u "$SPIKE_USER" -- mkdir -p -m 0700 "$CFG_DIR"
+
+# Same clean environment dfctl uses.
+as_user() {
+  runuser -u "$SPIKE_USER" -- env -i HOME="$HOME_DIR" CLAUDE_CONFIG_DIR="$CFG_DIR" \
+    PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 SHELL=/bin/sh TERM=dumb DISABLE_AUTOUPDATER=1 "$@"
+}
+
+echo; echo "== 2. version and status before login"
+if v="$(as_user timeout 60 "$CLAUDE_BIN" --version 2>&1)"; then pass "claude --version: $v"; else fail "claude --version failed: $v"; fi
+set +e
+st="$(as_user timeout 60 "$CLAUDE_BIN" auth status 2>&1)"; rc=$?
+set -e
+echo "auth status exit=$rc"; printf '%s\n' "$st" | sed 's/^/  | /'
+[ $rc -ne 127 ] && pass "claude auth status runs" || fail "claude auth status not available in this version"
+
+echo; echo "== 3. login inside a pseudo-terminal, pipes on both sides (DevFlow's way)"
+WORK="$(mktemp -d)"
+chmod 0711 "$WORK"
+cleanup_work() { rm -rf -- "$WORK"; }
+trap cleanup_work EXIT
+mkfifo -m 0600 "$WORK/in"; chown "$SPIKE_USER" "$WORK/in"
+OUT="$WORK/out"; : > "$OUT"; chown "$SPIKE_USER" "$OUT"; chmod 0600 "$OUT"
+# Keep the FIFO open for writing on fd 9 for the whole login so the child never sees EOF early.
+as_user timeout -s KILL "$LOGIN_TIMEOUT" script -qfec "stty cols 500 rows 50 2>/dev/null; exec $CLAUDE_BIN auth login" /dev/null \
+  < "$WORK/in" > "$OUT" 2>&1 &
+LOGIN_PID=$!
+exec 9> "$WORK/in"
+
+url=""
+for _ in $(seq 1 120); do
+  # Strip ANSI CSI/OSC sequences, then take the first https URL.
+  url="$(sed -e 's/\x1b\][^\x07]*\x07//g' -e 's/\x1b\[[0-9;?]*[ -/]*[@-~]//g' "$OUT" | tr -d '\r' | grep -oE 'https://[^[:space:]"'"'"'<>]+' | head -n1 || true)"
+  [ -n "$url" ] && break
+  kill -0 "$LOGIN_PID" 2>/dev/null || break
+  sleep 1
+done
+if [ -n "$url" ]; then
+  pass "login URL printed (open it in your own browser):"
+  printf '\n    %s\n\n' "$url"
+  case "$url" in
+    https://claude.ai/*|https://*.claude.ai/*|https://claude.com/*|https://*.claude.com/*|https://*.anthropic.com/*) pass "URL host is an Anthropic/Claude domain" ;;
+    *) fail "URL host is not on the expected allow-list (claude.ai / claude.com / anthropic.com): DevFlow would refuse to show it" ;;
+  esac
+  echo "If the browser shows a code, paste it below (input hidden). Press Enter on an empty line if the browser said login finished."
+  IFS= read -r -s -p "code: " code || code=""
+  echo
+  if [ -n "$code" ]; then printf '%s\r' "$code" >&9; fi
+  unset code
+else
+  fail "no https URL within 120 s; raw output (code-free, nothing typed yet):"
+  sed 's/^/  | /' "$OUT" | head -n 40
+fi
+exec 9>&-
+set +e
+wait "$LOGIN_PID"; lrc=$?
+set -e
+echo "login exit=$lrc"
+[ $lrc -eq 0 ] && pass "claude auth login exited 0" || fail "claude auth login exited $lrc (137 = killed by the ${LOGIN_TIMEOUT}s timeout)"
+# Never print the output after the code was typed: the pty echoes typed input. Only report keywords.
+if sed -e 's/\x1b\][^\x07]*\x07//g' -e 's/\x1b\[[0-9;?]*[ -/]*[@-~]//g' "$OUT" | grep -qiE 'success|logged in'; then
+  pass "login output contains a success message"
+else
+  echo "NOTE: no 'success'/'logged in' text in the login output; rely on step 4"
+fi
+
+echo; echo "== 4. status after login"
+set +e
+st="$(as_user timeout 60 "$CLAUDE_BIN" auth status 2>&1)"; rc=$?
+set -e
+echo "auth status exit=$rc"; printf '%s\n' "$st" | sed 's/^/  | /'
+echo "Check by eye: logged in, organisation = company Team org. Record the exact output format for DevFlow's parser."
+if [ -f "$CFG_DIR/.credentials.json" ]; then
+  perm="$(stat -c '%a %U' "$CFG_DIR/.credentials.json")"
+  pass "credentials written by Claude Code itself ($perm); DevFlow never reads this file"
+else
+  echo "NOTE: no $CFG_DIR/.credentials.json (this version may store credentials elsewhere)"
+fi
+
+if [ $SKIP_RUN -eq 0 ]; then
+  echo; echo "== 5. short headless run"
+  set +e
+  r="$(cd / && printf 'Reply with the single word OK.' | as_user timeout 120 "$CLAUDE_BIN" -p --output-format json 2>&1)"; rc=$?
+  set -e
+  echo "claude -p exit=$rc"; printf '%s\n' "$r" | cut -c1-300 | sed 's/^/  | /'
+  [ $rc -eq 0 ] && pass "headless run works on the seat" || fail "headless run failed"
+fi
+
+echo; echo "== 6. logout"
+set +e
+lo="$(as_user timeout 60 "$CLAUDE_BIN" auth logout 2>&1)"; rc=$?
+st="$(as_user timeout 60 "$CLAUDE_BIN" auth status 2>&1)"; src=$?
+set -e
+echo "auth logout exit=$rc"; printf '%s\n' "$lo" | sed 's/^/  | /'
+echo "auth status exit=$src"; printf '%s\n' "$st" | sed 's/^/  | /'
+[ $rc -eq 0 ] && pass "claude auth logout exited 0" || fail "claude auth logout exited $rc"
+
+if [ $CLEANUP -eq 1 ]; then
+  echo; echo "== 7. cleanup"
+  userdel -r "$SPIKE_USER" 2>/dev/null && pass "removed user $SPIKE_USER and its home" || fail "could not remove $SPIKE_USER"
+fi
+
+echo
+if [ $FAILED -eq 0 ]; then
+  echo "SPIKE RESULT: PASS. Seat login in a pty works; DevFlow's SudoSeatRunner design stands."
+else
+  echo "SPIKE RESULT: FAIL. Fallback (spec §6b.3): admin runs 'sudo dfctl claude-auth <id> login' in an SSH session together with the user."
+  exit 1
+fi
