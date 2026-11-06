@@ -17,9 +17,10 @@
 #   6. `claude auth logout` and a final `claude auth status` (expect logged out)
 #   7. with --cleanup: deletes the throw-away user and its home
 #   8. with --seat <userId> (after install-server.sh and `dfctl provision-user <userId>`): starts a tracked
-#      `dfctl claude-auth <id> login`, runs `dfctl stop-claude`, and FAILS if any claude/script process of
-#      dfu-<id> survives (ps -o pid,pgid,sid,cmd is printed before and after). With --worktree <path> (a
-#      worktree of a registered project the seat is a member of) it repeats the check for `dfctl run-claude`
+#      `dfctl claude-auth <id> login`, runs `dfctl stop-claude`, and FAILS if ANY process of dfu-<id>
+#      survives (ps -o pid,pgid,sid,cmd is printed before and after). With --worktree <path> (a worktree of
+#      a registered project the seat is a member of) it repeats the check for `dfctl run-claude`, plus a probe
+#      where claude runs its Bash tool and leaves detached `sleep` children before the stop,
 #      and checks, as the seat with dfctl's environment, that git status / object+ref writes work in the
 #      worktree while the project's .git/config, .git/hooks and .git/info are NOT writable by the seat.
 #
@@ -192,26 +193,48 @@ if [ -n "$SEAT" ]; then
   [ -x "$DFCTL" ] || die "$DFCTL not installed (run install-server.sh first)"
   SU="dfu-$SEAT"
   id -u "$SU" >/dev/null 2>&1 || die "$SU not provisioned (sudo $DFCTL provision-user $SEAT)"
-  survivors() { ps -o pid=,cmd= -u "$SU" 2>/dev/null | grep -E 'claude|script' | grep -v grep || true; }
-  [ -z "$(survivors)" ] || die "$SU already has claude processes; stop them first"
-  check_stop() {  # <label> <runId> <command...>: start it with stdin held open, stop it, look for survivors
-    local label=$1 rid=$2; shift 2
+  # ANY process left under the seat account after a stop is a failure (not only claude/script).
+  survivors() { ps -o pid=,cmd= -u "$SU" 2>/dev/null || true; }
+  [ -z "$(survivors)" ] || die "$SU already has processes; stop them first: $(survivors | tr '\n' ';')"
+  # check_stop <label> <runId> <prompt or ""> <command...>
+  # Without a prompt stdin stays open (claude waits). With a prompt it is sent and stdin closed, and the run is
+  # stopped only once the Bash-tool children the prompt asks for are visible.
+  check_stop() {
+    local label=$1 rid=$2 prompt=$3; shift 3
     local fifo; fifo="$(mktemp -u)"; mkfifo -m 0600 "$fifo"
     "$@" < "$fifo" > /dev/null 2>&1 &
     local bgp=$!
     exec 7> "$fifo"
-    sleep 5
+    if [ -n "$prompt" ]; then
+      printf '%s\n' "$prompt" >&7
+      exec 7>&-
+      local seen=0 i
+      for i in $(seq 1 180); do
+        if pgrep -u "$SU" -f 'sleep 30[01]' >/dev/null; then seen=1; break; fi
+        kill -0 "$bgp" 2>/dev/null || break
+        sleep 1
+      done
+      [ $seen -eq 1 ] && pass "$label: claude started detached Bash-tool children" \
+        || fail "$label: the probe never started its 'sleep 300/301' children (no Bash tool run?)"
+    else
+      sleep 5
+    fi
     echo "processes of $SU before stop-claude ($label):"; ps -o pid,pgid,sid,cmd -u "$SU" | sed 's/^/  | /'
     "$DFCTL" stop-claude "$SEAT" "$rid" | sed 's/^/  stop-claude: /'
     sleep 7
     echo "processes of $SU after stop-claude ($label):"; ps -o pid,pgid,sid,cmd -u "$SU" | sed 's/^/  | /'
-    if [ -z "$(survivors)" ]; then pass "$label: nothing of the run survives stop-claude"; else fail "$label: claude/script processes survived stop-claude"; fi
-    exec 7>&-
+    if [ -z "$(survivors)" ]; then
+      pass "$label: no process of $SU survives stop-claude"
+    else
+      fail "$label: processes of $SU survived stop-claude (see list above); killing them now"
+      pkill -KILL -u "$SU" || true
+    fi
+    exec 7>&- 2>/dev/null || true
     wait "$bgp" 2>/dev/null || true
     rm -f -- "$fifo"
   }
   rid="spike$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
-  check_stop "claude-auth login" "$rid" "$DFCTL" claude-auth "$SEAT" login --run-id "$rid"
+  check_stop "claude-auth login" "$rid" "" "$DFCTL" claude-auth "$SEAT" login --run-id "$rid"
 
   if [ -n "$WORKTREE" ]; then
     WT="$(realpath -e -- "$WORKTREE")" || die "worktree not found"
@@ -219,7 +242,13 @@ if [ -n "$SEAT" ]; then
     [ "$PROJ" != "$WT" ] || die "--worktree must be <project>/.devflow/worktrees/<name>"
     rid="spike$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
     # `claude -p` waits for the prompt on stdin, which stays open until after the stop.
-    check_stop "run-claude" "$rid" "$DFCTL" run-claude "$SEAT" "$WT" --run-id "$rid" -- -p --output-format stream-json --verbose
+    check_stop "run-claude" "$rid" "" "$DFCTL" run-claude "$SEAT" "$WT" --run-id "$rid" -- -p --output-format stream-json --verbose
+    # Probe: claude really runs its Bash tool and leaves detached children (setsid'd and nohup'd), the
+    # case a process-group kill can miss. Same flags DevFlow uses.
+    rid="spike$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+    check_stop "run-claude with Bash tool children" "$rid" \
+      "Use your Bash tool to run exactly this command and nothing else, then reply DONE: (setsid sleep 300 >/dev/null 2>&1 &) ; nohup sleep 301 >/dev/null 2>&1 &" \
+      "$DFCTL" run-claude "$SEAT" "$WT" --run-id "$rid" -- -p --output-format stream-json --verbose --permission-mode bypassPermissions
 
     echo; echo "== 9. seat git inside the worktree, and .git protections"
     SH="$(getent passwd "$SU" | cut -d: -f6)"

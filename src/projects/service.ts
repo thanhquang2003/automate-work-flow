@@ -30,7 +30,7 @@ export class NoopProjectSystemOps implements ProjectSystemOps {
 }
 
 export interface ProjectServiceDeps {
-  cfg: Pick<Config, 'projectRoots'>;
+  cfg: Pick<Config, 'projectRoots' | 'mode'>;
   repo: Repo;
   systemOps?: ProjectSystemOps;
   /** GitLab client for clone / new-with-GitLab modes. */
@@ -117,7 +117,7 @@ export class ProjectService {
       if (path.startsWith(`${o.path}/`) || o.path.startsWith(`${path}/`)) throw new ProjectError(`Thư mục lồng nhau với dự án ${o.key}: mỗi dự án phải có thư mục riêng.`);
     }
 
-    const git = new Git(path, { token: this.deps.gitlabToken ?? this.deps.gitlab?.token });
+    const git = new Git(path, { mode: this.deps.cfg.mode, token: this.deps.gitlabToken ?? this.deps.gitlab?.token });
     let defaultBranch: string;
     let gitlabProject = input.gitlabProject?.trim() || null;
 
@@ -142,7 +142,7 @@ export class ProjectService {
       const p = await this.deps.gitlab.getProject(gitlabProject);
       if (!p.default_branch) throw new ProjectError(`GitLab project "${gitlabProject}" là repo rỗng. Hãy dùng chế độ "mới".`);
       mkdirSync(join(path, '..'), { recursive: true });
-      await new Git(join(path, '..'), { token: this.deps.gitlabToken ?? this.deps.gitlab.token }).clone(p.http_url_to_repo, this.deps.gitlabToken ?? this.deps.gitlab.token, path);
+      await new Git(join(path, '..'), { mode: this.deps.cfg.mode, token: this.deps.gitlabToken ?? this.deps.gitlab.token }).clone(p.http_url_to_repo, this.deps.gitlabToken ?? this.deps.gitlab.token, path);
       defaultBranch = p.default_branch;
       gitlabProject = p.path_with_namespace;
     } else {
@@ -277,7 +277,7 @@ export class ProjectService {
       // devflow/<A>-<TASK> branches and worktrees of request A would collide with request <A>-<TASK>.
       if (lower.startsWith(`${o}-`) || o.startsWith(`${lower}-`)) throw new ProjectError(`Mã yêu cầu ${code} trùng tiền tố với ${r.code} (nhánh/worktree task sẽ đụng nhau).`);
     }
-    const git = new Git(project.path);
+    const git = new Git(project.path, { mode: this.deps.cfg.mode });
     const branch = `devflow/${code}`;
     if (!(await git.isValidBranchName(branch))) throw new ProjectError(`Mã yêu cầu ${code} không tạo được tên nhánh git hợp lệ.`);
     if (await git.branchExistsAnywhere(branch)) throw new ProjectError(`Đã có nhánh ${branch} trong repo; hãy chọn mã khác.`);

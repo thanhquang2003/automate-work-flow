@@ -96,7 +96,7 @@ async function intakeProject(ctx: StageContext): Promise<StageOutcome> {
     ctx.log(`Worktree đã có sẵn, dùng nhánh ${branch}`);
     return { kind: 'next' };
   }
-  const pg = new Git(project.path, { token: gitlabToken(ctx.gitlab) || ctx.cfg.gitlab.token || undefined });
+  const pg = new Git(project.path, { mode: ctx.cfg.mode, token: gitlabToken(ctx.gitlab) || ctx.cfg.gitlab.token || undefined });
   await pg.excludeLocal('.devflow/');
   if (await pg.hasRemote()) {
     try { await pg.fetch(); } catch (e) { ctx.log(`Không fetch được origin (${(e as Error).message}); dùng bản cục bộ.`, 'warn'); }

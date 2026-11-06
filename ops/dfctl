@@ -191,14 +191,39 @@ if [ -e .git ] || [ -L .git ]; then
     [ -z "$(find "$p" ! -user "$owner" -print -quit)" ] || fail "$p contains entries not owned by $owner"
     chmod -R g-w,o-rwx -- "$p" || fail "chmod $p"
   done
-  if [ -e .git/worktrees ] || [ -L .git/worktrees ]; then
-    [ -d .git/worktrees ] && [ ! -L .git/worktrees ] || fail ".git/worktrees is not a directory"
+  # No symlinks anywhere under .git (packs or alternates pointing at another project, swapped files).
+  find .git -type l -exec rm -f -- {} + 2>/dev/null || true
+  [ -z "$(find .git -type l -print -quit)" ] || fail "symlinks under .git could not be removed"
+  if [ -e .git/objects ]; then
+    [ -d .git/objects ] && [ "$(stat -c %U .git/objects)" = "$owner" ] || fail ".git/objects is not a directory owned by $owner"
+    # Seats add loose objects in group-writable objects/xx folders; they cannot rename or replace pack/ or
+    # info/ (sticky), and objects/info (alternates) is owner-only.
+    chmod 3770 .git/objects || fail "chmod .git/objects"
+    if [ -e .git/objects/info ]; then
+      [ -d .git/objects/info ] || fail ".git/objects/info is not a directory"
+      [ -z "$(find .git/objects/info ! -user "$owner" -print -quit)" ] || fail ".git/objects/info contains entries not owned by $owner"
+    else
+      mkdir .git/objects/info || fail "mkdir .git/objects/info"
+    fi
+    chmod -R g-w,o-rwx .git/objects/info || fail "chmod .git/objects/info"
+  fi
+  if [ -e .git/worktrees ]; then
+    [ -d .git/worktrees ] || fail ".git/worktrees is not a directory"
     chmod 3770 .git/worktrees || fail "chmod .git/worktrees"
+    # A seat cannot create submodule git dirs in its worktree git dir: modules/ is pre-created owner-only.
+    for w in .git/worktrees/*; do
+      [ -d "$w" ] || continue
+      [ -e "$w/modules" ] || mkdir -m 2750 "$w/modules" || fail "mkdir $w/modules"
+    done
   fi
-  if [ -d .git/modules ]; then
-    [ -z "$(find .git/modules \( -name config -o -name hooks -o -name info \) ! -user "$owner" -print -quit)" ] || fail "submodule git files not owned by $owner"
-    find .git/modules \( -name config -o -name hooks -o -name info \) -prune -exec chmod -R g-w,o-rwx {} + || fail "chmod .git/modules"
-  fi
+  # Submodule git dirs (.git/modules, .git/worktrees/<n>/modules) at every level: owned by the owner and not
+  # group-writable, so seats can neither edit their config/hooks/info nor rename anything in them.
+  for m in .git/modules .git/worktrees/*/modules; do
+    [ -e "$m" ] || continue
+    [ -d "$m" ] || fail "$m is not a directory"
+    [ -z "$(find "$m" ! -user "$owner" -print -quit)" ] || fail "$m contains entries not owned by $owner"
+    chmod -R g-w,o-rwx -- "$m" || fail "chmod $m"
+  done
 fi
 exit 0
 '
@@ -330,6 +355,8 @@ run_tracked_in() {
   [ -e "$TRACK_STOPF" ] && kill_group "$child"
   local rc=0
   wait "$child" || rc=$?
+  # Leftovers of the run (detached children in its systemd scope) are stopped too.
+  if [ -n "$TRACK_AFTER" ]; then $TRACK_AFTER || true; fi
   exit "$rc"
 }
 
@@ -353,7 +380,38 @@ stop_in() {
   echo "stopped"
 }
 
-run_tracked() { prepare_run_dir; run_tracked_in "$RUN_DIR" "$@"; }
+# Every tracked run also gets its own transient systemd scope (cgroup) when systemd is running, so children
+# that leave the process group (setsid, daemonised tool processes) are still found and killed: by
+# stop-claude, and when the run ends normally (no stray processes outlive a run).
+SCOPE_CMD=()
+scope_unit() { printf 'dfctl-%s-%s.scope\n' "$1" "$2"; }
+build_scope_cmd() {
+  SCOPE_CMD=(systemd-run --scope --quiet --collect "--unit=$(scope_unit "$1" "$2")" --)
+}
+have_systemd() { [ -d /run/systemd/system ] && command -v systemd-run >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; }
+stop_scope() {
+  local unit; unit=$(scope_unit "$1" "$2")
+  systemctl kill --signal=TERM -- "$unit" >/dev/null 2>&1 || return 0
+  local i
+  for ((i = 0; i < STOP_GRACE * 10; i++)); do
+    systemctl is-active --quiet -- "$unit" 2>/dev/null || return 0
+    sleep 0.1
+  done
+  systemctl kill --signal=KILL -- "$unit" >/dev/null 2>&1 || true
+}
+
+TRACK_AFTER=""
+run_tracked() {
+  local uid=$1 rid=$2 max=$3; shift 3
+  prepare_run_dir
+  if have_systemd; then
+    build_scope_cmd "$uid" "$rid"
+    TRACK_AFTER="stop_scope $uid $rid"
+    run_tracked_in "$RUN_DIR" "$uid" "$rid" "$max" "${SCOPE_CMD[@]}" "$@"
+  else
+    run_tracked_in "$RUN_DIR" "$uid" "$rid" "$max" "$@"
+  fi
+}
 
 # ---------------------------------------------------------------- subcommands
 
@@ -479,6 +537,7 @@ cmd_claude_auth() {
 cmd_stop_claude() {
   prepare_run_dir
   stop_in "$RUN_DIR" "$1" "$2" 0
+  if have_systemd; then stop_scope "$1" "$2"; fi
 }
 
 # ---------------------------------------------------------------- self-test
@@ -595,6 +654,8 @@ self_test() {
   local n_c=${#C[@]}
   ok "claude binary then args verbatim" test "${C[n_c-4]}|${C[n_c-3]}|${C[n_c-2]}|${C[n_c-1]}" = "/usr/local/bin/claude|-p|; rm -rf /|\$(id)"
   ok "EXTRA_ENV reset after building" test ${#EXTRA_ENV[@]} -eq 0
+  build_scope_cmd 7 abcdef12
+  ok "systemd scope per run" test "${SCOPE_CMD[*]}" = "systemd-run --scope --quiet --collect --unit=dfctl-7-abcdef12.scope --"
 
   echo "# tracked runs and stop marker"
   local tdir me rc pid="" st="" i t0 bg mode
@@ -654,6 +715,24 @@ self_test() {
     ok ".git/worktrees group-writable and sticky" eval 'gw "$hp/proj/.git/worktrees" && sticky "$hp/proj/.git/worktrees"'
     ok "project folder sticky" sticky "$hp/proj"
     ok ".devflow/worktrees sticky" sticky "$hp/proj/.devflow/worktrees"
+    mkdir -p "$hp/proj/.git/modules/sub/hooks" "$hp/proj/.git/modules/sub/info" "$hp/proj/.git/modules/sub/modules/inner" \
+      "$hp/proj/.git/worktrees/R2" "$hp/proj/.git/worktrees/R3/modules/sub" "$hp/proj/.git/objects/pack"
+    : > "$hp/proj/.git/modules/sub/config"; : > "$hp/proj/.git/modules/sub/modules/inner/config"
+    : > "$hp/proj/.git/worktrees/R3/modules/sub/config"; : > "$hp/proj/.git/objects/info/alternates"
+    ln -s /etc/hostname "$hp/proj/.git/objects/pack/pack-evil.pack"
+    ln -s "$hp/elsewhere" "$hp/proj/.git/worktrees/R3/commondir"
+    chmod -R g+w "$hp/proj/.git"
+    ok "pass with submodules, alternates and planted symlinks" quiet bash -c "$HARDEN_SCRIPT" harden "$hp/proj" "$(id -un)" 1 "$(id -gn)"
+    for p in modules modules/sub modules/sub/config modules/sub/hooks modules/sub/info modules/sub/modules/inner \
+      modules/sub/modules/inner/config worktrees/R3/modules worktrees/R3/modules/sub worktrees/R3/modules/sub/config \
+      worktrees/R2/modules objects/info objects/info/alternates; do
+      no ".git/$p not group-writable" gw "$hp/proj/.git/$p"
+    done
+    ok ".git/objects sticky" sticky "$hp/proj/.git/objects"
+    ok ".git/objects/pack stays group-writable" gw "$hp/proj/.git/objects/pack"
+    ok "symlinked pack removed" test ! -L "$hp/proj/.git/objects/pack/pack-evil.pack"
+    ok "symlinked commondir removed" test ! -L "$hp/proj/.git/worktrees/R3/commondir"
+    ok "modules pre-created owner-only in a worktree git dir" test -d "$hp/proj/.git/worktrees/R2/modules"
     chmod g+w "$hp/proj/.git/config"
     ok "a later (non-full) pass strips g+w again" quiet bash -c "$HARDEN_SCRIPT" harden "$hp/proj" "$(id -un)" 0 -
     no "config fixed by the later pass" gw "$hp/proj/.git/config"

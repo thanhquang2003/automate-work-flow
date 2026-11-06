@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 
 export interface GitOpts {
+  /** DEVFLOW_MODE of the caller (Config.mode). Default 'server', the safe side. */
+  mode?: GitMode;
   protectedBranch?: string;
   token?: string;
   authorName?: string;
@@ -11,13 +13,25 @@ export interface GitOpts {
 }
 
 /**
- * Prepended to every git command DevFlow runs: repository hooks and fsmonitor never execute. Project folders
- * are shared with seat users (v3), so nothing in a repository may make DevFlow's git run code.
+ * Prepended to every git command DevFlow runs, in both modes: git never recurses into submodules or nested
+ * repositories (a seat can stage a gitlink to a repo whose own config defines filters/commands).
  */
-export const GIT_SAFETY_ARGS: readonly string[] = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
+export const GIT_SUBMODULE_ARGS: readonly string[] = [
+  '-c', 'diff.ignoreSubmodules=all', '-c', 'submodule.recurse=false', '-c', 'fetch.recurseSubmodules=false',
+  '-c', 'push.recurseSubmodules=no', '-c', 'status.submoduleSummary=false',
+];
+/**
+ * Server mode only (seat trust boundary): repository hooks and fsmonitor never execute. Local mode keeps the
+ * user's own hooks (git-lfs pre-push etc.), as in v2.
+ */
+export const GIT_SERVER_ARGS: readonly string[] = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
 
-/** Full argv for one git invocation. */
-export function gitArgv(args: string[]): string[] { return [...GIT_SAFETY_ARGS, ...args]; }
+export type GitMode = 'local' | 'server';
+
+/** Full argv for one git invocation in `mode`. */
+export function gitArgv(args: string[], mode: GitMode): string[] {
+  return mode === 'server' ? [...GIT_SUBMODULE_ARGS, ...GIT_SERVER_ARGS, ...args] : [...GIT_SUBMODULE_ARGS, ...args];
+}
 
 /** A v3 request/task worktree: `<project>/.devflow/worktrees/<name>`. */
 const WORKTREE_RE = /^(.*)[\\/]\.devflow[\\/]worktrees[\\/]([^\\/]+)$/;
@@ -30,7 +44,11 @@ const DEFAULT_EMAIL = 'devflow@localhost';
 
 /** Thin wrapper over the git CLI (execFile, no shell). The token is only ever sent via a per-command -c header. */
 export class Git {
-  constructor(private cwd: string, private opts: GitOpts = {}) {}
+  readonly mode: GitMode;
+
+  constructor(private cwd: string, private opts: GitOpts = {}) {
+    this.mode = opts.mode ?? 'server';
+  }
 
   /** Token goes via env (not argv, so it is not visible in process listings). */
   private authEnv(token?: string): Record<string, string> {
@@ -109,7 +127,7 @@ export class Git {
     const cwd = o.cwd ?? this.cwd;
     const pin = o.cwd ? undefined : await this.worktreePin(cwd);
     const res = await new Promise<{ code: number; stdout: string }>((resolve, reject) => {
-      execFile('git', gitArgv(args), {
+      execFile('git', gitArgv(args, this.mode), {
         cwd, windowsHide: true, maxBuffer: 64 * 1024 * 1024,
         env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...pin?.env, ...o.env },
       }, (err, stdout, stderr) => {
@@ -120,7 +138,7 @@ export class Git {
         reject(new Error(`git ${safe(args.join(' '))} failed: ${safe(String(stderr || err.message)).trim()}`));
       });
     }).finally(async () => {
-      await Git.hardenConfig(pin?.commonDir ?? (o.cwd ? undefined : await this.commonDirOf(cwd)));
+      if (this.mode === 'server') await Git.hardenConfig(pin?.commonDir ?? (o.cwd ? undefined : await this.commonDirOf(cwd)));
     });
     return res;
   }
@@ -131,7 +149,7 @@ export class Git {
 
   async clone(url: string, token: string, dir: string): Promise<void> {
     await this.exec(['clone', '--', url, dir], { cwd: process.cwd(), env: this.authEnv(token || undefined) });
-    await Git.hardenConfig(await this.commonDirOf(resolve(process.cwd(), dir)));
+    if (this.mode === 'server') await Git.hardenConfig(await this.commonDirOf(resolve(process.cwd(), dir)));
   }
 
   /** `git init` in the working directory with the given initial branch. */
@@ -147,6 +165,22 @@ export class Git {
     else await this.run(['checkout', branch]);
   }
 
+  /**
+   * Pathspecs excluding every gitlink (submodule / nested repository) in the index. `git add -A` and
+   * `git stash -u` ignore diff.ignoreSubmodules and run `git status` inside such a repository, which would
+   * apply that repository's own (seat-controlled) filters as DevFlow. DevFlow therefore never stages gitlinks.
+   */
+  private async gitlinkExcludes(): Promise<string[]> {
+    const out = await this.run(['ls-files', '--stage', '-z']);
+    const res: string[] = [];
+    for (const entry of out.split('\0')) {
+      if (!entry.startsWith('160000 ')) continue;
+      const tab = entry.indexOf('\t');
+      if (tab > 0) res.push(`:(top,exclude,literal)${entry.slice(tab + 1)}`);
+    }
+    return res;
+  }
+
   private async identityArgs(): Promise<string[]> {
     const name = this.opts.authorName ?? ((await this.exec(['config', 'user.name'], { allowFail: true })).stdout.trim() || DEFAULT_NAME);
     const email = this.opts.authorEmail ?? ((await this.exec(['config', 'user.email'], { allowFail: true })).stdout.trim() || DEFAULT_EMAIL);
@@ -158,7 +192,7 @@ export class Git {
    * Claude ran) is unstaged again so it never lands in the commit. Returns false when nothing is staged.
    */
   async commitAll(msg: string, exclude: string[] = []): Promise<boolean> {
-    await this.run(['add', '-A']);
+    await this.run(['add', '-A', '--', ':(top)', ...(await this.gitlinkExcludes())]);
     if (exclude.length) {
       // Via a pathspec file: the list can be long (argv limits on Windows).
       const dir = await mkdtemp(join(tmpdir(), 'devflow-git-'));
@@ -182,7 +216,7 @@ export class Git {
    */
   async stashAll(msg: string): Promise<boolean> {
     if (!(await this.run(['status', '--porcelain'])).trim()) return false;
-    await this.run([...(await this.identityArgs()), 'stash', 'push', '-u', '-m', msg]);
+    await this.run([...(await this.identityArgs()), 'stash', 'push', '-u', '-m', msg, '--', ':(top)', ...(await this.gitlinkExcludes())]);
     return true;
   }
 
@@ -242,7 +276,7 @@ export class Git {
   async commitPaths(paths: string[], msg: string): Promise<boolean> {
     if (!paths.length) return false;
     for (const p of paths) if (!p || p.startsWith('-')) throw new Error(`Invalid path: ${JSON.stringify(p)}`);
-    await this.run(['add', '-A', '--', ...paths]);
+    await this.run(['add', '-A', '--', ...paths, ...(await this.gitlinkExcludes())]);
     const staged = await this.exec(['diff', '--cached', '--quiet', '--', ...paths], { allowFail: true });
     if (staged.code === 0) return false;
     await this.run([...(await this.identityArgs()), 'commit', '-m', msg, '--', ...paths]);
@@ -356,7 +390,7 @@ export class Git {
     if (cur.split(/\r?\n/).some(l => l.trim() === entry)) return;
     await mkdir(dirname(file), { recursive: true });
     await appendFile(file, `${cur && !cur.endsWith('\n') ? '\n' : ''}${entry}\n`, 'utf8');
-    await Git.hardenConfig(dirname(dirname(file)));
+    if (this.mode === 'server') await Git.hardenConfig(dirname(dirname(file)));
   }
 
   async hasRemote(): Promise<boolean> {
