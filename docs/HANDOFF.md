@@ -36,3 +36,7 @@
 - Có một `git stash` cũ ("npm audit fix --force …") — có thể xóa bằng `git stash drop`.
 - Thư mục gốc `D:\source\automationWorkFlow` chứa bộ khung `/lah` cá nhân của chủ dự án — không liên quan DevFlow, không sửa.
 - Mẫu tài liệu công ty gốc: `D:\source\automationWorkFlow\templates\` (bản copy trong `devflow/templates/default/`).
+
+## 7. Tiến độ v3 (cập nhật theo từng task)
+Kế hoạch: `docs/superpowers/plans/2026-11-07-v3-implementation.md` (Task N = FEAT-00N trong `lah status`). Không push/PR; chủ dự án push.
+- FEAT-002 (Task 2: quyền hạn và Google SSO) xong — commit 79a82c3, 6aba3ed.

@@ -35,12 +35,12 @@
         "staff:sign in with company Google email"
       ],
       "complexity": "large",
-      "status": "in-progress",
+      "status": "done",
       "layer": "Full-stack",
       "dependencies": [
         "FEAT-001"
       ],
-      "evidence": null,
+      "evidence": "commits 79a82c3,6aba3ed on feat/v3-multiuser; gate green (339 tests); task review + scoped re-review clean",
       "created": "2026-11-05",
       "updated": "2026-11-06"
     },
