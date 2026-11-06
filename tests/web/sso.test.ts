@@ -21,7 +21,7 @@ const ENV = {
 async function boot(env: Record<string, string> = {}, claims: Partial<OidcClaims> = {}) {
   const cfg = loadConfig({ ...ENV, ...env });
   const repo = new Repo(openDb(':memory:'));
-  const pipeline = new Pipeline(cfg, repo, { makeGit: (_r, ws) => new Git(ws.repoDir) });
+  const pipeline = new Pipeline(cfg, repo, { makeGit: (_r, ws) => new Git(ws.repoDir), allowLocalSeatsInServerMode: true });
   const current: { claims: OidcClaims } = { claims: { sub: 's1', email: 'u@corp.com', emailVerified: true, name: 'U', ...claims } };
   const seen: { state?: string; nonce?: string } = {};
   const oidc: OidcClient = {

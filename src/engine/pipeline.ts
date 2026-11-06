@@ -124,6 +124,8 @@ export interface PipelineDeps {
   members?: { setMembers(projectId: number, members: { userId: number; roles: ProjectRole[] }[], byId: number): Promise<void> };
   /** Re-check interval of a job waiting for a seat (default 10 min). */
   seatRecheckMs?: number;
+  /** Tests only: allow the LocalSeatRunner with DEVFLOW_MODE=server (otherwise the constructor throws). */
+  allowLocalSeatsInServerMode?: boolean;
 }
 
 /** Payload of run_stage / run_task jobs. */
@@ -237,6 +239,10 @@ export class Pipeline {
 
   constructor(private cfg: Config, private repo: Repo, private deps: PipelineDeps = {}) {
     this.seatRunner = deps.seatRunner ?? new LocalSeatRunner(cfg);
+    // Never fall back silently to the service account's Claude in server mode.
+    if (cfg.mode === 'server' && this.seatRunner.kind === 'local' && !deps.allowLocalSeatsInServerMode) {
+      throw new Error('Server mode needs the seat runner (createSeatRunner): Claude must run on each person\'s seat, not as the DevFlow service account');
+    }
     this.limiter = new SeatLimiter(() => this.cfg.seatConcurrency ?? 1);
   }
 
@@ -752,7 +758,15 @@ export class Pipeline {
     if (req0.status === 'cancelled') { this.repo.failJob(job.id, 'cancelled'); return; }
     if (stale()) { this.repo.failJob(job.id, 'superseded'); return; }
     const blocked = req0.projectId != null ? this.blockedProjects.get(req0.projectId) : undefined;
-    if (blocked) { this.repo.failJob(job.id, `Dự án đang bị dừng: ${blocked}`); return; }
+    if (blocked) {
+      // A rerun / resume while the project is stopped: never leave the request `running` without a job.
+      this.repo.failJob(job.id, `Dự án đang bị dừng: ${blocked}`);
+      if (req0.status !== 'done' && req0.status !== 'needs_human') {
+        this.log(reqId, 'error', `Dự án đang bị dừng sau khi kiểm tra an toàn (dfctl sweep) thất bại — admin cần kiểm tra: ${blocked}`);
+        this.setStatus(reqId, isTask ? req0.stage : stage, 'needs_human');
+      }
+      return;
+    }
     const kind: LiveJob['kind'] = isTask ? 'task' : this.isDispatcher(req0, stage) ? 'dispatch' : 'stage';
     // An interrupted handler (submitChange) may still be unwinding: never run two stages of one request at once
     // (task jobs of one request run in parallel). Gives up after STAGE_TIMEOUT_MIN (no limit when 0).
@@ -1162,6 +1176,11 @@ export class Pipeline {
           prompt,
           ...extra,
         });
+      } catch (e) {
+        // The run may have touched the worktree before failing: sweep before any retry or git on it. A failed
+        // sweep surfaces as SeatSweepError (hard stop) instead of the original error.
+        if (multi && req.projectId != null && !(e instanceof SeatSweepError)) await this.seatRunner.sweepProject(req.projectId, cwd);
+        throw e;
       } finally {
         live.call = undefined;
         release?.();

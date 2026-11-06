@@ -12,7 +12,7 @@ import { Git } from '../../src/gitlab/git.js';
 export function setup(over: Partial<Config> = {}, nowFn?: () => number) {
   const cfg: Config = { ...loadConfig({ DEVFLOW_MODE: 'local', CLAUDE_MOCK: '1' }), dataDir: mkdtempSync(join(tmpdir(), 'devflow-eng-')), ...over };
   const repo = new Repo(openDb(':memory:'));
-  const pipeline = new Pipeline(cfg, repo, { makeGit: (_r, ws) => new Git(ws.repoDir), ...(nowFn ? { now: nowFn } : {}) });
+  const pipeline = new Pipeline(cfg, repo, { makeGit: (_r, ws) => new Git(ws.repoDir), allowLocalSeatsInServerMode: true, ...(nowFn ? { now: nowFn } : {}) });
   const worker = new Worker(cfg, repo, pipeline);
   return { cfg, repo, pipeline, worker };
 }

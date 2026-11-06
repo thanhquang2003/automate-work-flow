@@ -135,7 +135,7 @@ async function boot(impacts: Impacts, server = false) {
   git(seed, 'push', '-q', bare, 'main');
   const gl = fakeGitLab(bare);
   const repo = new Repo(openDb(':memory:'));
-  const pipeline = new Pipeline(cfg, repo, { makeGitLab: () => gl.client });
+  const pipeline = new Pipeline(cfg, repo, { makeGitLab: () => gl.client, allowLocalSeatsInServerMode: true });
   clearStages();
   registerAllStages();
   const worker = new Worker(cfg, repo, pipeline);

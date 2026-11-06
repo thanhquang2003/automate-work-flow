@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { Workspace } from '../../src/engine/workspace.js';
 import { resolveSeat } from '../../src/engine/seats.js';
+import { Pipeline } from '../../src/engine/pipeline.js';
 import { git } from '../projects/helpers.js';
 import { blockingRun, registerStubs, until, v3Env } from './v3-helpers.js';
 
@@ -225,5 +226,39 @@ describe('v3 seats', () => {
     expect(t.pipeline.seatReconnected(t.se.id)).toBe(1);
     await t.worker.drain();
     expect(t.repo.getRequest(r.id)).toMatchObject({ stage: 'CODEBASE_SCAN', status: 'awaiting_approval' });
+  });
+
+  it('server mode refuses the local seat runner unless a test opts in', async () => {
+    const t = await v3Env();
+    const cfg = { ...t.cfg, mode: 'server' as const };
+    expect(() => new Pipeline(cfg, t.repo)).toThrow(/server/i);
+    expect(() => new Pipeline(cfg, t.repo, { allowLocalSeatsInServerMode: true })).not.toThrow();
+    expect(() => new Pipeline(cfg, t.repo, { seatRunner: t.seats.runner })).not.toThrow();
+  });
+
+  it('a rerun while the project is blocked after a failed sweep goes to needs_human, not running without a job', async () => {
+    const t = await v3Env();
+    const r = await t.request('ERP-001');
+    t.seats.failSweeps();
+    t.pipeline.start(r.id);
+    await t.worker.drain();
+    expect(t.repo.getRequest(r.id)!.status).toBe('needs_human');
+    t.pipeline.rerunStage(r.id, 'CODEBASE_SCAN');
+    await t.worker.drain();
+    expect(t.repo.getRequest(r.id)).toMatchObject({ stage: 'CODEBASE_SCAN', status: 'needs_human' });
+    expect(t.repo.listEvents(r.id).at(-1)!.message).toMatch(/dừng/);
+  });
+
+  it('a seat run that throws (not a sweep failure) is still swept before the retry', async () => {
+    const t = await v3Env();
+    const r = await t.request('ERP-001');
+    let n = 0;
+    t.seats.setBehave(() => { if (n++ === 0) throw new Error('sudo exploded'); return { ok: true, resultText: 'ok' }; });
+    t.pipeline.start(r.id);
+    await t.worker.drain();
+    const ws = Workspace.forRequest(t.cfg, t.repo, r);
+    expect(t.repo.getRequest(r.id)).toMatchObject({ stage: 'CODEBASE_SCAN', status: 'awaiting_approval' });
+    // One sweep after the failed run (before the retry), one after the successful run.
+    expect(t.seats.sweeps).toEqual([[t.p.id, ws.repoDir], [t.p.id, ws.repoDir]]);
   });
 });
