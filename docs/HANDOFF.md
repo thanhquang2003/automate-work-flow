@@ -43,3 +43,4 @@ Kế hoạch: `docs/superpowers/plans/2026-11-07-v3-implementation.md` (Task N =
 - FEAT-003 (Task 3: dự án, thành viên, workspace theo thư mục) xong — commit 5cd4e67.
 - FEAT-004 (Task 4: dfctl, SeatRunner, đăng nhập seat) xong — commits ad52b31..ae3b62b. CẦN kiểm chứng trên VPS: chạy 'sudo scripts/spike-claude-login.sh' (bước 8, 9) trước khi bật seat; xem rủi ro còn lại trong báo cáo Task 4.
 - FEAT-005 (Task 5: engine seat, duyệt theo vai, worktree song song) xong — commits 27994b2..6d98b8b.
+- FEAT-006 (Task 6: web dự án, hộp việc, phân công, seat, quản trị) xong — commits cf31ea5..4e49bb4.

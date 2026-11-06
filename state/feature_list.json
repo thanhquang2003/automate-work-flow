@@ -105,13 +105,13 @@
         "PM:manage projects members and assignments in the web UI"
       ],
       "complexity": "large",
-      "status": "in-progress",
+      "status": "done",
       "layer": "Full-stack",
       "dependencies": [
         "FEAT-003",
         "FEAT-005"
       ],
-      "evidence": null,
+      "evidence": "commits cf31ea5,dfb0262,bff6cca,0aea534,82263a1,143fb4d,4e49bb4 on feat/v3-multiuser; 531/532 tests (1 e2e hardcoded-55s timeout under load, also fails on pre-Task-6 commit 0a8d092); task review + 1 fix round + scoped re-review clean",
       "created": "2026-11-05",
       "updated": "2026-11-06"
     },
