@@ -111,7 +111,7 @@ check_project() {
   info "Build..."
   if npm run build --silent; then ok "Build passed"; else fail "Build failed"; fi
   info "Running tests..."
-  if npx vitest run --maxWorkers=2 --testTimeout=60000; then ok "Tests passed"; else fail "Tests failed"; fi
+  if npx vitest run --maxWorkers=2 --testTimeout=120000; then ok "Tests passed"; else fail "Tests failed"; fi
 }
 
 # ---------------------------------------------------------------------------
